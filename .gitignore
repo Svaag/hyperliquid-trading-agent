@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtualenvs
+.venv/
+venv/
+
+# Local env/secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data
+*.db
+*.sqlite*
+logs/
+data/
+
+# Docker
+.docker/
+
+# Editors
+.idea/
+.vscode/
+*.swp
