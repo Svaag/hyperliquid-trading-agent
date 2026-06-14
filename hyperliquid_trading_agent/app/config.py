@@ -6,7 +6,21 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-DEFAULT_MODEL_CHAIN = "openrouter:anthropic/claude-sonnet-4.6,openrouter:deepseek/deepseek-v4-pro"
+DEFAULT_MODEL_CHAIN = "openrouter:openai/gpt-oss-120b:free,openrouter:openai/gpt-oss-20b:free,openrouter:liquid/lfm-2.5-1.2b-instruct:free,openrouter:nvidia/nemotron-3-nano-30b-a3b:free"
+ROLE_ORDER = ["analyst", "quant", "research", "risk", "treasury", "execution", "adversary", "judge"]
+DEFAULT_DEBATE_ROLE_MODEL_CHAINS = {
+    # Development/free defaults intentionally use different primary models so
+    # adversarial review is not one model grading its own work. In production,
+    # set DEBATE_JUDGE_MODEL_CHAIN to the strongest available frontier/main model.
+    "analyst": "openrouter:qwen/qwen3-next-80b-a3b-instruct:free,openrouter:openai/gpt-oss-120b:free,openrouter:nex-agi/nex-n2-pro:free",
+    "quant": "openrouter:nvidia/nemotron-3-nano-30b-a3b:free,openrouter:openai/gpt-oss-20b:free,openrouter:nex-agi/nex-n2-pro:free",
+    "research": "openrouter:google/gemma-4-26b-a4b-it:free,openrouter:openai/gpt-oss-20b:free,openrouter:nex-agi/nex-n2-pro:free",
+    "risk": "openrouter:openai/gpt-oss-20b:free,openrouter:nvidia/nemotron-3-nano-30b-a3b:free,openrouter:nex-agi/nex-n2-pro:free",
+    "treasury": "openrouter:liquid/lfm-2.5-1.2b-instruct:free,openrouter:openai/gpt-oss-20b:free,openrouter:nex-agi/nex-n2-pro:free",
+    "execution": "openrouter:nex-agi/nex-n2-pro:free,openrouter:liquid/lfm-2.5-1.2b-instruct:free,openrouter:openai/gpt-oss-20b:free",
+    "adversary": "openrouter:meta-llama/llama-3.3-70b-instruct:free,openrouter:openai/gpt-oss-120b:free,openrouter:nex-agi/nex-n2-pro:free",
+    "judge": "openrouter:openai/gpt-oss-120b:free,openrouter:openai/gpt-oss-20b:free,openrouter:nex-agi/nex-n2-pro:free",
+}
 DEFAULT_RSS_FEEDS = (
     "https://www.coindesk.com/arc/outboundfeeds/rss/"
     ",https://cointelegraph.com/rss"
@@ -73,18 +87,19 @@ class Settings(BaseSettings):
     high_stakes_max_coins: int = 3
     high_stakes_max_data_escalations: int = 1
     high_stakes_require_account_for_autonomous: bool = False
+    debate_model_diversity_policy: Literal["off", "warn", "strict"] = "warn"
     account_address_allowlist: str = ""
     high_stakes_smart_money_addresses: str = ""
     agent_api_bearer_token: str = ""
 
-    debate_analyst_model_chain: str = ""
-    debate_quant_model_chain: str = ""
-    debate_research_model_chain: str = ""
-    debate_adversary_model_chain: str = ""
-    debate_risk_model_chain: str = ""
-    debate_treasury_model_chain: str = ""
-    debate_execution_model_chain: str = ""
-    debate_judge_model_chain: str = ""
+    debate_analyst_model_chain: str = DEFAULT_DEBATE_ROLE_MODEL_CHAINS["analyst"]
+    debate_quant_model_chain: str = DEFAULT_DEBATE_ROLE_MODEL_CHAINS["quant"]
+    debate_research_model_chain: str = DEFAULT_DEBATE_ROLE_MODEL_CHAINS["research"]
+    debate_adversary_model_chain: str = DEFAULT_DEBATE_ROLE_MODEL_CHAINS["adversary"]
+    debate_risk_model_chain: str = DEFAULT_DEBATE_ROLE_MODEL_CHAINS["risk"]
+    debate_treasury_model_chain: str = DEFAULT_DEBATE_ROLE_MODEL_CHAINS["treasury"]
+    debate_execution_model_chain: str = DEFAULT_DEBATE_ROLE_MODEL_CHAINS["execution"]
+    debate_judge_model_chain: str = DEFAULT_DEBATE_ROLE_MODEL_CHAINS["judge"]
 
     cache_ttl_market_seconds: int = 15
     cache_ttl_news_seconds: int = 600
@@ -146,26 +161,77 @@ class Settings(BaseSettings):
         return [address.lower() for address in _csv(self.high_stakes_smart_money_addresses)]
 
     def role_model_chain(self, role: str) -> list[str]:
-        role_key = role.lower().strip().replace("-", "_")
+        role_key = _canonical_role(role)
         configured = {
             "analyst": self.debate_analyst_model_chain,
-            "proposer": self.debate_analyst_model_chain,
             "quant": self.debate_quant_model_chain,
             "research": self.debate_research_model_chain,
             "adversary": self.debate_adversary_model_chain,
-            "red_team": self.debate_adversary_model_chain,
             "risk": self.debate_risk_model_chain,
-            "risk_manager": self.debate_risk_model_chain,
             "treasury": self.debate_treasury_model_chain,
             "execution": self.debate_execution_model_chain,
-            "execution_strategist": self.debate_execution_model_chain,
             "judge": self.debate_judge_model_chain,
         }.get(role_key, "")
-        return _csv(configured) or self.model_chain
+        default = DEFAULT_DEBATE_ROLE_MODEL_CHAINS.get(role_key, "")
+        return _csv(configured) or _csv(default) or self.model_chain
 
     @property
     def debate_role_names(self) -> list[str]:
-        return ["analyst", "quant", "research", "adversary", "risk", "treasury", "execution", "judge"]
+        return list(ROLE_ORDER)
+
+    @property
+    def debate_role_primary_models(self) -> dict[str, str | None]:
+        return {role: (self.role_model_chain(role)[0] if self.role_model_chain(role) else None) for role in self.debate_role_names}
+
+    def debate_model_contract(self) -> dict[str, object]:
+        primary = self.debate_role_primary_models
+        duplicates = _duplicate_primary_models(primary)
+        judge_model = primary.get("judge")
+        reviewer_roles = [role for role in self.debate_role_names if role != "judge"]
+        judge_overlap = [role for role in reviewer_roles if primary.get(role) == judge_model and judge_model]
+        homework_pairs = []
+        if primary.get("analyst") and primary.get("adversary") == primary.get("analyst"):
+            homework_pairs.append("analyst/adversary")
+        if primary.get("quant") and primary.get("risk") == primary.get("quant"):
+            homework_pairs.append("quant/risk")
+        warnings: list[str] = []
+        if duplicates:
+            warnings.append("duplicate primary models across roles")
+        if judge_overlap:
+            warnings.append("judge primary model overlaps with reviewer roles")
+        if homework_pairs:
+            warnings.append("adversarial reviewer primary overlaps with reviewed role")
+        ok = not warnings
+        status = "ok" if ok else "violation" if self.debate_model_diversity_policy == "strict" else "warning"
+        return {
+            "policy": self.debate_model_diversity_policy,
+            "status": status,
+            "primary_by_role": primary,
+            "duplicate_primary_models": duplicates,
+            "judge_primary_model": judge_model,
+            "judge_primary_overlaps_roles": judge_overlap,
+            "homework_overlap_pairs": homework_pairs,
+            "warnings": warnings,
+            "production_guidance": "Use a distinct strongest/frontier model for DEBATE_JUDGE_MODEL_CHAIN; keep analyst/quant/risk/adversary on different primary model families.",
+        }
+
+
+def _canonical_role(role: str) -> str:
+    role_key = role.lower().strip().replace("-", "_")
+    return {
+        "proposer": "analyst",
+        "red_team": "adversary",
+        "risk_manager": "risk",
+        "execution_strategist": "execution",
+    }.get(role_key, role_key)
+
+
+def _duplicate_primary_models(primary: dict[str, str | None]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for role, model in primary.items():
+        if model:
+            grouped.setdefault(model, []).append(role)
+    return {model: roles for model, roles in grouped.items() if len(roles) > 1}
 
 
 def _csv(value: str) -> list[str]:

@@ -79,6 +79,32 @@ class FakeCompletion:
         self.choices = [FakeChoice(content)]
 
 
+def test_debate_model_contract_reports_role_diversity():
+    settings = Settings()
+    contract = settings.debate_model_contract()
+    primary = contract["primary_by_role"]
+
+    assert contract["status"] == "ok"
+    assert primary["judge"] != primary["analyst"]
+    assert primary["adversary"] != primary["analyst"]
+    assert primary["risk"] != primary["quant"]
+
+
+def test_debate_model_contract_warns_on_duplicate_primary_models():
+    settings = Settings(
+        debate_analyst_model_chain="openrouter:same/free",
+        debate_quant_model_chain="openrouter:same/free",
+        debate_risk_model_chain="openrouter:same/free",
+        debate_adversary_model_chain="openrouter:same/free",
+        debate_judge_model_chain="openrouter:same/free",
+    )
+    contract = settings.debate_model_contract()
+
+    assert contract["status"] == "warning"
+    assert "duplicate primary models across roles" in contract["warnings"]
+    assert "judge primary model overlaps with reviewer roles" in contract["warnings"]
+
+
 def test_model_gateway_provider_mapping(monkeypatch):
     settings = Settings(
         agent_model_chain="openrouter:anthropic/claude-3-5-sonnet,openai:gpt-4o-mini,anthropic:claude-3-haiku,kimi:moonshot-v1-8k",

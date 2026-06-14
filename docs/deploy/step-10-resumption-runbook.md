@@ -80,7 +80,7 @@ DISCORD_ALLOWED_CHANNEL_IDS=
 DISCORD_ALLOWED_ROLE_IDS=
 DISCORD_ADMIN_USER_IDS=
 
-AGENT_MODEL_CHAIN=openrouter:anthropic/claude-sonnet-4.6,openrouter:deepseek/deepseek-v4-pro
+AGENT_MODEL_CHAIN=openrouter:openai/gpt-oss-120b:free,openrouter:openai/gpt-oss-20b:free,openrouter:liquid/lfm-2.5-1.2b-instruct:free,openrouter:nvidia/nemotron-3-nano-30b-a3b:free
 OPENROUTER_API_KEY=
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
@@ -100,6 +100,9 @@ HIGH_STAKES_PROMPT_STYLE=standard
 HIGH_STAKES_INFO_PROVIDER=sdk_preferred
 HIGH_STAKES_MAX_DATA_ESCALATIONS=1
 HIGH_STAKES_SMART_MONEY_ADDRESSES=
+DEBATE_MODEL_DIVERSITY_POLICY=warn
+# Production: set DEBATE_JUDGE_MODEL_CHAIN to the strongest available frontier/main model.
+# Development/free defaults are role-diverse and can be copied from .env.example.
 
 POSITION_TRACKING_ENABLED=true
 POSITION_TRACKING_AUTO_ARM=true
@@ -210,6 +213,7 @@ Expected:
   - `hyperliquid_exchange_enabled: false`
   - `hyperliquid_ws_enabled: false` unless intentionally enabled
   - `position_tracking.enabled: true` unless intentionally disabled
+  - `high_stakes.model_contract.status` is `ok` or an intentional `warning`; Judge primary should not overlap reviewer primaries in production
   - at least one configured model has `missing: null`
 
 Protected metrics check:

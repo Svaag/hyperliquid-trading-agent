@@ -177,6 +177,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "max_data_escalations": settings.high_stakes_max_data_escalations,
                 "account_allowlist_count": len(settings.account_allowlist),
                 "smart_money_watchlist_count": len(settings.smart_money_addresses),
+                "model_contract": settings.debate_model_contract(),
                 "roles": {
                     role: [
                         {"model": item.model, "provider": item.provider, "missing": item.missing_reason}

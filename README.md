@@ -90,20 +90,23 @@ HIGH_STAKES_MAX_ROUNDS=3
 HIGH_STAKES_TIMEOUT_SECONDS=90
 HIGH_STAKES_MAX_COINS=3
 HIGH_STAKES_MAX_DATA_ESCALATIONS=1
+DEBATE_MODEL_DIVERSITY_POLICY=warn
 ACCOUNT_ADDRESS_ALLOWLIST=
 HIGH_STAKES_SMART_MONEY_ADDRESSES=
 AGENT_API_BEARER_TOKEN=
-DEBATE_ANALYST_MODEL_CHAIN=
-DEBATE_QUANT_MODEL_CHAIN=
-DEBATE_RESEARCH_MODEL_CHAIN=
-DEBATE_ADVERSARY_MODEL_CHAIN=
-DEBATE_RISK_MODEL_CHAIN=
-DEBATE_TREASURY_MODEL_CHAIN=
-DEBATE_EXECUTION_MODEL_CHAIN=
-DEBATE_JUDGE_MODEL_CHAIN=
+DEBATE_ANALYST_MODEL_CHAIN=openrouter:qwen/qwen3-next-80b-a3b-instruct:free,openrouter:openai/gpt-oss-120b:free,openrouter:nex-agi/nex-n2-pro:free
+DEBATE_QUANT_MODEL_CHAIN=openrouter:nvidia/nemotron-3-nano-30b-a3b:free,openrouter:openai/gpt-oss-20b:free,openrouter:nex-agi/nex-n2-pro:free
+DEBATE_RESEARCH_MODEL_CHAIN=openrouter:google/gemma-4-26b-a4b-it:free,openrouter:openai/gpt-oss-20b:free,openrouter:nex-agi/nex-n2-pro:free
+DEBATE_ADVERSARY_MODEL_CHAIN=openrouter:meta-llama/llama-3.3-70b-instruct:free,openrouter:openai/gpt-oss-120b:free,openrouter:nex-agi/nex-n2-pro:free
+DEBATE_RISK_MODEL_CHAIN=openrouter:openai/gpt-oss-20b:free,openrouter:nvidia/nemotron-3-nano-30b-a3b:free,openrouter:nex-agi/nex-n2-pro:free
+DEBATE_TREASURY_MODEL_CHAIN=openrouter:liquid/lfm-2.5-1.2b-instruct:free,openrouter:openai/gpt-oss-20b:free,openrouter:nex-agi/nex-n2-pro:free
+DEBATE_EXECUTION_MODEL_CHAIN=openrouter:nex-agi/nex-n2-pro:free,openrouter:liquid/lfm-2.5-1.2b-instruct:free,openrouter:openai/gpt-oss-20b:free
+DEBATE_JUDGE_MODEL_CHAIN=openrouter:openai/gpt-oss-120b:free,openrouter:openai/gpt-oss-20b:free,openrouter:nex-agi/nex-n2-pro:free
 ```
 
-Empty role model chains fall back to `AGENT_MODEL_CHAIN`. `/trade/proposals` forces the high-stakes graph when enabled and requires `AGENT_API_BEARER_TOKEN` outside dev/test/local. `HIGH_STAKES_PROMPT_STYLE=aggressive` changes desk tone but does not relax vetoes or no-execution rules. `HIGH_STAKES_INFO_PROVIDER=sdk_preferred` uses the official Hyperliquid Python SDK `Info` client for read-only high-stakes data where available, with REST `/info` fallback for missing official endpoints.
+The debate model contract is: role primary models should differ, adversarial reviewers should not share the proposer/quant primary, and the Judge should use a distinct strongest/main model. `DEBATE_MODEL_DIVERSITY_POLICY=warn|strict|off` controls diagnostics; `/health/config` reports the contract status. Development defaults use free OpenRouter models; in production, replace `DEBATE_JUDGE_MODEL_CHAIN` with the best available frontier/main model and keep other roles on varied open-source model families.
+
+Role chains default to role-specific free-model chains when unset. `/trade/proposals` forces the high-stakes graph when enabled and requires `AGENT_API_BEARER_TOKEN` outside dev/test/local. `HIGH_STAKES_PROMPT_STYLE=aggressive` changes desk tone but does not relax vetoes or no-execution rules. `HIGH_STAKES_INFO_PROVIDER=sdk_preferred` uses the official Hyperliquid Python SDK `Info` client for read-only high-stakes data where available, with REST `/info` fallback for missing official endpoints.
 
 Hyperliquid:
 
