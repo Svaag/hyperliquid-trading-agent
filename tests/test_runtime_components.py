@@ -15,6 +15,7 @@ from hyperliquid_trading_agent.app.discord_bot import (
     _message_prompt_without_mentions,
 )
 from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
+from hyperliquid_trading_agent.app.hyperliquid.ws_worker import HyperliquidWebSocketWorker, SubscriptionSpec
 from hyperliquid_trading_agent.app.paper.schemas import PaperTradeRequest
 from hyperliquid_trading_agent.app.paper.simulator import PaperTradeSimulator
 
@@ -183,3 +184,20 @@ def test_paper_trade_simulator_plan():
     assert plan.risk_usd == 100
     assert plan.size_units == 20
     assert plan.notional_usd == 2000
+
+
+@pytest.mark.asyncio
+async def test_websocket_worker_fanout_and_cache():
+    worker = HyperliquidWebSocketWorker(Settings(hyperliquid_ws_enabled=False))
+    seen = []
+
+    subscription_id = await worker.subscribe(SubscriptionSpec("allMids"), lambda message: seen.append(message))
+    await worker._handle_message({"channel": "allMids", "data": {"mids": {"VVV": "16.4"}}})
+
+    assert worker.cache.all_mids["VVV"] == "16.4"
+    assert seen and seen[0]["channel"] == "allMids"
+    assert worker.status()["callback_count"] == 1
+
+    await worker.unsubscribe(subscription_id)
+
+    assert worker.status()["callback_count"] == 0
