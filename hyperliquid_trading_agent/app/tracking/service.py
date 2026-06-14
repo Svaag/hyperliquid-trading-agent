@@ -11,6 +11,12 @@ from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.hyperliquid.ws_worker import HyperliquidWebSocketWorker, SubscriptionSpec
 from hyperliquid_trading_agent.app.logging import get_logger
+from hyperliquid_trading_agent.app.metrics import (
+    POSITION_TRACKERS,
+    POSITION_TRACKING_ALERTS,
+    POSITION_TRACKING_EVENTS,
+    POSITION_TRACKING_PRICE_UPDATES,
+)
 from hyperliquid_trading_agent.app.tracking.commands import TrackingCommand
 from hyperliquid_trading_agent.app.tracking.schemas import (
     CrossDirection,
@@ -98,13 +104,15 @@ class PositionTrackingService:
             if len(self._trackers) >= self.settings.position_tracking_max_active:
                 log.warning("position_tracker_not_armed", reason="max_active_reached", coin=plan.coin)
                 return None
-        tracker_id = await self.repository.create_position_tracker(plan, proposal_id=proposal_id, run_id=run_id)
+        plan_to_store = plan.model_copy(update={"proposal_id": proposal_id or plan.proposal_id, "run_id": run_id or plan.run_id})
+        tracker_id = await self.repository.create_position_tracker(plan_to_store, proposal_id=proposal_id, run_id=run_id)
         if tracker_id is None:
             return None
-        armed_plan = plan.model_copy(update={"id": tracker_id, "proposal_id": proposal_id or plan.proposal_id, "run_id": run_id or plan.run_id})
+        armed_plan = plan_to_store.model_copy(update={"id": tracker_id})
         async with self._lock:
             self._trackers[tracker_id] = armed_plan
         self._wake.set()
+        POSITION_TRACKING_EVENTS.labels(event_type="tracker_armed", level_kind="tracker").inc()
         await self.repository.record_tracking_event(
             tracker_id=tracker_id,
             event_type="tracker_armed",
@@ -135,6 +143,7 @@ class PositionTrackingService:
             self._trackers = loaded
             self._seen_price &= set(loaded.keys())
             self._last_reload_at_ms = now_ms
+        _set_tracker_gauges(loaded.values())
         self._wake.set()
 
     async def process_all_mids(self, message: dict[str, Any]) -> None:
@@ -151,6 +160,7 @@ class PositionTrackingService:
 
     async def process_price(self, coin: str, current_price: float, timestamp_ms: int | None = None) -> list[LevelHitEvent]:
         timestamp_ms = timestamp_ms or int(time.time() * 1000)
+        POSITION_TRACKING_PRICE_UPDATES.labels(coin=coin.upper()).inc()
         async with self._lock:
             candidates = [tracker for tracker in self._trackers.values() if tracker.coin.upper() == coin.upper() and tracker.status in {"pending", "active"}]
         events: list[LevelHitEvent] = []
@@ -297,6 +307,7 @@ class PositionTrackingService:
                 updated_level = level.model_copy(update={"armed": True})
                 if self.repository is not None:
                     await self.repository.update_tracked_level_state(updated_level.id, armed=True, hit_count=updated_level.hit_count)
+                    POSITION_TRACKING_EVENTS.labels(event_type="level_rearmed", level_kind=updated_level.kind).inc()
                     await self.repository.record_tracking_event(
                         tracker_id=tracker.id,
                         level_id=updated_level.id,
@@ -337,6 +348,8 @@ class PositionTrackingService:
             except Exception as exc:  # pragma: no cover - alert isolation
                 alert_status = f"error:{type(exc).__name__}"
                 log.warning("position_tracking_alert_failed", tracker_id=tracker.id, level_id=level.id, error=type(exc).__name__)
+        POSITION_TRACKING_ALERTS.labels(destination=_alert_destination(tracker) or "none", result=alert_status).inc()
+        POSITION_TRACKING_EVENTS.labels(event_type="level_already_breached" if crossing.already_breached else "level_hit", level_kind=level.kind).inc()
         if self.repository is not None:
             await self.repository.update_tracked_level_state(level.id, armed=False, hit_count=level.hit_count, last_triggered_at=datetime.now(UTC))
             await self.repository.record_tracking_event(
@@ -471,3 +484,12 @@ def _filter_rows(rows: list[dict[str, Any]], command: TrackingCommand) -> list[d
 def _fmt_price(value: Any) -> str:
     parsed = _float_or_none(value)
     return "n/a" if parsed is None else f"{parsed:g}"
+
+
+def _set_tracker_gauges(trackers: Any) -> None:
+    counts: dict[str, int] = {"pending": 0, "active": 0, "paused": 0, "completed": 0, "expired": 0, "stopped": 0, "error": 0}
+    for tracker in trackers:
+        status = str(getattr(tracker, "status", "unknown"))
+        counts[status] = counts.get(status, 0) + 1
+    for status, count in counts.items():
+        POSITION_TRACKERS.labels(status=status).set(count)

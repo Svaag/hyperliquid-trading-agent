@@ -100,6 +100,15 @@ HIGH_STAKES_PROMPT_STYLE=standard
 HIGH_STAKES_INFO_PROVIDER=sdk_preferred
 HIGH_STAKES_MAX_DATA_ESCALATIONS=1
 HIGH_STAKES_SMART_MONEY_ADDRESSES=
+
+POSITION_TRACKING_ENABLED=true
+POSITION_TRACKING_AUTO_ARM=true
+POSITION_TRACKING_DEFAULT_TTL_HOURS=168
+POSITION_TRACKING_PRICE_SOURCE=allMids
+POSITION_TRACKING_REARM_BAND_BPS=10
+POSITION_TRACKING_RELOAD_SECONDS=10
+POSITION_TRACKING_MAX_ACTIVE=250
+POSITION_TRACKING_ALERT_RETRY_COUNT=3
 ```
 
 Minimum viable secrets:
@@ -200,6 +209,7 @@ Expected:
 - `/health/config` confirms:
   - `hyperliquid_exchange_enabled: false`
   - `hyperliquid_ws_enabled: false` unless intentionally enabled
+  - `position_tracking.enabled: true` unless intentionally disabled
   - at least one configured model has `missing: null`
 
 Protected metrics check:
@@ -227,6 +237,7 @@ Expected behavior:
 - BTC/ETH/SOL market questions use live Hyperliquid data.
 - Paper trade question returns size/notional/risk and stores audit/paper-trade records.
 - If `HIGH_STAKES_DEBATE_ENABLED=true`, explicit high-stakes trade setup prompts return audited manual/paper proposals with institutional prompt rubrics, route-relevant Hyperliquid endpoint coverage, optional official SDK `Info` data, and no live execution.
+- Valid position reviews auto-arm live level tracking; inside the bot-created thread, `tracking status` should list the active tracker and `stop tracking` should stop it.
 - Off-topic question is refused.
 - No mainnet trade execution is possible.
 

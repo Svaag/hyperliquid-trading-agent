@@ -13,6 +13,7 @@ import websockets
 
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.logging import get_logger
+from hyperliquid_trading_agent.app.metrics import HL_WS_MESSAGES, HL_WS_RECONNECTS
 
 log = get_logger(__name__)
 
@@ -92,6 +93,7 @@ class HyperliquidWebSocketWorker:
                 raise
             except Exception as exc:  # pragma: no cover - external websocket behavior
                 self._reconnect_count += 1
+                HL_WS_RECONNECTS.inc()
                 log.warning("hyperliquid_ws_reconnect", error=type(exc).__name__)
                 try:
                     await asyncio.wait_for(self._stop.wait(), timeout=5)
@@ -209,6 +211,7 @@ class HyperliquidWebSocketWorker:
     async def _handle_message(self, message: dict[str, Any]) -> None:
         channel = message.get("channel")
         data = message.get("data")
+        HL_WS_MESSAGES.labels(channel=str(channel or "unknown")).inc()
         now_ms = int(time.time() * 1000)
         self.cache.updated_at_ms = now_ms
         self._last_message_at_ms = now_ms

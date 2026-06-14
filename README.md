@@ -16,9 +16,14 @@ design.
   - `POST /ask`
   - `POST /trade/proposals`
   - `GET /trade/proposals/{proposal_id}`
+  - `GET /tracking/positions`
+  - `GET /tracking/positions/{tracker_id}`
+  - `GET /tracking/positions/{tracker_id}/events`
+  - `POST /tracking/positions/{tracker_id}/pause|resume|stop`
   - `GET /metrics`
 - Discord mention bot with guild/channel/role allowlists and threaded answers.
 - Risk-routed high-stakes multi-agent debate engine for paper/manual trade proposals only, with institutional role rubrics, endpoint coverage, and optional official SDK `Info` data.
+- Deterministic live position tracking for high-stakes position reviews: auto-arms canonical levels, monitors Hyperliquid WebSocket `allMids`, sends Discord thread alerts, and stores tracker/event history without LLM calls.
 - LiteLLM model gateway with ordered fallback for:
   - OpenRouter
   - OpenAI
@@ -108,6 +113,21 @@ HYPERLIQUID_WS_ENABLED=false
 HYPERLIQUID_EXCHANGE_ENABLED=false
 ```
 
+Live position tracking:
+
+```env
+POSITION_TRACKING_ENABLED=true
+POSITION_TRACKING_AUTO_ARM=true
+POSITION_TRACKING_DEFAULT_TTL_HOURS=168
+POSITION_TRACKING_PRICE_SOURCE=allMids
+POSITION_TRACKING_REARM_BAND_BPS=10
+POSITION_TRACKING_RELOAD_SECONDS=10
+POSITION_TRACKING_MAX_ACTIVE=250
+POSITION_TRACKING_ALERT_RETRY_COUNT=3
+```
+
+When enabled, high-stakes position reviews with coin/side/entry/stop auto-arm low-overhead WebSocket level alerts. Discord users can say `tracking status`, `tracking events`, `pause tracking`, `resume tracking`, `stop tracking`, or `track until 24h/7d` inside the bot-created thread.
+
 `HYPERLIQUID_EXCHANGE_ENABLED=true` is rejected by config validation in this MVP.
 
 ## Hyperliquid ground truth
@@ -139,6 +159,7 @@ Important docs-backed rules embedded in the agent:
 - No private keys, seed phrases, passwords, API keys, or signing secrets in Discord.
 - No mainnet trading in the MVP.
 - High-stakes debate produces manual/paper proposals only; `exchange_actions` is intentionally empty.
+- Live tracking only emits alerts/events; it does not place orders and keeps `exchange_actions=[]` for future autonomous-trading hooks.
 - Local paper simulation only.
 - Direct trade coaching is allowed, but every answer should include risk,
   assumptions, invalidation, and caveats.
