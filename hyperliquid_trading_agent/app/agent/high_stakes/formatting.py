@@ -162,6 +162,8 @@ def _clean_checklist_item(item: str) -> str:
         return ""
     if lowered.startswith("confirm stop") or lowered.startswith("hyperliquid validation") or lowered.startswith("endpoint coverage"):
         return ""
+    if lowered.startswith("re-check hyperliquid") or lowered.startswith("recheck hyperliquid"):
+        return ""
     if item.startswith("Execution readiness:"):
         spread = _extract_float(item, "spread_bps")
         depth = _extract_float(item, "top_depth")

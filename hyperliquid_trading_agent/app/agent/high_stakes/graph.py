@@ -403,7 +403,6 @@ def _build_proposal(state: HighStakesGraphState) -> TradeProposal:
 
     checklist = [
         "Manual confirmation required; this service does not sign or submit orders.",
-        "Re-check Hyperliquid mark/oracle, funding, spread, and depth immediately before acting.",
         "Confirm stop, invalidation, and max loss outside Discord/LLM context.",
     ]
     validation = _asset_validation(features, draft, risk)

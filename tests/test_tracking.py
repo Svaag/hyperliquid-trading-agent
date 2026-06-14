@@ -132,6 +132,10 @@ def test_formatter_uses_tracking_plan_levels():
         stop=15.5,
         rationale=["Position: VVV long is below entry."],
         risks=["Model fallback for quant: TimeoutError"],
+        checklist=[
+            "Re-check Hyperliquid mark/oracle, funding, spread, and depth immediately before acting.",
+            "Execution readiness: asset_id=178 spread_bps=4.2 top_depth=$2000 est_slippage_bps=9.5",
+        ],
         tracking_plan=plan.model_dump(mode="json"),
     )
     decision = JudgeDecision(status="manual_review_required", confidence=0.35, summary="fallback")
@@ -141,4 +145,6 @@ def test_formatter_uses_tracking_plan_levels():
     assert "Levels to watch:" in content
     assert "Technical reduce/exit trigger: cross down through 15.63" in content
     assert "Resistance confirmation: cross up through 16.904" in content
+    assert "Re-check Hyperliquid" not in content
+    assert "Liquidity: spread ~4.20 bps" in content
     assert summarize_tracking_plan(plan)
