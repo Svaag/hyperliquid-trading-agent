@@ -309,12 +309,8 @@ def _ensure_non_empty(content: str, prompt: str, tool_results: list[ToolResult])
 
 
 def _fallback_answer(prompt: str, tool_results: list[ToolResult], model_error: str = "") -> str:
-    """Human-friendly response when model credentials are absent or all providers fail.
-
-    This is intentionally not a fake analysis. It surfaces the useful facts we can
-    determine locally, states the limitation plainly, and asks for the minimum
-    extra context needed for a real trade review.
-    """
+    """Concise data-only response when model providers are unavailable."""
+    del model_error
     market_lines: list[str] = []
     paper_lines: list[str] = []
     other_tools: list[str] = []
@@ -326,52 +322,43 @@ def _fallback_answer(prompt: str, tool_results: list[ToolResult], model_error: s
                 if not isinstance(data, dict):
                     continue
                 ctx = data.get("context") or {}
-                details = [f"{coin} is around {data.get('mid') or 'unknown'}"]
-                if ctx.get("markPx") is not None:
-                    details.append(f"mark {ctx.get('markPx')}")
-                if ctx.get("funding") is not None:
-                    details.append(f"funding {ctx.get('funding')}")
-                if ctx.get("openInterest") is not None:
-                    details.append(f"OI {ctx.get('openInterest')}")
-                market_lines.append("; ".join(details) + ".")
+                mid = data.get("mid") or "unknown"
+                mark = ctx.get("markPx")
+                funding = ctx.get("funding")
+                oi = ctx.get("openInterest")
+                pieces = [f"{coin}: mid {mid}"]
+                if mark is not None:
+                    pieces.append(f"mark {mark}")
+                if funding is not None:
+                    pieces.append(f"funding {funding}")
+                if oi is not None:
+                    pieces.append(f"OI {oi}")
+                market_lines.append(", ".join(pieces))
         elif result.tool == "simulate_paper_trade" and isinstance(result.data, dict):
             paper_lines.append(
                 f"Paper sizing: {result.data.get('side')} {result.data.get('coin')} size "
                 f"{result.data.get('size_units'):.6g}, notional ${result.data.get('notional_usd'):.2f}, "
-                f"defined risk ${result.data.get('risk_usd'):.2f}."
+                f"risk ${result.data.get('risk_usd'):.2f}."
             )
         else:
             other_tools.append(result.tool)
 
-    lines = [
-        "I can only give a lightweight data-only read right now because the reasoning model is not configured. I won't pretend this is a full trade call.",
-        "",
-    ]
+    lowered = prompt.lower()
+    trade_intent = any(term in lowered for term in ["long", "short", "entry", "stop", "target", "execute", "order", "trade"])
+    lines = ["Quick tape read:"]
     if market_lines:
-        lines.append("Live context I can see:")
         lines.extend(f"- {line}" for line in market_lines)
+        lines.append("- Bias: no edge from this snapshot alone. Treat it as scout data; press only after trend/level confirmation.")
+        lines.append("- Next trigger: add timeframe + key level, then judge whether price is accepting above resistance or rejecting into support.")
     elif tool_results:
-        lines.append("I pulled some live context, but not enough market structure to make even a useful data-only read.")
+        lines.append("- Context was pulled, but not enough market-structure data for a sharp read.")
     else:
-        lines.append("I did not pull live market data for that prompt. Mention a coin such as BTC, ETH, or SOL for a quick snapshot.")
+        lines.append("- No live market data was pulled. Mention a coin like BTC, ETH, or SOL for a quick snapshot.")
 
-    if paper_lines:
-        lines.append("")
-        lines.extend(f"- {line}" for line in paper_lines)
+    lines.extend(f"- {line}" for line in paper_lines)
     if other_tools:
-        lines.append("")
-        lines.append("Additional context checked: " + ", ".join(sorted(set(other_tools))) + ".")
-
-    lines.extend(
-        [
-            "",
-            "My practical take: treat this as neutral / needs-more-context, not a long or short signal. Price, funding, and OI alone do not establish trend, invalidation, liquidity quality, or risk/reward.",
-            "",
-            "For a real answer, give me the coin, timeframe, proposed side, entry, stop, target, and account risk. Example: `BTC 4h long idea, entry 63750, stop 62500, target 67000, risk 1% — debate it.`",
-            "",
-            "No trade was placed. This service is still non-executing.",
-            "",
-            "Ops note: the LLM provider key is missing or unavailable, so this fallback avoided discretionary analysis.",
-        ]
-    )
+        lines.append("- Additional checks: " + ", ".join(sorted(set(other_tools))) + ".")
+    if trade_intent:
+        lines.append("- Execution note: no trade was placed; this is analysis only.")
+    lines.append("- Model note: provider unavailable, so this is a deterministic data read.")
     return "\n".join(lines)[:4000]
