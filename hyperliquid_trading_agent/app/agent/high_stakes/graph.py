@@ -30,6 +30,8 @@ from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.hyperliquid.validation import asset_validation_summary
 from hyperliquid_trading_agent.app.metrics import DECISION_LATENCY, DECISION_RUNS
 from hyperliquid_trading_agent.app.security import redact_text
+from hyperliquid_trading_agent.app.tracking.levels import derive_position_tracking_plan, level_by_kind
+from hyperliquid_trading_agent.app.tracking.schemas import PositionTrackingPlan
 
 
 class HighStakesGraphState(TypedDict, total=False):
@@ -385,7 +387,17 @@ def _build_proposal(state: HighStakesGraphState) -> TradeProposal:
         )
     checklist.append(f"Endpoint coverage: {coverage.coverage_score:.0%} ({len(coverage.used_endpoints)}/{len(coverage.required_endpoints)} endpoints used).")
 
-    deterministic_rationale = _deterministic_position_rationale(features, draft)
+    tracking_plan = derive_position_tracking_plan(
+        coin=draft.coin,
+        side=draft.side,
+        entry=draft.entry,
+        stop=draft.stop,
+        take_profit=draft.take_profit,
+        features=features,
+        run_id=state.get("run_id"),
+        agent_context=state.get("agent_context", {}),
+    )
+    deterministic_rationale = _deterministic_position_rationale(features, draft, tracking_plan)
     if deterministic_rationale and judge.model is None:
         rationale = deterministic_rationale
     else:
@@ -416,10 +428,11 @@ def _build_proposal(state: HighStakesGraphState) -> TradeProposal:
         autonomous_execution_allowed=False,
         exchange_actions=[],
         tool_summary=features.get("tool_summary", []) if isinstance(features, dict) else [],
+        tracking_plan=tracking_plan.model_dump(mode="json") if tracking_plan else None,
     )
 
 
-def _deterministic_position_rationale(features: dict[str, Any], draft: TradeSetupDraft) -> list[str]:
+def _deterministic_position_rationale(features: dict[str, Any], draft: TradeSetupDraft, tracking_plan: PositionTrackingPlan | None = None) -> list[str]:
     if not draft.coin or draft.entry is None or draft.stop is None:
         return []
     market = features.get("market", {}) if isinstance(features, dict) else {}
@@ -460,34 +473,69 @@ def _deterministic_position_rationale(features: dict[str, Any], draft: TradeSetu
     if day_change is not None:
         day_bias = "constructive while price holds structure" if day_change > 0 else "a drag until price reclaims structure"
         lines.append(f"Tape vs prior day: {_fmt_pct(day_change)}. That is {day_bias}.")
-    if recent_support is not None or recent_resistance is not None:
+    if tracking_plan is not None and tracking_plan.levels:
+        hard = level_by_kind(tracking_plan, "hard_stop")
+        technical = level_by_kind(tracking_plan, "technical_exit")
+        trim = level_by_kind(tracking_plan, "entry_trim")
+        reclaim = level_by_kind(tracking_plan, "entry_reclaim")
+        resistance = level_by_kind(tracking_plan, "resistance_confirm")
+        support = level_by_kind(tracking_plan, "support_confirm")
         if is_long:
-            first_reclaim = entry if current < entry else recent_resistance
-            lines.append(
-                f"Intraday structure: recent support ≈ {recent_support:g}; nearby resistance/reclaim ≈ {first_reclaim:g}"
-                + (f" then {recent_resistance:g}" if recent_resistance is not None and first_reclaim != recent_resistance else "")
-                + f". Structure is {'still intact' if structure_ok else 'already damaged'}; momentum is {'accelerating lower' if accelerating_lower else 'not accelerating lower'} on the sampled candles."
-            )
-            if recent_support is not None:
-                if current < entry:
-                    lines.append(f"Trade management: below {recent_support:g} is the technical reduce/exit trigger before the hard stop; reclaim/hold above entry {entry:g} improves the hold case.")
-                else:
-                    resistance_text = f"; push through {recent_resistance:g} confirms momentum" if recent_resistance is not None else ""
-                    lines.append(f"Trade management: below {recent_support:g} is the technical reduce/exit trigger before the hard stop; losing entry {entry:g} is a trim/caution level{resistance_text}.")
-            else:
-                lines.append(f"Trade management: reclaim/hold above {entry:g} improves the hold case.")
+            structure_levels = []
+            if technical:
+                structure_levels.append(f"technical exit ≈ {technical.price:g}")
+            if trim:
+                structure_levels.append(f"entry trim/caution ≈ {trim.price:g}")
+            if reclaim:
+                structure_levels.append(f"entry reclaim ≈ {reclaim.price:g}")
+            if resistance:
+                structure_levels.append(f"resistance confirmation ≈ {resistance.price:g}")
+            if structure_levels:
+                lines.append(
+                    f"Intraday structure: {'; '.join(structure_levels)}. Structure is {'still intact' if structure_ok else 'already damaged'}; "
+                    f"momentum is {'accelerating lower' if accelerating_lower else 'not accelerating lower'} on the sampled candles."
+                )
+            management = []
+            if technical and hard:
+                management.append(f"below {technical.price:g} is the technical reduce/exit trigger before hard stop {hard.price:g}")
+            elif hard:
+                management.append(f"hard invalidation remains {hard.price:g}")
+            if trim:
+                management.append(f"losing {trim.price:g} is a trim/caution level")
+            if reclaim:
+                management.append(f"reclaim/hold above {reclaim.price:g} improves the hold case")
+            if resistance:
+                management.append(f"push through {resistance.price:g} confirms momentum")
+            if management:
+                lines.append(f"Trade management: {'; '.join(management)}.")
         else:
-            first_reclaim = entry if current > entry else recent_support
-            lines.append(
-                f"Intraday structure: recent resistance ≈ {recent_resistance:g}; nearby support/cover zone ≈ {first_reclaim:g}"
-                + (f" then {recent_support:g}" if recent_support is not None and first_reclaim != recent_support else "")
-                + f". Structure is {'still intact' if structure_ok else 'already damaged'}; momentum is {'accelerating higher' if accelerating_higher else 'not accelerating higher'} on the sampled candles."
-            )
-            lines.append(
-                f"Trade management: above {recent_resistance:g} is the technical reduce/exit trigger before the hard stop; reclaim below {entry:g} improves the hold case."
-                if recent_resistance is not None
-                else f"Trade management: reclaim below {entry:g} improves the hold case."
-            )
+            structure_levels = []
+            if technical:
+                structure_levels.append(f"technical exit ≈ {technical.price:g}")
+            if trim:
+                structure_levels.append(f"entry trim/caution ≈ {trim.price:g}")
+            if reclaim:
+                structure_levels.append(f"entry reclaim ≈ {reclaim.price:g}")
+            if support:
+                structure_levels.append(f"support confirmation ≈ {support.price:g}")
+            if structure_levels:
+                lines.append(
+                    f"Intraday structure: {'; '.join(structure_levels)}. Structure is {'still intact' if structure_ok else 'already damaged'}; "
+                    f"momentum is {'accelerating higher' if accelerating_higher else 'not accelerating higher'} on the sampled candles."
+                )
+            management = []
+            if technical and hard:
+                management.append(f"above {technical.price:g} is the technical reduce/exit trigger before hard stop {hard.price:g}")
+            elif hard:
+                management.append(f"hard invalidation remains {hard.price:g}")
+            if trim:
+                management.append(f"crossing back through {trim.price:g} is a trim/caution level")
+            if reclaim:
+                management.append(f"reclaim/hold below {reclaim.price:g} improves the hold case")
+            if support:
+                management.append(f"break below {support.price:g} confirms momentum")
+            if management:
+                lines.append(f"Trade management: {'; '.join(management)}.")
     if funding is not None:
         lines.append(f"Funding: {_fmt_pct(funding * 100, decimals=4)}/hr (~{_fmt_pct(funding * 24 * 100, decimals=3)}/day); this is small, not a decisive carry/squeeze signal.")
     if mark_oracle_bps is not None:

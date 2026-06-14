@@ -181,6 +181,7 @@ class TradeProposal(BaseModel):
     autonomous_execution_allowed: bool = False
     exchange_actions: list[dict[str, Any]] = Field(default_factory=list)
     tool_summary: list[str] = Field(default_factory=list)
+    tracking_plan: dict[str, Any] | None = None
     created_at_ms: int = Field(default_factory=lambda: int(time.time() * 1000))
 
 

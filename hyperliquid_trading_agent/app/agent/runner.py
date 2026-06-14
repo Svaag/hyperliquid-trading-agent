@@ -160,6 +160,7 @@ class TradingAgentRunner:
                 "discord_guild_id": context.discord_guild_id,
                 "discord_channel_id": context.discord_channel_id,
                 "discord_thread_id": context.discord_thread_id,
+                "discord_user_id": context.discord_user_id,
             },
         )
         await self._audit(

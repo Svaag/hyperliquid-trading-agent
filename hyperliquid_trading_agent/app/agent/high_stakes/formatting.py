@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from hyperliquid_trading_agent.app.agent.high_stakes.schemas import JudgeDecision, TradeProposal
+from hyperliquid_trading_agent.app.tracking.levels import summarize_tracking_plan
 
 
 def format_trade_proposal(proposal: TradeProposal, judge: JudgeDecision | None = None) -> str:
@@ -106,9 +107,14 @@ def _format_compact_position_review(proposal: TradeProposal, judge: JudgeDecisio
     else:
         lines.append("- Live market data was gathered, but no clean edge was produced by the review.")
 
+    tracking_levels = summarize_tracking_plan(proposal.tracking_plan)
+    if tracking_levels:
+        lines.extend(["", "Levels to watch:"])
+        lines.extend(f"- {item}" for item in tracking_levels[:6])
+
     lines.extend(["", "Decision frame:"])
-    lines.append("- Hold case: price stays above the technical reduce/exit trigger from the read section and starts reclaiming the stated resistance/entry level.")
-    lines.append("- Reduce/exit case: price loses that trigger, cannot reclaim entry before the event you care about, or liquidity thins into the open.")
+    lines.append("- Hold case: price respects the terminal downside/upside trigger above and confirms through the relevant reclaim/resistance/support level.")
+    lines.append("- Reduce/exit case: price loses the terminal technical trigger, cannot reclaim entry before the event you care about, or liquidity thins into the open.")
 
     lines.extend(["", "Risk:"])
     if proposal.risk_usd is not None:
