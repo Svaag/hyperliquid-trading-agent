@@ -72,6 +72,7 @@ class PositionTrackingService:
         self._lock = asyncio.Lock()
         self._last_reload_at_ms: int | None = None
         self._last_price_update_at_ms: int | None = None
+        self.last_auto_arm_reason: str = ""
 
     async def start(self) -> None:
         if not self.settings.position_tracking_enabled:
@@ -95,18 +96,26 @@ class PositionTrackingService:
             self._subscription_id = None
 
     async def auto_arm(self, plan: PositionTrackingPlan, *, proposal_id: str | None = None, run_id: str | None = None) -> str | None:
-        if not self.settings.position_tracking_enabled or not self.settings.position_tracking_auto_arm:
+        self.last_auto_arm_reason = ""
+        if not self.settings.position_tracking_enabled:
+            self.last_auto_arm_reason = "tracking_disabled"
+            return None
+        if not self.settings.position_tracking_auto_arm:
+            self.last_auto_arm_reason = "auto_arm_disabled"
             return None
         if self.repository is None:
+            self.last_auto_arm_reason = "repository_unavailable"
             log.warning("position_tracker_not_armed", reason="repository_unavailable", coin=plan.coin)
             return None
         async with self._lock:
             if len(self._trackers) >= self.settings.position_tracking_max_active:
+                self.last_auto_arm_reason = "max_active_reached"
                 log.warning("position_tracker_not_armed", reason="max_active_reached", coin=plan.coin)
                 return None
         plan_to_store = plan.model_copy(update={"proposal_id": proposal_id or plan.proposal_id, "run_id": run_id or plan.run_id})
         tracker_id = await self.repository.create_position_tracker(plan_to_store, proposal_id=proposal_id, run_id=run_id)
         if tracker_id is None:
+            self.last_auto_arm_reason = "persistence_failed"
             return None
         armed_plan = plan_to_store.model_copy(update={"id": tracker_id})
         async with self._lock:
@@ -122,6 +131,7 @@ class PositionTrackingService:
             alert_destination=_alert_destination(armed_plan),
             alert_status="not_sent",
         )
+        self.last_auto_arm_reason = "armed"
         return tracker_id
 
     async def reload_active_trackers(self) -> None:

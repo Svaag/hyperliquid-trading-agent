@@ -312,7 +312,8 @@ class HighStakesDebateGraph:
         if tracker_id:
             metadata.update({"auto_arm_status": "armed", "tracker_id": tracker_id, "proposal_id": proposal_id})
         else:
-            metadata["auto_arm_status"] = "not_armed"
+            reason = str(getattr(self.tracking_service, "last_auto_arm_reason", "") or "unknown")
+            metadata["auto_arm_status"] = f"not_armed:{reason}"
         updated = plan.model_copy(update={"id": tracker_id or plan.id, "proposal_id": proposal_id or plan.proposal_id, "run_id": state.get("run_id") or plan.run_id, "metadata": metadata})
         return proposal.model_copy(update={"tracking_plan": updated.model_dump(mode="json")})
 

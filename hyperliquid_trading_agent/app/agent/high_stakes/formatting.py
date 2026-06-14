@@ -152,8 +152,21 @@ def _tracking_status_line(plan_payload: dict | None) -> str:
         destination = "this Discord thread" if plan.discord_thread_id else "the tracking API/event log"
         return f"Armed for {len(plan.levels)} levels via allMids; alerts go to {destination}; expires in {plan.metadata.get('ttl_hours', 168)}h or on a terminal exit/stop hit."
     if status.startswith("not_armed"):
-        return f"Levels were prepared but live tracking was not armed ({status})."
+        return f"Levels were prepared but live tracking was not armed: {_human_tracking_reason(status)}."
     return "Levels are ready for live tracking."
+
+
+def _human_tracking_reason(status: str) -> str:
+    reason = status.split(":", 1)[1] if ":" in status else status
+    return {
+        "tracking_disabled": "position tracking is disabled in config",
+        "auto_arm_disabled": "automatic arming is disabled in config",
+        "repository_unavailable": "tracking storage is unavailable",
+        "max_active_reached": "the active-tracker limit has been reached",
+        "persistence_failed": "the tracker could not be saved",
+        "no_tracking_service": "the tracking service is not running",
+        "unknown": "unknown reason",
+    }.get(reason, reason.replace("_", " "))
 
 
 def _clean_checklist_item(item: str) -> str:

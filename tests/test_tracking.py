@@ -58,6 +58,17 @@ def test_derive_short_position_tracking_plan_mirrors_directions():
     assert by_kind["take_profit"].direction == "cross_down"
 
 
+def test_repeated_tracking_plans_do_not_reuse_level_ids():
+    features = {"market": {"VVV": {"mid": 16.25}}, "candles": {"VVV": {"recent_support": 15.63}}}
+
+    first = derive_position_tracking_plan(coin="VVV", side="long", entry=16.4, stop=15.5, features=features, now_ms=1)
+    second = derive_position_tracking_plan(coin="VVV", side="long", entry=16.4, stop=15.5, features=features, now_ms=1)
+
+    assert first is not None and second is not None
+    assert first.id != second.id
+    assert {level.id for level in first.levels}.isdisjoint({level.id for level in second.levels})
+
+
 def test_tracking_level_dedup_keeps_hard_stop_over_nearby_derived_level():
     features = {
         "market": {"ABC": {"mid": 101.0}},

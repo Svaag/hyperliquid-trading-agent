@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import time
 from typing import Any, Iterable
+from uuid import uuid4
 
 from hyperliquid_trading_agent.app.tracking.schemas import (
     CrossDirection,
@@ -66,6 +67,7 @@ def derive_position_tracking_plan(
     recent_support = _float_or_none(candles.get("recent_support")) if isinstance(candles, dict) else None
     recent_resistance = _float_or_none(candles.get("recent_resistance")) if isinstance(candles, dict) else None
     now_ms = now_ms or int(time.time() * 1000)
+    plan_id = uuid4().hex
     levels: list[TrackedLevelSpec] = []
 
     def add(
@@ -83,7 +85,7 @@ def derive_position_tracking_plan(
         level_price_value = float(price)
         levels.append(
             TrackedLevelSpec(
-                id=_level_id(kind, level_price_value),
+                id=_level_id(plan_id, kind, level_price_value),
                 kind=kind,
                 label=label,
                 price=level_price_value,
@@ -159,6 +161,7 @@ def derive_position_tracking_plan(
 
     context = agent_context or {}
     return PositionTrackingPlan(
+        id=plan_id,
         proposal_id=proposal_id,
         run_id=run_id,
         coin=normalized_coin,
@@ -295,9 +298,9 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
-def _level_id(kind: str, price: float) -> str:
+def _level_id(plan_id: str, kind: str, price: float) -> str:
     safe_price = f"{price:.10g}".replace("-", "m").replace(".", "p")
-    return f"{kind}:{safe_price}"
+    return f"{plan_id}:{kind}:{safe_price}"
 
 
 def _maybe_str(value: Any) -> str | None:
