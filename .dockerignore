@@ -1,0 +1,33 @@
+# Secrets and local config
+.env
+.env.*
+!.env.example
+
+# Python caches / virtualenvs
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Git / editor state
+.git/
+.gitignore
+.idea/
+.vscode/
+*.swp
+
+# Runtime/local data
+logs/
+data/
+*.db
+*.sqlite*
+pi-session-*.html
+
+# Docker metadata
+.docker/

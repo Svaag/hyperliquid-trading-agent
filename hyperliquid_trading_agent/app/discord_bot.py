@@ -128,7 +128,12 @@ async def _ensure_thread(message, prompt: str):
         try:
             return await message.create_thread(name=name)
         except TypeError:
-            return await message.create_thread(name)
+            try:
+                return await message.create_thread(name)
+            except Exception as exc:  # pragma: no cover - Discord permission/runtime behavior
+                log.warning("discord_thread_create_failed", error=type(exc).__name__)
+        except Exception as exc:  # pragma: no cover - Discord permission/runtime behavior
+            log.warning("discord_thread_create_failed", error=type(exc).__name__)
     return message.channel
 
 

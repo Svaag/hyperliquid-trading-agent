@@ -309,49 +309,69 @@ def _ensure_non_empty(content: str, prompt: str, tool_results: list[ToolResult])
 
 
 def _fallback_answer(prompt: str, tool_results: list[ToolResult], model_error: str = "") -> str:
-    lines = [
-        "My read:",
-        "I gathered the available live/context data, but the LLM provider chain is unavailable, so this is a compact deterministic support response.",
-        "",
-        "Data used:",
-    ]
-    if not tool_results:
-        lines.append("- No live tool data was gathered. Ask for a specific coin like BTC/ETH/SOL or include the market context you want analyzed.")
+    """Human-friendly response when model credentials are absent or all providers fail.
+
+    This is intentionally not a fake analysis. It surfaces the useful facts we can
+    determine locally, states the limitation plainly, and asks for the minimum
+    extra context needed for a real trade review.
+    """
+    market_lines: list[str] = []
+    paper_lines: list[str] = []
+    other_tools: list[str] = []
+
     for result in tool_results:
-        lines.append(f"- {result.tool} from {result.source} at {result.timestamp_ms} ({result.freshness})")
         if result.tool == "get_market_snapshot":
             assets = result.data.get("assets", {}) if isinstance(result.data, dict) else {}
             for coin, data in list(assets.items())[:5]:
-                if isinstance(data, dict):
-                    ctx = data.get("context") or {}
-                    lines.append(
-                        f"  - {coin}: mid={data.get('mid')}, mark={ctx.get('markPx')}, funding={ctx.get('funding')}, OI={ctx.get('openInterest')}"
-                    )
-        if result.tool == "simulate_paper_trade" and isinstance(result.data, dict):
-            lines.append(
-                f"  - Paper {result.data.get('side')} {result.data.get('coin')}: size={result.data.get('size_units'):.6g}, "
-                f"notional=${result.data.get('notional_usd'):.2f}, risk=${result.data.get('risk_usd'):.2f}"
+                if not isinstance(data, dict):
+                    continue
+                ctx = data.get("context") or {}
+                details = [f"{coin} is around {data.get('mid') or 'unknown'}"]
+                if ctx.get("markPx") is not None:
+                    details.append(f"mark {ctx.get('markPx')}")
+                if ctx.get("funding") is not None:
+                    details.append(f"funding {ctx.get('funding')}")
+                if ctx.get("openInterest") is not None:
+                    details.append(f"OI {ctx.get('openInterest')}")
+                market_lines.append("; ".join(details) + ".")
+        elif result.tool == "simulate_paper_trade" and isinstance(result.data, dict):
+            paper_lines.append(
+                f"Paper sizing: {result.data.get('side')} {result.data.get('coin')} size "
+                f"{result.data.get('size_units'):.6g}, notional ${result.data.get('notional_usd'):.2f}, "
+                f"defined risk ${result.data.get('risk_usd'):.2f}."
             )
+        else:
+            other_tools.append(result.tool)
+
+    lines = [
+        "I can only give a lightweight data-only read right now because the reasoning model is not configured. I won't pretend this is a full trade call.",
+        "",
+    ]
+    if market_lines:
+        lines.append("Live context I can see:")
+        lines.extend(f"- {line}" for line in market_lines)
+    elif tool_results:
+        lines.append("I pulled some live context, but not enough market structure to make even a useful data-only read.")
+    else:
+        lines.append("I did not pull live market data for that prompt. Mention a coin such as BTC, ETH, or SOL for a quick snapshot.")
+
+    if paper_lines:
+        lines.append("")
+        lines.extend(f"- {line}" for line in paper_lines)
+    if other_tools:
+        lines.append("")
+        lines.append("Additional context checked: " + ", ".join(sorted(set(other_tools))) + ".")
+
     lines.extend(
         [
             "",
-            "Setup / context:",
-            "Use the data above as context, not a guarantee. If you want a sharper answer, include timeframe, entry, stop, account risk, and whether this is scalp/swing/hedge.",
+            "My practical take: treat this as neutral / needs-more-context, not a long or short signal. Price, funding, and OI alone do not establish trend, invalidation, liquidity quality, or risk/reward.",
             "",
-            "Trade plan:",
-            "I would not treat this fallback as a standalone signal. Use it to frame the next question or verify the market facts.",
+            "For a real answer, give me the coin, timeframe, proposed side, entry, stop, target, and account risk. Example: `BTC 4h long idea, entry 63750, stop 62500, target 67000, risk 1% — debate it.`",
             "",
-            "Risk:",
-            "Keep risk bounded; no mainnet trade was or can be placed by this MVP.",
+            "No trade was placed. This service is still non-executing.",
             "",
-            "Invalidation:",
-            "Invalidate any idea if price/funding/order-book context changes materially against the thesis.",
-            "",
-            "What would change my mind:",
-            "Fresh structure, funding, liquidity, or macro/news data that contradicts the premise.",
-            "",
-            "Caveats:",
-            f"Model fallback reason: {model_error[:300]}",
+            "Ops note: the LLM provider key is missing or unavailable, so this fallback avoided discretionary analysis.",
         ]
     )
     return "\n".join(lines)[:4000]
