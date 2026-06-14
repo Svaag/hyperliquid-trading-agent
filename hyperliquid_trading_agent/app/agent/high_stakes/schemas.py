@@ -98,6 +98,8 @@ class TradeSetupDraft(BaseModel):
 class RoleOpinion(BaseModel):
     role: str
     stance: RoleStance = "mixed"
+    call_status: Literal["ok", "fallback", "abstain", "error"] = "ok"
+    latency_ms: int | None = None
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     summary: str = ""
     key_points: list[str] = Field(default_factory=list)
@@ -127,6 +129,8 @@ class RiskAssessment(BaseModel):
 
 class JudgeDecision(BaseModel):
     status: ProposalStatus = "manual_review_required"
+    call_status: Literal["ok", "fallback", "abstain", "error"] = "ok"
+    latency_ms: int | None = None
     converged: bool = False
     revise: bool = False
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -177,6 +181,7 @@ class TradeProposal(BaseModel):
     checklist: list[str] = Field(default_factory=list)
     account_address: str | None = None
     role_summaries: dict[str, str] = Field(default_factory=dict)
+    debate_participation: list[dict[str, Any]] = Field(default_factory=list)
     judge_summary: str = ""
     autonomous_execution_allowed: bool = False
     exchange_actions: list[dict[str, Any]] = Field(default_factory=list)

@@ -224,6 +224,8 @@ class HighStakesDebateGraph:
             critical=bool({"entry", "stop", "side"} & set(draft.needs)),
             model=result.model,
             provider=result.provider,
+            call_status=cast(Literal["ok", "fallback", "abstain", "error"], result.status),
+            latency_ms=result.latency_ms,
         )
         role_outputs = _replace_round_role(state.get("role_outputs", []), opinion, next_round)
         updates = {"draft": draft, "round": next_round, "role_outputs": role_outputs}
@@ -235,6 +237,15 @@ class HighStakesDebateGraph:
         async def node(state: HighStakesGraphState) -> dict[str, Any]:
             result = await self.role_runner.review(role, dict(state))
             opinion = result.parsed if isinstance(result.parsed, RoleOpinion) else RoleOpinion(role=role, stance="error", summary="Invalid role output")
+            opinion = opinion.model_copy(
+                update={
+                    "role": role,
+                    "call_status": result.status,
+                    "latency_ms": result.latency_ms,
+                    "model": result.model or opinion.model,
+                    "provider": result.provider or opinion.provider,
+                }
+            )
             role_outputs = _replace_round_role(state.get("role_outputs", []), opinion, int(state.get("round", 0)))
             updates = {"role_outputs": role_outputs}
             await self._record_role(state, role, int(state.get("round", 0)), result, opinion)
@@ -249,7 +260,7 @@ class HighStakesDebateGraph:
         if int(state.get("round", 0)) >= self.settings.high_stakes_max_rounds and decision.revise:
             decision = decision.model_copy(update={"revise": False, "status": "manual_review_required", "converged": False})
         coverage = decision.data_coverage or state.get("data_coverage") or DataCoverage()
-        decision = decision.model_copy(update={"data_coverage": coverage})
+        decision = decision.model_copy(update={"data_coverage": coverage, "call_status": result.status, "latency_ms": result.latency_ms})
         data_requests = decision.data_requests or [request for opinion in state.get("role_outputs", []) for request in opinion.data_requests]
         updates = {"judge_decision": decision, "data_requests": data_requests, "data_coverage": coverage}
         await self._record_role(state, "judge", int(state.get("round", 0)), result, decision)
@@ -383,6 +394,38 @@ def _replace_round_role(outputs: list[RoleOpinion], opinion: RoleOpinion, round_
     return kept
 
 
+def _debate_participation(role_outputs: list[RoleOpinion], judge: JudgeDecision) -> list[dict[str, Any]]:
+    order = ["analyst", "quant", "research", "risk", "treasury", "execution", "adversary"]
+    by_role = {item.role: item for item in role_outputs}
+    rows: list[dict[str, Any]] = []
+    for role in order:
+        opinion = by_role.get(role)
+        if opinion is None:
+            rows.append({"role": role, "status": "not_run", "summary": "Role did not run."})
+            continue
+        rows.append(
+            {
+                "role": role,
+                "status": opinion.call_status,
+                "model": opinion.model,
+                "provider": opinion.provider,
+                "latency_ms": opinion.latency_ms,
+                "summary": opinion.summary,
+            }
+        )
+    rows.append(
+        {
+            "role": "judge",
+            "status": judge.call_status,
+            "model": judge.model,
+            "provider": judge.provider,
+            "latency_ms": judge.latency_ms,
+            "summary": judge.summary,
+        }
+    )
+    return rows
+
+
 def _build_proposal(state: HighStakesGraphState) -> TradeProposal:
     draft = state.get("draft") or TradeSetupDraft()
     judge = state.get("judge_decision") or JudgeDecision(status="manual_review_required", summary="Judge did not produce a decision.")
@@ -393,6 +436,7 @@ def _build_proposal(state: HighStakesGraphState) -> TradeProposal:
     account_address = parsed.get("account_address")
     role_outputs = state.get("role_outputs", [])
     role_summaries = {opinion.role: opinion.summary for opinion in role_outputs}
+    debate_participation = _debate_participation(role_outputs, judge)
     coverage = context.data_coverage if context else DataCoverage()
     warnings = list(state.get("warnings", [])) + list(judge.final_warnings)
     if coverage.missing_endpoints:
@@ -454,6 +498,7 @@ def _build_proposal(state: HighStakesGraphState) -> TradeProposal:
         checklist=checklist,
         account_address=account_address,
         role_summaries=role_summaries,
+        debate_participation=debate_participation,
         judge_summary=judge.summary,
         autonomous_execution_allowed=False,
         exchange_actions=[],

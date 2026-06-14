@@ -147,6 +147,12 @@ def test_formatter_uses_tracking_plan_levels():
             "Re-check Hyperliquid mark/oracle, funding, spread, and depth immediately before acting.",
             "Execution readiness: asset_id=178 spread_bps=4.2 top_depth=$2000 est_slippage_bps=9.5",
         ],
+        debate_participation=[
+            {"role": "analyst", "status": "fallback", "latency_ms": 22500},
+            {"role": "quant", "status": "fallback", "latency_ms": 22500},
+            {"role": "research", "status": "abstain", "latency_ms": 0},
+            {"role": "judge", "status": "fallback", "latency_ms": 22500},
+        ],
         tracking_plan=plan.model_dump(mode="json"),
     )
     decision = JudgeDecision(status="manual_review_required", confidence=0.35, summary="fallback")
@@ -158,4 +164,8 @@ def test_formatter_uses_tracking_plan_levels():
     assert "Resistance confirmation: cross up through 16.904" in content
     assert "Re-check Hyperliquid" not in content
     assert "Liquidity: spread ~4.20 bps" in content
+    assert "Team participation:" in content
+    assert "Model-backed: none." in content
+    assert "Deterministic fallback / model timeout: Analyst, Quant, Judge." in content
+    assert "Not activated for this route: Research." in content
     assert summarize_tracking_plan(plan)

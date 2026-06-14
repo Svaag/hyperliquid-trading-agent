@@ -37,6 +37,11 @@ def format_trade_proposal(proposal: TradeProposal, judge: JudgeDecision | None =
     else:
         lines.append("- No endpoint coverage summary available.")
 
+    participation = _format_debate_participation(proposal.debate_participation)
+    if participation:
+        lines.extend(["", "Team participation:"])
+        lines.extend(participation)
+
     lines.extend(["", "Accepted critiques:"])
     lines.extend(f"- {item}" for item in accepted[:8]) if accepted else lines.append("- None recorded as accepted by Judge.")
     lines.extend(["", "Deferred critiques:"])
@@ -117,6 +122,11 @@ def _format_compact_position_review(proposal: TradeProposal, judge: JudgeDecisio
             lines.extend(["", "Live tracking:", f"- {tracking_status}"])
             lines.append('- In the thread, say "tracking status" or "stop tracking" to control it.')
 
+    participation = _format_debate_participation(proposal.debate_participation)
+    if participation:
+        lines.extend(["", "Team participation:"])
+        lines.extend(participation)
+
     lines.extend(["", "Decision frame:"])
     lines.append("- Hold case: price respects the terminal downside/upside trigger above and confirms through the relevant reclaim/resistance/support level.")
     lines.append("- Reduce/exit case: price loses the terminal technical trigger, cannot reclaim entry before the event you care about, or liquidity thins into the open.")
@@ -138,6 +148,36 @@ def _format_compact_position_review(proposal: TradeProposal, judge: JudgeDecisio
         lines.extend(["", "Notes:"])
         lines.extend(f"- {item}" for item in public_warnings[:3])
     return "\n".join(str(line) for line in lines if line is not None)[:3500]
+
+
+def _format_debate_participation(participation: list[dict]) -> list[str]:
+    if not participation:
+        return []
+    model_backed = [item for item in participation if item.get("status") == "ok" and item.get("model")]
+    fallback = [item for item in participation if item.get("status") == "fallback"]
+    skipped = [item for item in participation if item.get("status") in {"abstain", "not_run"}]
+    errored = [item for item in participation if item.get("status") == "error"]
+    lines: list[str] = []
+    if model_backed:
+        lines.append("- Model-backed: " + ", ".join(_role_with_model(item) for item in model_backed) + ".")
+    else:
+        lines.append("- Model-backed: none.")
+    if fallback:
+        lines.append("- Deterministic fallback / model timeout: " + ", ".join(_role_name(item) for item in fallback) + ".")
+    if skipped:
+        lines.append("- Not activated for this route: " + ", ".join(_role_name(item) for item in skipped) + ".")
+    if errored:
+        lines.append("- Role errors: " + ", ".join(_role_name(item) for item in errored) + ".")
+    return lines
+
+
+def _role_name(item: dict) -> str:
+    return str(item.get("role", "unknown")).replace("_", " ").title()
+
+
+def _role_with_model(item: dict) -> str:
+    model = str(item.get("model") or "unknown")
+    return f"{_role_name(item)} ({model})"
 
 
 def _tracking_status_line(plan_payload: dict | None) -> str:
