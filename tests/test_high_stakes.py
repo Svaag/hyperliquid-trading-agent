@@ -420,3 +420,20 @@ def test_trade_proposal_api_reports_disabled_in_dev():
         response = client.post("/trade/proposals", json={"prompt": "long BTC entry 100 stop 95"})
 
     assert response.status_code == 409
+
+
+def test_tracking_api_requires_token_outside_dev():
+    app = create_app(Settings(environment="prod", agent_api_bearer_token="", discord_bot_token="", position_tracking_enabled=False))
+    with TestClient(app) as client:
+        response = client.get("/tracking/positions")
+
+    assert response.status_code == 503
+
+
+def test_health_config_reports_tracking_status():
+    app = create_app(Settings(environment="dev", discord_bot_token="", position_tracking_enabled=False))
+    with TestClient(app) as client:
+        response = client.get("/health/config")
+
+    assert response.status_code == 200
+    assert response.json()["position_tracking"]["enabled"] is False

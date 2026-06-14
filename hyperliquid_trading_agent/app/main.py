@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -146,6 +147,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ready_checks["hyperliquid"] = "ok"
         except Exception as exc:
             ready_checks["hyperliquid"] = f"degraded:{type(exc).__name__}"
+        if settings.position_tracking_enabled:
+            tracking_status = app.state.tracking_service.status()
+            ws_status = app.state.ws_worker.status()
+            last_message_at = ws_status.get("last_message_at_ms")
+            stale = tracking_status.get("active_count", 0) > 0 and (not last_message_at or int(time.time() * 1000) - int(last_message_at) > 120_000)
+            ready_checks["position_tracking"] = "degraded:websocket_stale" if stale else "ok"
         return {"status": "ready", "checks": ready_checks}
 
     @app.get("/health/config")
@@ -158,6 +165,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "hyperliquid_exchange_enabled": settings.hyperliquid_exchange_enabled,
             "hyperliquid_ws_enabled": settings.hyperliquid_ws_enabled,
             "models": [{"model": item.model, "provider": item.provider, "missing": item.missing_reason} for item in attempts],
+            "position_tracking": _tracking_config_status(app),
             "high_stakes": {
                 "enabled": settings.high_stakes_debate_enabled,
                 "activation_policy": settings.high_stakes_activation_policy,
@@ -220,6 +228,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="trade proposal not found")
         return proposal
 
+    @app.get("/tracking/positions")
+    async def list_tracking_positions(
+        status: str | None = None,
+        coin: str | None = None,
+        discord_thread_id: str | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        repository: Repository = app.state.repository
+        items = await repository.list_position_trackers(status=status, coin=coin, discord_thread_id=discord_thread_id)
+        return {"items": items, "count": len(items)}
+
+    @app.get("/tracking/positions/{tracker_id}")
+    async def get_tracking_position(tracker_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        repository: Repository = app.state.repository
+        tracker = await repository.get_position_tracker(tracker_id)
+        if tracker is None:
+            raise HTTPException(status_code=404, detail="tracker not found")
+        return tracker
+
+    @app.get("/tracking/positions/{tracker_id}/events")
+    async def get_tracking_events(tracker_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        repository: Repository = app.state.repository
+        tracker = await repository.get_position_tracker(tracker_id)
+        if tracker is None:
+            raise HTTPException(status_code=404, detail="tracker not found")
+        events = await repository.list_tracking_events(tracker_id)
+        return {"items": events, "count": len(events)}
+
+    @app.post("/tracking/positions/{tracker_id}/pause")
+    async def pause_tracking_position(tracker_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        return await _set_tracker_status(app, settings, tracker_id, "paused", authorization)
+
+    @app.post("/tracking/positions/{tracker_id}/resume")
+    async def resume_tracking_position(tracker_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        return await _set_tracker_status(app, settings, tracker_id, "active", authorization)
+
+    @app.post("/tracking/positions/{tracker_id}/stop")
+    async def stop_tracking_position(tracker_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        return await _set_tracker_status(app, settings, tracker_id, "stopped", authorization)
+
     @app.get("/metrics")
     async def metrics(authorization: str | None = Header(default=None)):
         if settings.metrics_bearer_token:
@@ -229,6 +280,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     return app
+
+
+def _tracking_config_status(app: FastAPI) -> dict[str, Any]:
+    settings: Settings = app.state.settings
+    tracking_service = getattr(app.state, "tracking_service", None)
+    ws_worker = getattr(app.state, "ws_worker", None)
+    service_status = tracking_service.status() if tracking_service is not None else {}
+    return {
+        "enabled": settings.position_tracking_enabled,
+        "auto_arm": settings.position_tracking_auto_arm,
+        "price_source": settings.position_tracking_price_source,
+        "default_ttl_hours": settings.position_tracking_default_ttl_hours,
+        "rearm_band_bps": settings.position_tracking_rearm_band_bps,
+        "reload_seconds": settings.position_tracking_reload_seconds,
+        "max_active": settings.position_tracking_max_active,
+        "service": service_status,
+        "ws_status": ws_worker.status() if ws_worker is not None else {},
+    }
+
+
+async def _set_tracker_status(app: FastAPI, settings: Settings, tracker_id: str, status: str, authorization: str | None) -> dict[str, Any]:
+    _require_agent_api(settings, authorization)
+    repository: Repository = app.state.repository
+    tracker = await repository.get_position_tracker(tracker_id)
+    if tracker is None:
+        raise HTTPException(status_code=404, detail="tracker not found")
+    await repository.set_position_tracker_status(tracker_id, status, reason="api")
+    tracking_service: PositionTrackingService = app.state.tracking_service
+    await tracking_service.reload_active_trackers()
+    updated = await repository.get_position_tracker(tracker_id)
+    return {"status": status, "tracker": updated}
 
 
 def _require_agent_api(settings: Settings, authorization: str | None) -> None:
