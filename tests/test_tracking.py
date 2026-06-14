@@ -3,6 +3,7 @@ from __future__ import annotations
 from hyperliquid_trading_agent.app.agent.high_stakes.formatting import format_trade_proposal
 from hyperliquid_trading_agent.app.agent.high_stakes.schemas import JudgeDecision, TradeProposal
 from hyperliquid_trading_agent.app.tracking.levels import derive_position_tracking_plan, summarize_tracking_plan
+from hyperliquid_trading_agent.app.tracking.service import evaluate_level
 
 
 def test_derive_long_position_tracking_plan_from_canonical_features():
@@ -53,6 +54,28 @@ def test_tracking_level_dedup_keeps_hard_stop_over_nearby_derived_level():
     assert plan is not None
     near_stop = [level for level in plan.levels if abs(level.price - 100.0) < 0.01]
     assert [level.kind for level in near_stop] == ["hard_stop"]
+
+
+def test_crossing_engine_hits_and_rearms_with_hysteresis():
+    features = {"market": {"VVV": {"mid": 16.25}}, "candles": {"VVV": {"recent_support": 15.63}}}
+    plan = derive_position_tracking_plan(coin="VVV", side="long", entry=16.4, stop=15.5, features=features, now_ms=1)
+    assert plan is not None
+    technical = next(level for level in plan.levels if level.kind == "technical_exit")
+    reclaim = next(level for level in plan.levels if level.kind == "entry_reclaim")
+
+    assert evaluate_level(technical, 15.7, 15.62).hit is True
+    disarmed = reclaim.model_copy(update={"armed": False, "hit_count": 1})
+    assert evaluate_level(disarmed, 16.5, 16.39).rearmed is False
+    assert evaluate_level(disarmed, 16.5, 16.38).rearmed is True
+
+
+def test_crossing_engine_detects_initial_terminal_breach_only():
+    features = {"market": {"VVV": {"mid": 15.4}}, "candles": {"VVV": {}}}
+    plan = derive_position_tracking_plan(coin="VVV", side="long", entry=16.4, stop=15.5, features=features, now_ms=1)
+    assert plan is not None
+    hard_stop = next(level for level in plan.levels if level.kind == "hard_stop")
+
+    assert evaluate_level(hard_stop, None, 15.4, first_update=True).already_breached is True
 
 
 def test_formatter_uses_tracking_plan_levels():

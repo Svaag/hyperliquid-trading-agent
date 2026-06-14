@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     hyperliquid_ws_enabled: bool = False
     hyperliquid_exchange_enabled: bool = False
 
+    position_tracking_enabled: bool = True
+    position_tracking_auto_arm: bool = True
+    position_tracking_default_ttl_hours: int = 168
+    position_tracking_price_source: Literal["allMids"] = "allMids"
+    position_tracking_rearm_band_bps: float = 10.0
+    position_tracking_reload_seconds: int = 10
+    position_tracking_max_active: int = 250
+    position_tracking_alert_retry_count: int = 3
+
     high_stakes_debate_enabled: bool = False
     high_stakes_activation_policy: Literal["risk_routed", "explicit_only", "all_trading_questions"] = "risk_routed"
     high_stakes_prompt_style: Literal["standard", "aggressive"] = "standard"
