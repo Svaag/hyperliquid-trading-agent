@@ -365,5 +365,5 @@ def _fallback_answer(prompt: str, tool_results: list[ToolResult], model_error: s
         lines.append("- Additional checks: " + ", ".join(sorted(set(other_tools))) + ".")
     if trade_intent:
         lines.append("- Execution note: no trade was placed; this is analysis only.")
-    lines.append("- Model note: provider unavailable, so this is a deterministic data read.")
+    lines.append("- Model note: no model returned usable text, so this is a deterministic data read.")
     return "\n".join(lines)[:4000]

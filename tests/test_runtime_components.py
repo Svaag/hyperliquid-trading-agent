@@ -63,6 +63,21 @@ class FailingModelGateway:
         raise ModelGatewayError("no configured credentials")
 
 
+class FakeMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+class FakeChoice:
+    def __init__(self, content):
+        self.message = FakeMessage(content)
+
+
+class FakeCompletion:
+    def __init__(self, content):
+        self.choices = [FakeChoice(content)]
+
+
 def test_model_gateway_provider_mapping(monkeypatch):
     settings = Settings(
         agent_model_chain="openrouter:anthropic/claude-3-5-sonnet,openai:gpt-4o-mini,anthropic:claude-3-haiku,kimi:moonshot-v1-8k",
@@ -78,6 +93,27 @@ def test_model_gateway_provider_mapping(monkeypatch):
     assert attempts[0].litellm_model == "openrouter/anthropic/claude-3-5-sonnet"
     assert attempts[-1].api_base == "https://api.moonshot.ai/v1"
     assert all(item.missing_reason is None for item in attempts)
+
+
+@pytest.mark.asyncio
+async def test_model_gateway_skips_empty_model_response(monkeypatch):
+    import litellm
+
+    calls = []
+
+    async def fake_acompletion(**kwargs):
+        calls.append(kwargs["model"])
+        return FakeCompletion("" if len(calls) == 1 else "usable response")
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    settings = Settings(agent_model_chain="openrouter:first,openrouter:second", openrouter_api_key="or-key")
+
+    result = await ModelGateway(settings).complete("prompt", "system")
+
+    assert calls == ["openrouter/first", "openrouter/second"]
+    assert result.content == "usable response"
+    assert result.model == "openrouter:second"
+    assert "empty response" in result.attempts[0]
 
 
 @pytest.mark.asyncio

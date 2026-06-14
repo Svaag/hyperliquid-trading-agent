@@ -197,10 +197,16 @@ class ModelGateway:
                 if attempt.api_base:
                     kwargs["api_base"] = attempt.api_base
                 response = await acompletion(**kwargs)
-                content = response.choices[0].message.content or ""
+                content = (response.choices[0].message.content or "").strip()
+                if not content:
+                    MODEL_CALLS.labels(provider=attempt.provider, result="empty").inc()
+                    MODEL_LATENCY.labels(provider=attempt.provider).observe(time.perf_counter() - started)
+                    errors.append(f"{attempt.model}: empty response")
+                    log.warning("model_attempt_empty", model=attempt.model, provider=attempt.provider)
+                    continue
                 MODEL_CALLS.labels(provider=attempt.provider, result="ok").inc()
                 MODEL_LATENCY.labels(provider=attempt.provider).observe(time.perf_counter() - started)
-                return ModelResponse(content=content.strip(), model=attempt.model, provider=attempt.provider, attempts=errors)
+                return ModelResponse(content=content, model=attempt.model, provider=attempt.provider, attempts=errors)
             except Exception as exc:
                 MODEL_CALLS.labels(provider=attempt.provider, result="error").inc()
                 MODEL_LATENCY.labels(provider=attempt.provider).observe(time.perf_counter() - started)
