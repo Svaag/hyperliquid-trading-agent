@@ -4,6 +4,9 @@ from hyperliquid_trading_agent.app.agent.high_stakes.schemas import JudgeDecisio
 
 
 def format_trade_proposal(proposal: TradeProposal, judge: JudgeDecision | None = None) -> str:
+    if _should_use_compact_position_review(proposal, judge):
+        return _format_compact_position_review(proposal, judge)
+
     coverage = judge.data_coverage if judge and judge.data_coverage else None
     accepted = list(judge.accepted_critiques if judge else [])
     deferred = list(judge.deferred_critiques if judge else [])
@@ -77,5 +80,54 @@ def format_trade_proposal(proposal: TradeProposal, judge: JudgeDecision | None =
     lines.extend(["", "No-execution caveat:"])
     lines.append("- No trade was placed. This is a non-executing proposal/review.")
     lines.append("- Autonomous/live exchange execution is disabled; exchange_actions is intentionally empty.")
-    lines.extend(f"- {item}" for item in proposal.warnings[:8])
+    lines.extend(f"- {item}" for item in _public_warnings(proposal.warnings)[:8])
     return "\n".join(str(line) for line in lines if line is not None)[:7000]
+
+
+def _should_use_compact_position_review(proposal: TradeProposal, judge: JudgeDecision | None) -> bool:
+    model_fallback = any("model_fallback" in item or "Model fallback" in item for item in proposal.warnings + proposal.risks)
+    judge_fallback = bool(judge and judge.model is None)
+    has_position = bool(proposal.coin and proposal.entry is not None and proposal.stop is not None)
+    return has_position and (model_fallback or judge_fallback)
+
+
+def _format_compact_position_review(proposal: TradeProposal, judge: JudgeDecision | None = None) -> str:
+    confidence = judge.confidence if judge else 0.35
+    lines = [
+        f"{proposal.coin} position review — {proposal.side or 'position'} from {proposal.entry}, stop {proposal.stop}",
+        "",
+        "Read:",
+    ]
+    rationale = [item for item in proposal.rationale if "model" not in item.lower()]
+    if rationale:
+        lines.extend(f"- {item}" for item in rationale[:5])
+    else:
+        lines.append("- Live market data was gathered, but no clean edge was produced by the review.")
+
+    lines.extend(["", "Decision frame:"])
+    lines.append("- Base case: defensive hold only if price is respecting intraday structure above your stop and not accelerating lower.")
+    lines.append("- If you do not want market-open / overnight gap risk, scale down or exit before the event instead of waiting for the stop to make the decision for you.")
+    lines.append("- A reclaim of entry/nearby resistance with improving volume/liquidity would strengthen the hold case; continued drift below entry strengthens the exit/reduce case.")
+
+    lines.extend(["", "Risk:"])
+    if proposal.risk_usd is not None:
+        lines.append(f"- Planned loss to stop: ${proposal.risk_usd:g}" + (f" ({proposal.risk_pct:g}% configured risk)." if proposal.risk_pct is not None else "."))
+    if proposal.notional_usd is not None:
+        lines.append(f"- Estimated notional from configured risk: ${proposal.notional_usd:g}.")
+    lines.append(f"- Confidence: {confidence:.0%}. This is a hold/reduce decision, not a fresh entry signal.")
+
+    useful_checklist = [item for item in proposal.checklist if not item.lower().startswith("manual confirmation") and "service does not sign" not in item.lower()]
+    if useful_checklist:
+        lines.extend(["", "Execution / liquidity checks:"])
+        lines.extend(f"- {item}" for item in useful_checklist[:4])
+
+    public_warnings = _public_warnings(proposal.warnings)
+    if public_warnings:
+        lines.extend(["", "Notes:"])
+        lines.extend(f"- {item}" for item in public_warnings[:3])
+    return "\n".join(str(line) for line in lines if line is not None)[:3500]
+
+
+def _public_warnings(warnings: list[str]) -> list[str]:
+    hidden_terms = ("model_fallback", "judge_model_fallback", "TimeoutError", "deterministic")
+    return [warning for warning in warnings if not any(term in warning for term in hidden_terms)]

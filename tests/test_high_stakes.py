@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 import hyperliquid_trading_agent.app.hyperliquid.sdk_info_client as sdk_info_module
 from hyperliquid_trading_agent.app.agent.high_stakes.context import HighStakesContextBuilder
 from hyperliquid_trading_agent.app.agent.high_stakes.features import parse_trade_setup
+from hyperliquid_trading_agent.app.agent.high_stakes.formatting import format_trade_proposal
 from hyperliquid_trading_agent.app.agent.high_stakes.graph import HighStakesDebateGraph
 from hyperliquid_trading_agent.app.agent.high_stakes.prompts import ROLES, role_system_prompt
 from hyperliquid_trading_agent.app.agent.high_stakes.roles import HighStakesRoleRunner
@@ -18,6 +19,7 @@ from hyperliquid_trading_agent.app.agent.high_stakes.schemas import (
     JudgeDecision,
     RoleOpinion,
     RoleScorecard,
+    TradeProposal,
     TradeProposalRequest,
     TradeProposalResponse,
     TradeSetupDraft,
@@ -256,6 +258,27 @@ def test_parse_trade_setup_handles_position_hold_language():
     assert setup["side"] == "long"
     assert setup["entry"] == 16.40
     assert setup["stop"] == 15.50
+
+
+def test_compact_position_review_hides_model_fallback_noise():
+    proposal = TradeProposal(
+        status="manual_review_required",
+        coin="VVV",
+        side="long",
+        entry=16.4,
+        stop=15.5,
+        rationale=["Position context: VVV long is -1% from entry."],
+        risks=["Model fallback for quant: TimeoutError"],
+        warnings=["judge_model_fallback:TimeoutError"],
+    )
+    decision = JudgeDecision(status="manual_review_required", confidence=0.35, summary="Deterministic high-stakes review completed")
+
+    content = format_trade_proposal(proposal, decision)
+
+    assert "VVV position review" in content
+    assert "TimeoutError" not in content
+    assert "Deterministic" not in content
+    assert "Accepted critiques" not in content
 
 
 @pytest.mark.asyncio
