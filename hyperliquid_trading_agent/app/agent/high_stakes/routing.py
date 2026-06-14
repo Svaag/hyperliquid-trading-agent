@@ -80,7 +80,7 @@ def route_high_stakes(
         activate=activate,
         research_intent=research_intent,
         account_intent=account_intent or bool(addresses),
-        execution_intent=execution or setup,
+        execution_intent=execution,
     )
     return HighStakesRoute(
         activate=activate,
@@ -95,8 +95,12 @@ def route_high_stakes(
 
 
 def extract_route_coins(text: str) -> list[str]:
+    # Any all-caps token may be a Hyperliquid ticker. Keep the explicit common
+    # list for lower/mixed-case extraction, but do not block uppercase symbols
+    # just because this allowlist is stale.
+    uppercase_tickers = {match.group(0).upper() for match in TOKEN_RE.finditer(text)}
     candidates = set(TOKEN_RE.findall(text.upper()))
-    coins = [coin for coin in candidates if coin in COMMON_COINS or coin.startswith("@")]
+    coins = list(uppercase_tickers | {coin for coin in candidates if coin in COMMON_COINS or coin.startswith("@")} )
     lowered = text.lower()
     if "bitcoin" in lowered:
         coins.append("BTC")

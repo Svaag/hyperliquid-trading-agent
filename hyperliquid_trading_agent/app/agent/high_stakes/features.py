@@ -6,7 +6,10 @@ from typing import Any
 
 from hyperliquid_trading_agent.app.hyperliquid.risk_math import fixed_risk_position_size
 
-NUMBER_RE = re.compile(r"(?P<label>entry|stop|sl|tp|take profit|equity|account|risk)\s*[:=]?\s*\$?(?P<value>\d+(?:\.\d+)?)", re.IGNORECASE)
+NUMBER_RE = re.compile(r"(?P<label>entry|stop|sl|tp|take profit|target|equity|account|risk)\s*[:=]?\s*\$?(?P<value>\d+(?:\.\d+)?)", re.IGNORECASE)
+ENTRY_PHRASE_RE = re.compile(r"\b(?:entered|bought|longed|shorted|got\s+in(?:to)?)\b.{0,80}?\bat\s+\$?(?P<value>\d+(?:\.\d+)?)", re.IGNORECASE)
+STOP_PHRASE_RE = re.compile(r"\b(?:stop(?:\s+loss)?|sl)\b(?:\s+(?:is|at|around|near|to))?\s+\$?(?P<value>\d+(?:\.\d+)?)", re.IGNORECASE)
+TARGET_PHRASE_RE = re.compile(r"\b(?:target|tp|take\s+profit|exit)\b(?:\s+(?:is|at|around|near|to|before))?\s+\$?(?P<value>\d+(?:\.\d+)?)", re.IGNORECASE)
 
 
 def build_deterministic_features(prompt: str, tool_results: list[dict[str, Any]], request_overrides: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -70,15 +73,31 @@ def parse_trade_setup(prompt: str) -> dict[str, Any]:
         value = float(match.group("value"))
         if label == "sl":
             label = "stop"
-        if label == "take profit":
+        if label in {"take profit", "target"}:
             label = "tp"
         if label == "account":
             label = "equity"
         values[label] = value
+    if "entry" not in values:
+        entry_match = ENTRY_PHRASE_RE.search(prompt)
+        if entry_match:
+            values["entry"] = float(entry_match.group("value"))
+    if "stop" not in values:
+        stop_match = STOP_PHRASE_RE.search(prompt)
+        if stop_match:
+            values["stop"] = float(stop_match.group("value"))
+    if "tp" not in values:
+        target_match = TARGET_PHRASE_RE.search(prompt)
+        if target_match:
+            values["tp"] = float(target_match.group("value"))
+    entry = values.get("entry")
+    stop = values.get("stop")
+    if side is None and entry is not None and stop is not None:
+        side = "long" if stop < entry else "short" if stop > entry else None
     return {
         "side": side,
-        "entry": values.get("entry"),
-        "stop": values.get("stop"),
+        "entry": entry,
+        "stop": stop,
         "take_profit": values.get("tp"),
         "account_equity_usd": values.get("equity"),
         "risk_pct": values.get("risk"),

@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 import hyperliquid_trading_agent.app.hyperliquid.sdk_info_client as sdk_info_module
 from hyperliquid_trading_agent.app.agent.high_stakes.context import HighStakesContextBuilder
+from hyperliquid_trading_agent.app.agent.high_stakes.features import parse_trade_setup
 from hyperliquid_trading_agent.app.agent.high_stakes.graph import HighStakesDebateGraph
 from hyperliquid_trading_agent.app.agent.high_stakes.prompts import ROLES, role_system_prompt
 from hyperliquid_trading_agent.app.agent.high_stakes.roles import HighStakesRoleRunner
@@ -240,10 +241,21 @@ def test_institutional_schema_accepts_evidence_and_rubrics():
 def test_high_stakes_route_is_risk_routed_not_every_market_read():
     ordinary = route_high_stakes("What is your BTC market read?")
     setup = route_high_stakes("Plan a paper long BTC entry 100 stop 95 tp 115 equity 10000 risk 1")
+    position = route_high_stakes("I entered VVV two days ago at 16.40 and have a stop loss at 15.50; hold or exit?")
 
     assert ordinary.activate is False
     assert setup.activate is True
     assert {"analyst", "quant", "risk", "adversary", "judge"}.issubset(set(setup.selected_roles))
+    assert "VVV" in position.coins
+    assert "execution" not in position.selected_roles
+
+
+def test_parse_trade_setup_handles_position_hold_language():
+    setup = parse_trade_setup("I entered VVV two days ago at 16.40 and I have a stop loss at 15.50; hold or exit?")
+
+    assert setup["side"] == "long"
+    assert setup["entry"] == 16.40
+    assert setup["stop"] == 15.50
 
 
 @pytest.mark.asyncio

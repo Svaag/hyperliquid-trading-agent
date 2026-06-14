@@ -385,6 +385,11 @@ def _build_proposal(state: HighStakesGraphState) -> TradeProposal:
         )
     checklist.append(f"Endpoint coverage: {coverage.coverage_score:.0%} ({len(coverage.used_endpoints)}/{len(coverage.required_endpoints)} endpoints used).")
 
+    deterministic_rationale = _deterministic_position_rationale(features, draft)
+    if deterministic_rationale and judge.model is None:
+        rationale = deterministic_rationale
+    else:
+        rationale = list(judge.final_rationale) or deterministic_rationale
     return TradeProposal(
         status=status,
         coin=draft.coin,
@@ -399,7 +404,7 @@ def _build_proposal(state: HighStakesGraphState) -> TradeProposal:
         notional_usd=risk.get("notional_usd"),
         thesis=draft.thesis,
         invalidation=draft.invalidation or (f"Stop at {draft.stop}" if draft.stop else "Missing explicit stop/invalidation."),
-        rationale=judge.final_rationale,
+        rationale=rationale,
         risks=list(judge.final_risks) + [risk for opinion in role_outputs for risk in opinion.risks[:2]],
         warnings=warnings,
         checklist=checklist,
@@ -410,6 +415,38 @@ def _build_proposal(state: HighStakesGraphState) -> TradeProposal:
         exchange_actions=[],
         tool_summary=features.get("tool_summary", []) if isinstance(features, dict) else [],
     )
+
+
+def _deterministic_position_rationale(features: dict[str, Any], draft: TradeSetupDraft) -> list[str]:
+    if not draft.coin or draft.entry is None or draft.stop is None:
+        return []
+    market = features.get("market", {}) if isinstance(features, dict) else {}
+    asset = market.get(draft.coin) if isinstance(market, dict) else None
+    if not isinstance(asset, dict):
+        return []
+    mid = asset.get("mid") or asset.get("mark")
+    if mid is None:
+        return []
+    entry = float(draft.entry)
+    stop = float(draft.stop)
+    current = float(mid)
+    pnl_pct = ((current - entry) / entry) * 100 if draft.side == "long" else ((entry - current) / entry) * 100
+    stop_distance_pct = (abs(current - stop) / current) * 100 if current else None
+    funding = asset.get("funding")
+    premium = asset.get("premium")
+    prev_day = asset.get("prev_day_px")
+    day_change = ((current - float(prev_day)) / float(prev_day)) * 100 if prev_day else None
+    lines = [
+        f"Position context: {draft.coin} {draft.side or 'position'} is ~{pnl_pct:.2f}% from entry {entry:g}; stop {stop:g} is ~{stop_distance_pct:.2f}% away from current {current:g}.",
+    ]
+    if day_change is not None:
+        lines.append(f"Tape check: current is {day_change:.2f}% vs prior day reference; this is {'constructive' if day_change > 0 else 'pressure/drag'} for a hold decision.")
+    if funding is not None:
+        lines.append(f"Funding is {funding}; no standalone funding squeeze signal from this snapshot.")
+    if premium is not None:
+        lines.append(f"Premium is {premium}; use mark/oracle divergence as a short-term perp positioning tell, not a thesis by itself.")
+    lines.append("Action frame: hold only while price respects your invalidation and intraday structure; if you do not want overnight/open risk, scale/exit before the event rather than improvising below plan.")
+    return lines
 
 
 def _asset_validation(features: dict[str, Any], draft: TradeSetupDraft, risk: dict[str, Any]) -> str:

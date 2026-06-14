@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import Any, cast
@@ -37,7 +38,7 @@ class HighStakesRoleRunner:
     async def draft_setup(self, state: dict[str, Any]) -> RoleCallResult:
         started = time.perf_counter()
         try:
-            response = await self.model_gateway.complete_structured(
+            response = await self._complete_structured_with_timeout(
                 role_user_prompt("analyst", self.settings.high_stakes_prompt_style),
                 role_system_prompt("analyst", self.settings.high_stakes_prompt_style),
                 TradeSetupDraft,
@@ -59,7 +60,7 @@ class HighStakesRoleRunner:
             opinion = RoleOpinion(role=role, stance="abstain", summary="Role not activated for this route.")
             return RoleCallResult(opinion, opinion.model_dump_json(), None, None, _elapsed_ms(started), status="abstain")
         try:
-            response = await self.model_gateway.complete_structured(
+            response = await self._complete_structured_with_timeout(
                 role_user_prompt(role, self.settings.high_stakes_prompt_style),
                 role_system_prompt(role, self.settings.high_stakes_prompt_style),
                 RoleOpinion,
@@ -81,7 +82,7 @@ class HighStakesRoleRunner:
     async def judge(self, state: dict[str, Any]) -> RoleCallResult:
         started = time.perf_counter()
         try:
-            response = await self.model_gateway.complete_structured(
+            response = await self._complete_structured_with_timeout(
                 role_user_prompt("judge", self.settings.high_stakes_prompt_style),
                 role_system_prompt("judge", self.settings.high_stakes_prompt_style),
                 JudgeDecision,
@@ -98,6 +99,13 @@ class HighStakesRoleRunner:
             decision = fallback_judge(state, reason=type(exc).__name__)
             return RoleCallResult(decision, decision.model_dump_json(), None, None, _elapsed_ms(started), status="fallback")
 
+    async def _complete_structured_with_timeout(self, *args: Any, **kwargs: Any):
+        # Free/dev models can hang or return malformed JSON. Keep each role on a
+        # short leash and let deterministic fallbacks complete the debate rather
+        # than timing out the entire graph with an unusable final answer.
+        timeout_seconds = min(25.0, max(8.0, self.settings.high_stakes_timeout_seconds / 8))
+        return await asyncio.wait_for(self.model_gateway.complete_structured(*args, **kwargs), timeout=timeout_seconds)
+
 
 def fallback_draft(state: dict[str, Any], reason: str = "") -> TradeSetupDraft:
     context = state.get("context")
@@ -112,8 +120,9 @@ def fallback_draft(state: dict[str, Any], reason: str = "") -> TradeSetupDraft:
         needs.append("stop")
     if not parsed.get("side"):
         needs.append("side")
+    assumptions = ["LLM role call unavailable; draft is parsed deterministically."]
     if reason:
-        needs.append(f"model_fallback:{reason}")
+        assumptions.append(f"model_fallback:{reason}")
     return TradeSetupDraft(
         coin=coins[0] if coins else None,
         side=parsed.get("side"),
@@ -123,7 +132,7 @@ def fallback_draft(state: dict[str, Any], reason: str = "") -> TradeSetupDraft:
         timeframe=parsed.get("timeframe"),
         thesis="Deterministic fallback draft from prompt and gathered Hyperliquid context.",
         confidence=0.35,
-        assumptions=["LLM role call unavailable; draft is parsed deterministically."],
+        assumptions=assumptions,
         risk_pct=parsed.get("risk_pct"),
         account_equity_usd=parsed.get("account_equity_usd"),
         invalidation=f"Stop at {parsed.get('stop')}" if parsed.get("stop") else "Missing stop; invalidation unavailable.",
@@ -180,12 +189,16 @@ def fallback_judge(state: dict[str, Any], reason: str = "") -> JudgeDecision:
     role_outputs = state.get("role_outputs", [])
     criticals = [item.summary for item in role_outputs if getattr(item, "critical", False)]
     missing = list(getattr(draft, "needs", []) or []) if draft else ["draft_missing"]
+    model_fallbacks = [risk for item in role_outputs for risk in getattr(item, "risks", []) if "Model fallback" in risk or "model_fallback" in risk]
     if criticals:
         status = "manual_review_required"
         summary = "Critical reviewer concerns remain unresolved."
     elif missing:
         status = "needs_more_data"
         summary = "The setup is missing required trade parameters."
+    elif model_fallbacks:
+        status = "manual_review_required"
+        summary = "Deterministic high-stakes review completed, but one or more role models timed out; use manual confirmation."
     elif draft and draft.entry and draft.stop and draft.side:
         status = "paper_ready"
         summary = "Paper proposal can be produced, but live execution remains disabled."

@@ -44,6 +44,12 @@ def format_trade_proposal(proposal: TradeProposal, judge: JudgeDecision | None =
         lines.append(f"- Thesis: {proposal.thesis}")
     lines.append(f"- Invalidation: {proposal.invalidation or 'missing'}")
 
+    lines.extend(["", "Rationale / tape read:"])
+    if proposal.rationale:
+        lines.extend(f"- {item}" for item in proposal.rationale[:8])
+    else:
+        lines.append("- No rationale was produced.")
+
     lines.extend(["", "Risk:"])
     if proposal.risk_usd is not None:
         lines.append(f"- Max planned loss to stop: ${proposal.risk_usd} ({proposal.risk_pct}% configured risk).")
