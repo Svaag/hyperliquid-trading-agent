@@ -390,6 +390,8 @@ def _build_proposal(state: HighStakesGraphState) -> TradeProposal:
         rationale = deterministic_rationale
     else:
         rationale = list(judge.final_rationale) or deterministic_rationale
+    has_explicit_equity = not bool(risk.get("equity_is_assumed", False))
+    has_explicit_risk_pct = not bool(risk.get("risk_pct_is_assumed", False))
     return TradeProposal(
         status=status,
         coin=draft.coin,
@@ -398,10 +400,10 @@ def _build_proposal(state: HighStakesGraphState) -> TradeProposal:
         stop=draft.stop,
         take_profit=draft.take_profit,
         timeframe=draft.timeframe,
-        risk_usd=risk.get("risk_usd"),
-        risk_pct=risk.get("risk_pct"),
-        size_units=risk.get("size_units"),
-        notional_usd=risk.get("notional_usd"),
+        risk_usd=risk.get("risk_usd") if has_explicit_equity else None,
+        risk_pct=risk.get("risk_pct") if has_explicit_risk_pct else None,
+        size_units=risk.get("size_units") if has_explicit_equity else None,
+        notional_usd=risk.get("notional_usd") if has_explicit_equity else None,
         thesis=draft.thesis,
         invalidation=draft.invalidation or (f"Stop at {draft.stop}" if draft.stop else "Missing explicit stop/invalidation."),
         rationale=rationale,
@@ -430,23 +432,96 @@ def _deterministic_position_rationale(features: dict[str, Any], draft: TradeSetu
     entry = float(draft.entry)
     stop = float(draft.stop)
     current = float(mid)
-    pnl_pct = ((current - entry) / entry) * 100 if draft.side == "long" else ((entry - current) / entry) * 100
+    is_long = draft.side != "short"
+    pnl_pct = ((current - entry) / entry) * 100 if is_long else ((entry - current) / entry) * 100
     stop_distance_pct = (abs(current - stop) / current) * 100 if current else None
-    funding = asset.get("funding")
-    premium = asset.get("premium")
+    candles_by_coin = features.get("candles", {}) if isinstance(features, dict) else {}
+    candles = candles_by_coin.get(draft.coin, {}) if isinstance(candles_by_coin, dict) else {}
+    recent_support = _float_or_none(candles.get("recent_support"))
+    recent_resistance = _float_or_none(candles.get("recent_resistance"))
+    recent_change_pct = _float_or_none(candles.get("recent_change_pct"))
+    last_3_change_pct = _float_or_none(candles.get("last_3_change_pct"))
+    atr_pct = _float_or_none(candles.get("atr_pct"))
+    funding = _float_or_none(asset.get("funding"))
+    mark_oracle_bps = _float_or_none(asset.get("mark_oracle_divergence_bps"))
     prev_day = asset.get("prev_day_px")
     day_change = ((current - float(prev_day)) / float(prev_day)) * 100 if prev_day else None
+    structure_ok = True
+    if is_long and recent_support is not None:
+        structure_ok = current >= recent_support
+    elif not is_long and recent_resistance is not None:
+        structure_ok = current <= recent_resistance
+    accelerating_lower = bool(is_long and ((last_3_change_pct is not None and last_3_change_pct < -0.75) or (recent_change_pct is not None and recent_change_pct < -1.5)))
+    accelerating_higher = bool((not is_long) and ((last_3_change_pct is not None and last_3_change_pct > 0.75) or (recent_change_pct is not None and recent_change_pct > 1.5)))
+
     lines = [
-        f"Position context: {draft.coin} {draft.side or 'position'} is ~{pnl_pct:.2f}% from entry {entry:g}; stop {stop:g} is ~{stop_distance_pct:.2f}% away from current {current:g}.",
+        f"Position: {draft.coin} {draft.side or 'position'} is {_fmt_pct(pnl_pct)} from entry {entry:g}; hard stop {stop:g} is {_fmt_abs_pct(stop_distance_pct)} away from current {current:g}.",
     ]
     if day_change is not None:
-        lines.append(f"Tape check: current is {day_change:.2f}% vs prior day reference; this is {'constructive' if day_change > 0 else 'pressure/drag'} for a hold decision.")
+        day_bias = "constructive while price holds structure" if day_change > 0 else "a drag until price reclaims structure"
+        lines.append(f"Tape vs prior day: {_fmt_pct(day_change)}. That is {day_bias}.")
+    if recent_support is not None or recent_resistance is not None:
+        if is_long:
+            first_reclaim = entry if current < entry else recent_resistance
+            lines.append(
+                f"Intraday structure: recent support ≈ {recent_support:g}; nearby resistance/reclaim ≈ {first_reclaim:g}"
+                + (f" then {recent_resistance:g}" if recent_resistance is not None and first_reclaim != recent_resistance else "")
+                + f". Structure is {'still intact' if structure_ok else 'already damaged'}; momentum is {'accelerating lower' if accelerating_lower else 'not accelerating lower'} on the sampled candles."
+            )
+            if recent_support is not None:
+                if current < entry:
+                    lines.append(f"Trade management: below {recent_support:g} is the technical reduce/exit trigger before the hard stop; reclaim/hold above entry {entry:g} improves the hold case.")
+                else:
+                    resistance_text = f"; push through {recent_resistance:g} confirms momentum" if recent_resistance is not None else ""
+                    lines.append(f"Trade management: below {recent_support:g} is the technical reduce/exit trigger before the hard stop; losing entry {entry:g} is a trim/caution level{resistance_text}.")
+            else:
+                lines.append(f"Trade management: reclaim/hold above {entry:g} improves the hold case.")
+        else:
+            first_reclaim = entry if current > entry else recent_support
+            lines.append(
+                f"Intraday structure: recent resistance ≈ {recent_resistance:g}; nearby support/cover zone ≈ {first_reclaim:g}"
+                + (f" then {recent_support:g}" if recent_support is not None and first_reclaim != recent_support else "")
+                + f". Structure is {'still intact' if structure_ok else 'already damaged'}; momentum is {'accelerating higher' if accelerating_higher else 'not accelerating higher'} on the sampled candles."
+            )
+            lines.append(
+                f"Trade management: above {recent_resistance:g} is the technical reduce/exit trigger before the hard stop; reclaim below {entry:g} improves the hold case."
+                if recent_resistance is not None
+                else f"Trade management: reclaim below {entry:g} improves the hold case."
+            )
     if funding is not None:
-        lines.append(f"Funding is {funding}; no standalone funding squeeze signal from this snapshot.")
-    if premium is not None:
-        lines.append(f"Premium is {premium}; use mark/oracle divergence as a short-term perp positioning tell, not a thesis by itself.")
-    lines.append("Action frame: hold only while price respects your invalidation and intraday structure; if you do not want overnight/open risk, scale/exit before the event rather than improvising below plan.")
+        lines.append(f"Funding: {_fmt_pct(funding * 100, decimals=4)}/hr (~{_fmt_pct(funding * 24 * 100, decimals=3)}/day); this is small, not a decisive carry/squeeze signal.")
+    if mark_oracle_bps is not None:
+        lines.append(f"Mark/oracle: {_fmt_bps(mark_oracle_bps)} divergence; {'flat enough to ignore' if abs(mark_oracle_bps) < 2 else 'watch this as a perp positioning tell'}.")
+    if atr_pct is not None and stop_distance_pct is not None:
+        lines.append(f"Volatility context: stop distance is ~{stop_distance_pct / atr_pct:.1f}x the sampled ATR proxy, so the stop is {'outside ordinary noise' if stop_distance_pct / atr_pct > 1.5 else 'inside normal noise'}.")
     return lines
+
+
+def _fmt_pct(value: float | None, *, decimals: int = 2) -> str:
+    if value is None:
+        return "unknown"
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value:.{decimals}f}%"
+
+
+def _fmt_abs_pct(value: float | None, *, decimals: int = 2) -> str:
+    if value is None:
+        return "unknown"
+    return f"{abs(value):.{decimals}f}%"
+
+
+def _fmt_bps(value: float | None) -> str:
+    if value is None:
+        return "unknown"
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value:.2f} bps"
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _asset_validation(features: dict[str, Any], draft: TradeSetupDraft, risk: dict[str, Any]) -> str:

@@ -195,11 +195,19 @@ def _candle_features(data: Any) -> dict[str, Any]:
     returns = [((closes[idx] - closes[idx - 1]) / closes[idx - 1]) * 100 for idx in range(1, len(closes)) if closes[idx - 1]]
     trend = "up" if last > first else "down" if last < first else "flat"
     regime = "high_volatility" if atr_pct and atr_pct > 2 else "trend" if abs(change_pct or 0) > 2 else "range"
+    recent_window = min(24, len(closes))
+    momentum_window = min(12, len(closes) - 1)
+    recent_lows = lows[-recent_window:] if lows else []
+    recent_highs = highs[-recent_window:] if highs else []
+    recent_change_pct = ((last - closes[-1 - momentum_window]) / closes[-1 - momentum_window]) * 100 if momentum_window > 0 and closes[-1 - momentum_window] else None
+    last_3_change_pct = ((last - closes[-4]) / closes[-4]) * 100 if len(closes) >= 4 and closes[-4] else None
     return {
         "count": len(closes),
         "first_close": first,
         "last_close": last,
         "change_pct": change_pct,
+        "recent_change_pct": recent_change_pct,
+        "last_3_change_pct": last_3_change_pct,
         "avg_range": avg_range,
         "atr_proxy": avg_range,
         "atr_pct": atr_pct,
@@ -207,6 +215,8 @@ def _candle_features(data: Any) -> dict[str, Any]:
         "return_abs_avg_pct": mean([abs(item) for item in returns]) if returns else None,
         "support": min(lows) if lows else None,
         "resistance": max(highs) if highs else None,
+        "recent_support": min(recent_lows) if recent_lows else None,
+        "recent_resistance": max(recent_highs) if recent_highs else None,
         "trend": trend,
         "regime": regime,
     }
@@ -255,10 +265,18 @@ def _risk_features(setup: dict[str, Any]) -> dict[str, Any]:
     entry = setup.get("entry")
     stop = setup.get("stop")
     take_profit = setup.get("take_profit")
+    equity_is_assumed = setup.get("account_equity_usd") is None
+    risk_pct_is_assumed = setup.get("risk_pct") is None
     equity = setup.get("account_equity_usd") or 10_000.0
     risk_pct = setup.get("risk_pct") or 1.0
     if entry is None or stop is None:
-        return {"status": "needs_entry_and_stop", "risk_pct": risk_pct, "account_equity_usd": equity}
+        return {
+            "status": "needs_entry_and_stop",
+            "risk_pct": risk_pct,
+            "account_equity_usd": equity,
+            "equity_is_assumed": equity_is_assumed,
+            "risk_pct_is_assumed": risk_pct_is_assumed,
+        }
     sizing = fixed_risk_position_size(float(equity), float(risk_pct), float(entry), float(stop))
     rr = None
     if take_profit is not None and not sizing.invalid:
@@ -275,6 +293,8 @@ def _risk_features(setup: dict[str, Any]) -> dict[str, Any]:
         "account_equity_usd": equity,
         "risk_reward_ratio": rr,
         "stop_distance_pct": (abs(float(entry) - float(stop)) / float(entry)) * 100 if entry else None,
+        "equity_is_assumed": equity_is_assumed,
+        "risk_pct_is_assumed": risk_pct_is_assumed,
     }
 
 

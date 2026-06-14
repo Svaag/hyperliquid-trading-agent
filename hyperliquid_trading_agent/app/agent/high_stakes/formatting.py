@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from hyperliquid_trading_agent.app.agent.high_stakes.schemas import JudgeDecision, TradeProposal
 
 
@@ -105,27 +107,57 @@ def _format_compact_position_review(proposal: TradeProposal, judge: JudgeDecisio
         lines.append("- Live market data was gathered, but no clean edge was produced by the review.")
 
     lines.extend(["", "Decision frame:"])
-    lines.append("- Base case: defensive hold only if price is respecting intraday structure above your stop and not accelerating lower.")
-    lines.append("- If you do not want market-open / overnight gap risk, scale down or exit before the event instead of waiting for the stop to make the decision for you.")
-    lines.append("- A reclaim of entry/nearby resistance with improving volume/liquidity would strengthen the hold case; continued drift below entry strengthens the exit/reduce case.")
+    lines.append("- Hold case: price stays above the technical reduce/exit trigger from the read section and starts reclaiming the stated resistance/entry level.")
+    lines.append("- Reduce/exit case: price loses that trigger, cannot reclaim entry before the event you care about, or liquidity thins into the open.")
 
     lines.extend(["", "Risk:"])
     if proposal.risk_usd is not None:
         lines.append(f"- Planned loss to stop: ${proposal.risk_usd:g}" + (f" ({proposal.risk_pct:g}% configured risk)." if proposal.risk_pct is not None else "."))
-    if proposal.notional_usd is not None:
-        lines.append(f"- Estimated notional from configured risk: ${proposal.notional_usd:g}.")
-    lines.append(f"- Confidence: {confidence:.0%}. This is a hold/reduce decision, not a fresh entry signal.")
+    else:
+        lines.append("- No account size or risk % was supplied, so I am not estimating dollar loss or position notional.")
+    lines.append(f"- Confidence: {'low' if confidence < 0.45 else 'moderate'}; this is based on live tape/structure, not a full discretionary model pass.")
 
-    useful_checklist = [item for item in proposal.checklist if not item.lower().startswith("manual confirmation") and "service does not sign" not in item.lower()]
+    useful_checklist = [_clean_checklist_item(item) for item in proposal.checklist if _clean_checklist_item(item)]
     if useful_checklist:
         lines.extend(["", "Execution / liquidity checks:"])
-        lines.extend(f"- {item}" for item in useful_checklist[:4])
+        lines.extend(f"- {item}" for item in useful_checklist[:3])
 
     public_warnings = _public_warnings(proposal.warnings)
     if public_warnings:
         lines.extend(["", "Notes:"])
         lines.extend(f"- {item}" for item in public_warnings[:3])
     return "\n".join(str(line) for line in lines if line is not None)[:3500]
+
+
+def _clean_checklist_item(item: str) -> str:
+    lowered = item.lower()
+    if lowered.startswith("manual confirmation") or "service does not sign" in lowered:
+        return ""
+    if lowered.startswith("confirm stop") or lowered.startswith("hyperliquid validation") or lowered.startswith("endpoint coverage"):
+        return ""
+    if item.startswith("Execution readiness:"):
+        spread = _extract_float(item, "spread_bps")
+        depth = _extract_float(item, "top_depth")
+        slippage = _extract_float(item, "est_slippage_bps")
+        parts = []
+        if spread is not None:
+            parts.append(f"spread ~{spread:.2f} bps")
+        if depth is not None:
+            parts.append(f"top depth ~${depth:,.0f}")
+        if slippage is not None:
+            parts.append(f"estimated slippage ~{slippage:.1f} bps")
+        return "Liquidity: " + ", ".join(parts) + "." if parts else ""
+    return item
+
+
+def _extract_float(text: str, key: str) -> float | None:
+    match = re.search(rf"{re.escape(key)}=\$?(?P<value>-?\d+(?:\.\d+)?)", text)
+    if not match:
+        return None
+    try:
+        return float(match.group("value"))
+    except ValueError:
+        return None
 
 
 def _public_warnings(warnings: list[str]) -> list[str]:
