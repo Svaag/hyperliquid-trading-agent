@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -29,15 +30,35 @@ _DISALLOWED_ABUSE_TERMS = {
     "insider",
 }
 
-_ALLOWED_TOPIC_TERMS = {
-    "trade",
-    "trading",
-    "market",
+_ALLOWED_COIN_TERMS = {
     "btc",
     "bitcoin",
     "eth",
     "ethereum",
     "sol",
+    "hype",
+    "doge",
+    "xrp",
+    "bnb",
+    "avax",
+    "sui",
+    "link",
+    "arb",
+    "op",
+    "ltc",
+    "ena",
+    "pump",
+    "fartcoin",
+    "purr",
+}
+
+UPPERCASE_TICKER_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,12}\b")
+
+_ALLOWED_TOPIC_TERMS = {
+    "trade",
+    "trading",
+    "market",
+    *_ALLOWED_COIN_TERMS,
     "crypto",
     "hyperliquid",
     "funding",
@@ -77,5 +98,7 @@ def classify_request(text: str) -> GuardrailResult:
     if any(term in lowered for term in _DISALLOWED_ABUSE_TERMS):
         return GuardrailResult(False, "I cannot help with market manipulation, abusive trading, or insider-trading behavior.", "abuse")
     if any(term in lowered for term in _ALLOWED_TOPIC_TERMS):
+        return GuardrailResult(True)
+    if UPPERCASE_TICKER_RE.search(text):
         return GuardrailResult(True)
     return GuardrailResult(False, "I can only help with trading, Hyperliquid, markets, macro/economics, or adjacent news.", "off_topic")

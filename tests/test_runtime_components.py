@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from hyperliquid_trading_agent.app.agent.guardrails import classify_request
 from hyperliquid_trading_agent.app.agent.model_gateway import ModelGateway
 from hyperliquid_trading_agent.app.agent.runner import AgentContext, TradingAgentRunner, extract_coins
 from hyperliquid_trading_agent.app.agent.tools import ToolResult
@@ -102,8 +103,10 @@ async def test_runner_uses_fallback_when_model_missing():
     assert "placed" in response.content.lower()
 
 
-def test_extract_coins_and_discord_helpers():
-    assert extract_coins("Compare BTC ETH and random ABC") == ["BTC", "ETH"]
+def test_extract_coins_guardrails_and_discord_helpers():
+    assert extract_coins("Compare BTC ETH and random ABC") == ["ABC", "BTC", "ETH"]
+    assert extract_coins("read on HYPE?") == ["HYPE"]
+    assert classify_request("read on FOOBAR?").allowed is True
     assert _message_prompt_without_mentions("<@123> BTC plan") == "BTC plan"
     assert len(_chunk("a" * 5000, 1800)) == 3
 

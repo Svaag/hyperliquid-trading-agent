@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from hyperliquid_trading_agent.app.agent.guardrails import classify_request
+from hyperliquid_trading_agent.app.agent.guardrails import UPPERCASE_TICKER_RE, classify_request
 from hyperliquid_trading_agent.app.agent.high_stakes.graph import HighStakesDebateGraph
 from hyperliquid_trading_agent.app.agent.high_stakes.routing import route_high_stakes
 from hyperliquid_trading_agent.app.agent.high_stakes.schemas import TradeProposalRequest
@@ -243,8 +243,13 @@ class TradingAgentRunner:
 
 
 def extract_coins(text: str) -> list[str]:
+    # Preserve user casing here: any all-caps token may be a ticker, even if it
+    # is not in our explicit common-coin list. This lets prompts like
+    # "read on HYPE?" or "thoughts on XYZ?" pass through to Hyperliquid's
+    # resolver instead of being blocked by stale allowlists.
+    uppercase_tickers = {match.group(0).upper() for match in UPPERCASE_TICKER_RE.finditer(text)}
     candidates = set(re.findall(r"\b[A-Z][A-Z0-9]{1,12}\b", text.upper()))
-    coins = [coin for coin in candidates if coin in COMMON_COINS or coin.startswith("@")] 
+    coins = list(uppercase_tickers | {coin for coin in candidates if coin in COMMON_COINS or coin.startswith("@")})
     # Also catch bitcoin/ethereum spelled out.
     lowered = text.lower()
     if "bitcoin" in lowered:
