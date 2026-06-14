@@ -32,6 +32,7 @@ from hyperliquid_trading_agent.app.metrics import DECISION_LATENCY, DECISION_RUN
 from hyperliquid_trading_agent.app.security import redact_text
 from hyperliquid_trading_agent.app.tracking.levels import derive_position_tracking_plan, level_by_kind
 from hyperliquid_trading_agent.app.tracking.schemas import PositionTrackingPlan
+from hyperliquid_trading_agent.app.tracking.service import PositionTrackingService
 
 
 class HighStakesGraphState(TypedDict, total=False):
@@ -62,11 +63,13 @@ class HighStakesDebateGraph:
         context_builder: HighStakesContextBuilder,
         role_runner: HighStakesRoleRunner,
         repository: Repository | None = None,
+        tracking_service: PositionTrackingService | None = None,
     ):
         self.settings = settings
         self.context_builder = context_builder
         self.role_runner = role_runner
         self.repository = repository
+        self.tracking_service = tracking_service
         self._compiled = self._build_graph()
 
     async def run(self, request: TradeProposalRequest, agent_context: dict[str, Any] | None = None) -> TradeProposalResponse:
@@ -274,6 +277,14 @@ class HighStakesDebateGraph:
                 proposal=proposal.model_dump(mode="json"),
                 content=format_trade_proposal(proposal, state.get("judge_decision")),
             )
+        proposal = await self._auto_arm_tracking(state, proposal, proposal_id)
+        if self.repository:
+            if proposal_id:
+                await self.repository.update_trade_proposal(
+                    proposal_id,
+                    proposal=proposal.model_dump(mode="json"),
+                    content=format_trade_proposal(proposal, state.get("judge_decision")),
+                )
             if state.get("run_id"):
                 await self.repository.complete_decision_run(
                     state.get("run_id"),
@@ -285,6 +296,25 @@ class HighStakesDebateGraph:
         updates = {"proposal": proposal, "proposal_id": proposal_id}
         await self._snapshot(_merged_state(state, updates), "finalize")
         return updates
+
+    async def _auto_arm_tracking(self, state: HighStakesGraphState, proposal: TradeProposal, proposal_id: str | None) -> TradeProposal:
+        if not proposal.tracking_plan:
+            return proposal
+        try:
+            plan = PositionTrackingPlan.model_validate(proposal.tracking_plan)
+        except Exception:
+            return proposal
+        metadata = dict(plan.metadata)
+        if self.tracking_service is None:
+            metadata["auto_arm_status"] = "not_armed:no_tracking_service"
+            return proposal.model_copy(update={"tracking_plan": plan.model_copy(update={"metadata": metadata}).model_dump(mode="json")})
+        tracker_id = await self.tracking_service.auto_arm(plan, proposal_id=proposal_id, run_id=state.get("run_id"))
+        if tracker_id:
+            metadata.update({"auto_arm_status": "armed", "tracker_id": tracker_id, "proposal_id": proposal_id})
+        else:
+            metadata["auto_arm_status"] = "not_armed"
+        updated = plan.model_copy(update={"id": tracker_id or plan.id, "proposal_id": proposal_id or plan.proposal_id, "run_id": state.get("run_id") or plan.run_id, "metadata": metadata})
+        return proposal.model_copy(update={"tracking_plan": updated.model_dump(mode="json")})
 
     def _apply_final_policy(self, state: HighStakesGraphState, proposal: TradeProposal) -> TradeProposal:
         prompt = str(state.get("prompt", "")).lower()

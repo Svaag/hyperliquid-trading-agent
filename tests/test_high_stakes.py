@@ -99,6 +99,15 @@ class AskFakeGraph:
         )
 
 
+class FakeTrackingService:
+    def __init__(self):
+        self.calls = []
+
+    async def auto_arm(self, plan, *, proposal_id=None, run_id=None):
+        self.calls.append((plan, proposal_id, run_id))
+        return "tracker-1"
+
+
 class FakeAsyncSDKInfo:
     async def all_mids(self, dex=""):
         return {"BTC": "100"}
@@ -297,6 +306,25 @@ async def test_high_stakes_graph_produces_non_executing_proposal():
     assert response.proposal["autonomous_execution_allowed"] is False
     assert response.proposal["exchange_actions"] == []
     assert response.proposal["coin"] == "BTC"
+
+
+@pytest.mark.asyncio
+async def test_high_stakes_graph_auto_arms_tracking_plan():
+    settings = Settings(high_stakes_debate_enabled=True, high_stakes_max_rounds=1, agent_model_chain="openai:gpt-test")
+    tracking = FakeTrackingService()
+    graph = HighStakesDebateGraph(
+        settings=settings,
+        context_builder=HighStakesContextBuilder(HighStakesFakeTools(), settings),  # type: ignore[arg-type]
+        role_runner=HighStakesRoleRunner(StructuredFakeGateway(), settings),  # type: ignore[arg-type]
+        repository=None,
+        tracking_service=tracking,  # type: ignore[arg-type]
+    )
+
+    response = await graph.run(TradeProposalRequest(prompt="Long BTC entry 100 stop 95 tp 115 equity 10000 risk 1"))
+
+    assert tracking.calls
+    assert response.proposal["tracking_plan"]["metadata"]["auto_arm_status"] == "armed"
+    assert response.proposal["tracking_plan"]["metadata"]["tracker_id"] == "tracker-1"
 
 
 @pytest.mark.asyncio

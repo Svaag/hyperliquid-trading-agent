@@ -330,6 +330,20 @@ class Repository:
             log.warning("trade_proposal_record_failed", error=type(exc).__name__)
             return None
 
+    async def update_trade_proposal(self, proposal_id: str, proposal: dict[str, Any], content: str = "") -> None:
+        if self.sessionmaker is None:
+            return
+        try:
+            async with self.sessionmaker() as session:
+                item = await session.get(TradeProposalRecord, proposal_id)
+                if item is not None:
+                    item.proposal_json = redact_secrets(proposal)
+                    if content:
+                        item.content = str(redact_secrets(content))
+                    await session.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("trade_proposal_update_failed", proposal_id=proposal_id, error=type(exc).__name__)
+
     async def get_trade_proposal(self, proposal_id: str) -> dict[str, Any] | None:
         if self.sessionmaker is None:
             return None

@@ -4,6 +4,7 @@ import re
 
 from hyperliquid_trading_agent.app.agent.high_stakes.schemas import JudgeDecision, TradeProposal
 from hyperliquid_trading_agent.app.tracking.levels import summarize_tracking_plan
+from hyperliquid_trading_agent.app.tracking.schemas import PositionTrackingPlan
 
 
 def format_trade_proposal(proposal: TradeProposal, judge: JudgeDecision | None = None) -> str:
@@ -111,6 +112,10 @@ def _format_compact_position_review(proposal: TradeProposal, judge: JudgeDecisio
     if tracking_levels:
         lines.extend(["", "Levels to watch:"])
         lines.extend(f"- {item}" for item in tracking_levels[:6])
+        tracking_status = _tracking_status_line(proposal.tracking_plan)
+        if tracking_status:
+            lines.extend(["", "Live tracking:", f"- {tracking_status}"])
+            lines.append('- In the thread, say "tracking status" or "stop tracking" to control it.')
 
     lines.extend(["", "Decision frame:"])
     lines.append("- Hold case: price respects the terminal downside/upside trigger above and confirms through the relevant reclaim/resistance/support level.")
@@ -133,6 +138,22 @@ def _format_compact_position_review(proposal: TradeProposal, judge: JudgeDecisio
         lines.extend(["", "Notes:"])
         lines.extend(f"- {item}" for item in public_warnings[:3])
     return "\n".join(str(line) for line in lines if line is not None)[:3500]
+
+
+def _tracking_status_line(plan_payload: dict | None) -> str:
+    if not plan_payload:
+        return ""
+    try:
+        plan = PositionTrackingPlan.model_validate(plan_payload)
+    except Exception:
+        return ""
+    status = str(plan.metadata.get("auto_arm_status", ""))
+    if status == "armed":
+        destination = "this Discord thread" if plan.discord_thread_id else "the tracking API/event log"
+        return f"Armed for {len(plan.levels)} levels via allMids; alerts go to {destination}; expires in {plan.metadata.get('ttl_hours', 168)}h or on a terminal exit/stop hit."
+    if status.startswith("not_armed"):
+        return f"Levels were prepared but live tracking was not armed ({status})."
+    return "Levels are ready for live tracking."
 
 
 def _clean_checklist_item(item: str) -> str:
