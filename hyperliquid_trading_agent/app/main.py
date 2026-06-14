@@ -10,6 +10,10 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
 
 from hyperliquid_trading_agent import __version__
+from hyperliquid_trading_agent.app.agent.high_stakes.context import HighStakesContextBuilder
+from hyperliquid_trading_agent.app.agent.high_stakes.graph import HighStakesDebateGraph
+from hyperliquid_trading_agent.app.agent.high_stakes.roles import HighStakesRoleRunner
+from hyperliquid_trading_agent.app.agent.high_stakes.schemas import TradeProposalRequest, TradeProposalResponse
 from hyperliquid_trading_agent.app.agent.model_gateway import ModelGateway
 from hyperliquid_trading_agent.app.agent.runner import AgentContext, TradingAgentRunner
 from hyperliquid_trading_agent.app.agent.tools import AgentTools
@@ -18,6 +22,7 @@ from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.db.session import create_engine, create_sessionmaker
 from hyperliquid_trading_agent.app.discord_bot import DiscordTradingBot
 from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
+from hyperliquid_trading_agent.app.hyperliquid.sdk_info_client import SDKInfoClient
 from hyperliquid_trading_agent.app.hyperliquid.ws_worker import HyperliquidWebSocketWorker
 from hyperliquid_trading_agent.app.logging import configure_logging, get_logger
 from hyperliquid_trading_agent.app.metrics import SERVICE_INFO, UP
@@ -36,6 +41,9 @@ class AskResponse(BaseModel):
     fallback_used: bool = False
     model_used: str | None = None
     tool_count: int = 0
+    decision_run_id: str | None = None
+    proposal_id: str | None = None
+    high_stakes: bool = False
 
 
 @asynccontextmanager
@@ -48,10 +56,25 @@ async def lifespan(app: FastAPI):
     sessionmaker = create_sessionmaker(engine)
     repository = Repository(sessionmaker)
     hyperliquid = HyperliquidClient(settings=settings)
+    sdk_info = None if settings.high_stakes_info_provider == "rest_only" else SDKInfoClient(settings=settings)
     news = NewsService(settings=settings, repository=repository)
     tools = AgentTools(hyperliquid=hyperliquid, news=news, repository=repository)
     model_gateway = ModelGateway(settings=settings)
-    runner = TradingAgentRunner(tools=tools, model_gateway=model_gateway, repository=repository)
+    high_stakes_context = HighStakesContextBuilder(tools=tools, settings=settings, sdk_info=sdk_info)
+    high_stakes_roles = HighStakesRoleRunner(model_gateway=model_gateway, settings=settings)
+    high_stakes_graph = HighStakesDebateGraph(
+        settings=settings,
+        context_builder=high_stakes_context,
+        role_runner=high_stakes_roles,
+        repository=repository,
+    )
+    runner = TradingAgentRunner(
+        tools=tools,
+        model_gateway=model_gateway,
+        repository=repository,
+        settings=settings,
+        high_stakes_graph=high_stakes_graph,
+    )
     ws_worker = HyperliquidWebSocketWorker(settings=settings)
     bot = DiscordTradingBot(settings=settings, runner=runner)
 
@@ -59,7 +82,9 @@ async def lifespan(app: FastAPI):
     app.state.repository = repository
     app.state.hyperliquid = hyperliquid
     app.state.news = news
+    app.state.sdk_info = sdk_info
     app.state.agent_runner = runner
+    app.state.high_stakes_graph = high_stakes_graph
     app.state.discord_bot = bot
     app.state.ws_worker = ws_worker
 
@@ -79,6 +104,8 @@ async def lifespan(app: FastAPI):
         UP.set(0)
         await bot.stop()
         await ws_worker.stop()
+        if sdk_info is not None:
+            await sdk_info.close()
         await hyperliquid.close()
         await engine.dispose()
         for task in [bot_task, ws_task]:
@@ -112,13 +139,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health/config")
     async def config_health() -> dict[str, Any]:
-        attempts = ModelGateway(settings).configured_attempts()
+        gateway = ModelGateway(settings)
+        attempts = gateway.configured_attempts()
         return {
             "environment": settings.environment,
             "hyperliquid_network": settings.hyperliquid_network,
             "hyperliquid_exchange_enabled": settings.hyperliquid_exchange_enabled,
             "hyperliquid_ws_enabled": settings.hyperliquid_ws_enabled,
             "models": [{"model": item.model, "provider": item.provider, "missing": item.missing_reason} for item in attempts],
+            "high_stakes": {
+                "enabled": settings.high_stakes_debate_enabled,
+                "activation_policy": settings.high_stakes_activation_policy,
+                "prompt_style": settings.high_stakes_prompt_style,
+                "info_provider": settings.high_stakes_info_provider,
+                "max_rounds": settings.high_stakes_max_rounds,
+                "timeout_seconds": settings.high_stakes_timeout_seconds,
+                "max_coins": settings.high_stakes_max_coins,
+                "max_data_escalations": settings.high_stakes_max_data_escalations,
+                "account_allowlist_count": len(settings.account_allowlist),
+                "smart_money_watchlist_count": len(settings.smart_money_addresses),
+                "roles": {
+                    role: [
+                        {"model": item.model, "provider": item.provider, "missing": item.missing_reason}
+                        for item in gateway.configured_attempts_for_chain(settings.role_model_chain(role))
+                    ]
+                    for role in settings.debate_role_names
+                },
+            },
             "news_providers": {
                 "rss_count": len(settings.rss_feed_urls),
                 "tavily": bool(settings.tavily_api_key),
@@ -139,7 +186,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             fallback_used=response.fallback_used,
             model_used=response.model_used,
             tool_count=len(response.tool_results),
+            decision_run_id=response.decision_run_id,
+            proposal_id=response.proposal_id,
+            high_stakes=response.high_stakes,
         )
+
+    @app.post("/trade/proposals", response_model=TradeProposalResponse)
+    async def create_trade_proposal(request: TradeProposalRequest, authorization: str | None = Header(default=None)) -> TradeProposalResponse:
+        _require_agent_api(settings, authorization)
+        if not settings.high_stakes_debate_enabled:
+            raise HTTPException(status_code=409, detail="high-stakes debate is disabled")
+        graph: HighStakesDebateGraph = app.state.high_stakes_graph
+        forced = request.model_copy(update={"force_debate": True, "dry_run": True})
+        return await graph.run(forced, agent_context={"source": "api", "actor": "api"})
+
+    @app.get("/trade/proposals/{proposal_id}")
+    async def get_trade_proposal(proposal_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        repository: Repository = app.state.repository
+        proposal = await repository.get_trade_proposal(proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="trade proposal not found")
+        return proposal
 
     @app.get("/metrics")
     async def metrics(authorization: str | None = Header(default=None)):
@@ -150,6 +218,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     return app
+
+
+def _require_agent_api(settings: Settings, authorization: str | None) -> None:
+    if settings.agent_api_bearer_token:
+        expected = f"Bearer {settings.agent_api_bearer_token}"
+        if authorization != expected:
+            raise HTTPException(status_code=401, detail="agent API token required")
+        return
+    if settings.environment.lower() not in {"dev", "test", "local"}:
+        raise HTTPException(status_code=503, detail="AGENT_API_BEARER_TOKEN must be set outside dev/test/local")
 
 
 def main() -> None:

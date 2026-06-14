@@ -14,8 +14,11 @@ design.
   - `GET /ready`
   - `GET /health/config`
   - `POST /ask`
+  - `POST /trade/proposals`
+  - `GET /trade/proposals/{proposal_id}`
   - `GET /metrics`
 - Discord mention bot with guild/channel/role allowlists and threaded answers.
+- Risk-routed high-stakes multi-agent debate engine for paper/manual trade proposals only, with institutional role rubrics, endpoint coverage, and optional official SDK `Info` data.
 - LiteLLM model gateway with ordered fallback for:
   - OpenRouter
   - OpenAI
@@ -25,7 +28,7 @@ design.
 - Official docs grounding through GitBook markdown/`ask=` support plus static safety notes.
 - RSS news, optional Tavily/SerpAPI/NewsAPI/Perplexity search, optional X recent search.
 - Semantic tool gathering for market snapshots, funding, candles, account public state, fills, docs, news, and paper trades.
-- PostgreSQL persistence for audit events, tool calls, conversations, cache, news, and paper trades.
+- PostgreSQL persistence for audit events, tool calls, conversations, cache, news, paper trades, debate runs, role outputs, state snapshots, and trade proposals.
 - Alembic initial migration.
 - Dockerfile and Docker Compose with Postgres.
 
@@ -71,6 +74,32 @@ KIMI_API_KEY=
 KIMI_BASE_URL=https://api.moonshot.ai/v1
 ```
 
+High-stakes proposal/debate path:
+
+```env
+HIGH_STAKES_DEBATE_ENABLED=false
+HIGH_STAKES_ACTIVATION_POLICY=risk_routed
+HIGH_STAKES_PROMPT_STYLE=standard
+HIGH_STAKES_INFO_PROVIDER=sdk_preferred
+HIGH_STAKES_MAX_ROUNDS=3
+HIGH_STAKES_TIMEOUT_SECONDS=90
+HIGH_STAKES_MAX_COINS=3
+HIGH_STAKES_MAX_DATA_ESCALATIONS=1
+ACCOUNT_ADDRESS_ALLOWLIST=
+HIGH_STAKES_SMART_MONEY_ADDRESSES=
+AGENT_API_BEARER_TOKEN=
+DEBATE_ANALYST_MODEL_CHAIN=
+DEBATE_QUANT_MODEL_CHAIN=
+DEBATE_RESEARCH_MODEL_CHAIN=
+DEBATE_ADVERSARY_MODEL_CHAIN=
+DEBATE_RISK_MODEL_CHAIN=
+DEBATE_TREASURY_MODEL_CHAIN=
+DEBATE_EXECUTION_MODEL_CHAIN=
+DEBATE_JUDGE_MODEL_CHAIN=
+```
+
+Empty role model chains fall back to `AGENT_MODEL_CHAIN`. `/trade/proposals` forces the high-stakes graph when enabled and requires `AGENT_API_BEARER_TOKEN` outside dev/test/local. `HIGH_STAKES_PROMPT_STYLE=aggressive` changes desk tone but does not relax vetoes or no-execution rules. `HIGH_STAKES_INFO_PROVIDER=sdk_preferred` uses the official Hyperliquid Python SDK `Info` client for read-only high-stakes data where available, with REST `/info` fallback for missing official endpoints.
+
 Hyperliquid:
 
 ```env
@@ -92,7 +121,10 @@ MVP uses these official `/info` endpoints before any custom exchange logic:
 `clearinghouseState`, `spotClearinghouseState`, `frontendOpenOrders`,
 `openOrders`, `userFills`, `userFillsByTime`, `historicalOrders`,
 `userFunding`, `fundingHistory`, `predictedFundings`, `l2Book`,
-`candleSnapshot`, and `userRateLimit`.
+`candleSnapshot`, `userRateLimit`, `userFees`, `portfolio`,
+`userNonFundingLedgerUpdates`, `userTwapSliceFills`, `userVaultEquities`,
+`userRole`, `extraAgents`, `subAccounts`, and `referral`.
+High-stakes runs use route-relevant endpoint coverage instead of sweeping every endpoint every time.
 
 Important docs-backed rules embedded in the agent:
 
@@ -106,6 +138,7 @@ Important docs-backed rules embedded in the agent:
 
 - No private keys, seed phrases, passwords, API keys, or signing secrets in Discord.
 - No mainnet trading in the MVP.
+- High-stakes debate produces manual/paper proposals only; `exchange_actions` is intentionally empty.
 - Local paper simulation only.
 - Direct trade coaching is allowed, but every answer should include risk,
   assumptions, invalidation, and caveats.
@@ -117,7 +150,7 @@ See [TESTING.md](TESTING.md).
 Current local validation:
 
 ```text
-11 passed
+22 passed
 ruff: all checks passed
 mypy: success
 alembic offline SQL: generated

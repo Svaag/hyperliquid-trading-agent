@@ -4,9 +4,9 @@ Local validation commands:
 
 ```bash
 uv sync --extra dev
-uv run pytest -q
-uv run ruff check .
-uv run mypy hyperliquid_trading_agent
+uv run pytest -q                         # 22 passed locally
+uv run ruff check .                      # all checks passed
+uv run mypy hyperliquid_trading_agent    # success
 uv run alembic upgrade head --sql >/tmp/hla_migration.sql
 
 docker compose config
@@ -29,6 +29,8 @@ async def main():
 asyncio.run(main())
 PY
 ```
+
+High-stakes proposal path is disabled by default. Enable it with `HIGH_STAKES_DEBATE_ENABLED=true`; `/trade/proposals` is token-gated outside dev/test/local and produces paper/manual proposals only. `HIGH_STAKES_PROMPT_STYLE=standard|aggressive`, `HIGH_STAKES_INFO_PROVIDER=sdk_preferred|rest_only|sdk_only`, and `HIGH_STAKES_MAX_DATA_ESCALATIONS=1` control the institutional prompt/data-desk behavior.
 
 API fallback smoke test without LLM keys or Postgres:
 

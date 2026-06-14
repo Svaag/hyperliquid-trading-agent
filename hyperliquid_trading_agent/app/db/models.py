@@ -98,3 +98,56 @@ class PaperTradeSnapshot(TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_id)
     idea_id: Mapped[str] = mapped_column(ForeignKey("paper_trade_ideas.id"), nullable=False)
     market_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class DecisionRun(TimestampMixin, Base):
+    __tablename__ = "decision_runs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_id)
+    actor: Mapped[str] = mapped_column(String(128), default="")
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    route: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    selected_roles: Mapped[list[str]] = mapped_column(JSON, default=list)
+    context_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(64), default="started")
+    round_count: Mapped[int] = mapped_column(Integer, default=0)
+    final_summary: Mapped[str] = mapped_column(Text, default="")
+    proposal_id: Mapped[str | None] = mapped_column(String(64))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DecisionRoleOutput(TimestampMixin, Base):
+    __tablename__ = "decision_role_outputs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_id)
+    run_id: Mapped[str] = mapped_column(ForeignKey("decision_runs.id"), nullable=False)
+    role: Mapped[str] = mapped_column(String(64), nullable=False)
+    round_index: Mapped[int] = mapped_column(Integer, default=0)
+    model: Mapped[str | None] = mapped_column(String(255))
+    provider: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(64), default="ok")
+    output_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    raw_content: Mapped[str] = mapped_column(Text, default="")
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+
+
+class DecisionStateSnapshot(TimestampMixin, Base):
+    __tablename__ = "decision_state_snapshots"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_id)
+    run_id: Mapped[str] = mapped_column(ForeignKey("decision_runs.id"), nullable=False)
+    round_index: Mapped[int] = mapped_column(Integer, default=0)
+    node: Mapped[str] = mapped_column(String(128), nullable=False)
+    state_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class TradeProposalRecord(TimestampMixin, Base):
+    __tablename__ = "trade_proposals"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_id)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("decision_runs.id"))
+    status: Mapped[str] = mapped_column(String(64), nullable=False)
+    coin: Mapped[str | None] = mapped_column(String(64))
+    side: Mapped[str | None] = mapped_column(String(16))
+    proposal_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    content: Mapped[str] = mapped_column(Text, default="")

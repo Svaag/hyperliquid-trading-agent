@@ -36,6 +36,19 @@ INFO_ENDPOINT_TYPES = {
     "userRateLimit",
     "orderStatus",
     "perpDexs",
+    "userFees",
+    "portfolio",
+    "userNonFundingLedgerUpdates",
+    "userTwapSliceFills",
+    "userVaultEquities",
+    "userRole",
+    "extraAgents",
+    "subAccounts",
+    "referral",
+    "delegatorSummary",
+    "delegations",
+    "delegatorRewards",
+    "delegatorHistory",
 }
 
 LOW_WEIGHT_INFO_TYPES = {
@@ -246,6 +259,36 @@ class HyperliquidClient:
 
     async def order_status(self, address: str, oid: int | str) -> Any:
         return await self.post_info({"type": "orderStatus", "user": address.lower(), "oid": oid}, cache_ttl_seconds=5)
+
+    async def user_fees(self, address: str) -> Any:
+        return await self.post_info({"type": "userFees", "user": address.lower()}, cache_ttl_seconds=300)
+
+    async def portfolio(self, address: str) -> Any:
+        return await self.post_info({"type": "portfolio", "user": address.lower()}, cache_ttl_seconds=60)
+
+    async def user_non_funding_ledger_updates(self, address: str, start_time_ms: int, end_time_ms: int | None = None) -> Any:
+        payload: dict[str, Any] = {"type": "userNonFundingLedgerUpdates", "user": address.lower(), "startTime": start_time_ms}
+        if end_time_ms is not None:
+            payload["endTime"] = end_time_ms
+        return await self.post_info(payload, cache_ttl_seconds=60)
+
+    async def user_twap_slice_fills(self, address: str) -> Any:
+        return await self.post_info({"type": "userTwapSliceFills", "user": address.lower()}, cache_ttl_seconds=60)
+
+    async def user_vault_equities(self, address: str) -> Any:
+        return await self.post_info({"type": "userVaultEquities", "user": address.lower()}, cache_ttl_seconds=60)
+
+    async def user_role(self, address: str) -> Any:
+        return await self.post_info({"type": "userRole", "user": address.lower()}, cache_ttl_seconds=300)
+
+    async def extra_agents(self, address: str) -> Any:
+        return await self.post_info({"type": "extraAgents", "user": address.lower()}, cache_ttl_seconds=300)
+
+    async def sub_accounts(self, address: str) -> Any:
+        return await self.post_info({"type": "subAccounts", "user": address.lower()}, cache_ttl_seconds=300)
+
+    async def referral_state(self, address: str) -> Any:
+        return await self.post_info({"type": "referral", "user": address.lower()}, cache_ttl_seconds=300)
 
 
 def _request_weight(request_type: str) -> int:

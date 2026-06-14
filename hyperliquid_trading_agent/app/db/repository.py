@@ -11,10 +11,14 @@ from hyperliquid_trading_agent.app.db.models import (
     CacheItem,
     ConversationMessage,
     ConversationThread,
+    DecisionRoleOutput,
+    DecisionRun,
+    DecisionStateSnapshot,
     NewsItem,
     PaperTradeIdea,
     PaperTradeSnapshot,
     ToolCall,
+    TradeProposalRecord,
 )
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.security import redact_secrets
@@ -175,3 +179,171 @@ class Repository:
             session.add(PaperTradeSnapshot(idea_id=idea.id, market_snapshot=market_snapshot or {}))
             await session.commit()
             return idea.id
+
+    async def create_decision_run(
+        self,
+        prompt: str,
+        route: dict[str, Any],
+        selected_roles: list[str],
+        actor: str = "",
+    ) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                run = DecisionRun(
+                    actor=actor,
+                    prompt=str(redact_secrets(prompt)),
+                    route=redact_secrets(route),
+                    selected_roles=selected_roles,
+                    status="started",
+                )
+                session.add(run)
+                await session.flush()
+                await session.commit()
+                return run.id
+        except Exception as exc:  # pragma: no cover
+            log.warning("decision_run_create_failed", error=type(exc).__name__)
+            return None
+
+    async def update_decision_run_context(self, run_id: str | None, context_snapshot: dict[str, Any]) -> None:
+        if self.sessionmaker is None or run_id is None:
+            return
+        try:
+            async with self.sessionmaker() as session:
+                run = await session.get(DecisionRun, run_id)
+                if run is not None:
+                    run.context_snapshot = redact_secrets(context_snapshot)
+                    await session.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("decision_run_context_update_failed", run_id=run_id, error=type(exc).__name__)
+
+    async def record_decision_role_output(
+        self,
+        run_id: str | None,
+        role: str,
+        round_index: int,
+        model: str | None,
+        provider: str | None,
+        status: str,
+        output_json: dict[str, Any],
+        raw_content: str = "",
+        latency_ms: int | None = None,
+    ) -> None:
+        if self.sessionmaker is None or run_id is None:
+            return
+        try:
+            async with self.sessionmaker() as session:
+                session.add(
+                    DecisionRoleOutput(
+                        run_id=run_id,
+                        role=role,
+                        round_index=round_index,
+                        model=model,
+                        provider=provider,
+                        status=status,
+                        output_json=redact_secrets(output_json),
+                        raw_content=str(redact_secrets(raw_content)),
+                        latency_ms=latency_ms,
+                    )
+                )
+                await session.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("decision_role_output_record_failed", role=role, error=type(exc).__name__)
+
+    async def record_decision_state_snapshot(
+        self,
+        run_id: str | None,
+        round_index: int,
+        node: str,
+        state_json: dict[str, Any],
+    ) -> None:
+        if self.sessionmaker is None or run_id is None:
+            return
+        try:
+            async with self.sessionmaker() as session:
+                session.add(
+                    DecisionStateSnapshot(
+                        run_id=run_id,
+                        round_index=round_index,
+                        node=node,
+                        state_json=redact_secrets(state_json),
+                    )
+                )
+                await session.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("decision_state_snapshot_record_failed", node=node, error=type(exc).__name__)
+
+    async def complete_decision_run(
+        self,
+        run_id: str | None,
+        status: str,
+        round_count: int,
+        final_summary: str = "",
+        proposal_id: str | None = None,
+    ) -> None:
+        if self.sessionmaker is None or run_id is None:
+            return
+        try:
+            async with self.sessionmaker() as session:
+                run = await session.get(DecisionRun, run_id)
+                if run is not None:
+                    run.status = status
+                    run.round_count = round_count
+                    run.final_summary = final_summary
+                    run.proposal_id = proposal_id
+                    run.completed_at = datetime.now(UTC)
+                    await session.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("decision_run_complete_failed", run_id=run_id, error=type(exc).__name__)
+
+    async def record_trade_proposal(
+        self,
+        run_id: str | None,
+        status: str,
+        coin: str | None,
+        side: str | None,
+        proposal: dict[str, Any],
+        content: str = "",
+    ) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                item = TradeProposalRecord(
+                    run_id=run_id,
+                    status=status,
+                    coin=coin,
+                    side=side,
+                    proposal_json=redact_secrets(proposal),
+                    content=str(redact_secrets(content)),
+                )
+                session.add(item)
+                await session.flush()
+                await session.commit()
+                return item.id
+        except Exception as exc:  # pragma: no cover
+            log.warning("trade_proposal_record_failed", error=type(exc).__name__)
+            return None
+
+    async def get_trade_proposal(self, proposal_id: str) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                item = await session.get(TradeProposalRecord, proposal_id)
+                if item is None:
+                    return None
+                return {
+                    "id": item.id,
+                    "run_id": item.run_id,
+                    "status": item.status,
+                    "coin": item.coin,
+                    "side": item.side,
+                    "proposal": item.proposal_json,
+                    "content": item.content,
+                    "created_at": item.created_at.isoformat() if item.created_at else None,
+                }
+        except Exception as exc:  # pragma: no cover
+            log.warning("trade_proposal_get_failed", proposal_id=proposal_id, error=type(exc).__name__)
+            return None

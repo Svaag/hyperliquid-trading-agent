@@ -22,6 +22,7 @@ venv/
 *.sqlite*
 logs/
 data/
+pi-session-*.html
 
 # Docker
 .docker/

@@ -55,6 +55,28 @@ class Settings(BaseSettings):
     hyperliquid_ws_enabled: bool = False
     hyperliquid_exchange_enabled: bool = False
 
+    high_stakes_debate_enabled: bool = False
+    high_stakes_activation_policy: Literal["risk_routed", "explicit_only", "all_trading_questions"] = "risk_routed"
+    high_stakes_prompt_style: Literal["standard", "aggressive"] = "standard"
+    high_stakes_info_provider: Literal["sdk_preferred", "rest_only", "sdk_only"] = "sdk_preferred"
+    high_stakes_max_rounds: int = 3
+    high_stakes_timeout_seconds: int = 90
+    high_stakes_max_coins: int = 3
+    high_stakes_max_data_escalations: int = 1
+    high_stakes_require_account_for_autonomous: bool = False
+    account_address_allowlist: str = ""
+    high_stakes_smart_money_addresses: str = ""
+    agent_api_bearer_token: str = ""
+
+    debate_analyst_model_chain: str = ""
+    debate_quant_model_chain: str = ""
+    debate_research_model_chain: str = ""
+    debate_adversary_model_chain: str = ""
+    debate_risk_model_chain: str = ""
+    debate_treasury_model_chain: str = ""
+    debate_execution_model_chain: str = ""
+    debate_judge_model_chain: str = ""
+
     cache_ttl_market_seconds: int = 15
     cache_ttl_news_seconds: int = 600
     metrics_bearer_token: str = ""
@@ -105,6 +127,36 @@ class Settings(BaseSettings):
     @property
     def rss_feed_urls(self) -> list[str]:
         return _csv(self.news_rss_feeds)
+
+    @property
+    def account_allowlist(self) -> set[str]:
+        return {address.lower() for address in _csv(self.account_address_allowlist)}
+
+    @property
+    def smart_money_addresses(self) -> list[str]:
+        return [address.lower() for address in _csv(self.high_stakes_smart_money_addresses)]
+
+    def role_model_chain(self, role: str) -> list[str]:
+        role_key = role.lower().strip().replace("-", "_")
+        configured = {
+            "analyst": self.debate_analyst_model_chain,
+            "proposer": self.debate_analyst_model_chain,
+            "quant": self.debate_quant_model_chain,
+            "research": self.debate_research_model_chain,
+            "adversary": self.debate_adversary_model_chain,
+            "red_team": self.debate_adversary_model_chain,
+            "risk": self.debate_risk_model_chain,
+            "risk_manager": self.debate_risk_model_chain,
+            "treasury": self.debate_treasury_model_chain,
+            "execution": self.debate_execution_model_chain,
+            "execution_strategist": self.debate_execution_model_chain,
+            "judge": self.debate_judge_model_chain,
+        }.get(role_key, "")
+        return _csv(configured) or self.model_chain
+
+    @property
+    def debate_role_names(self) -> list[str]:
+        return ["analyst", "quant", "research", "adversary", "risk", "treasury", "execution", "judge"]
 
 
 def _csv(value: str) -> list[str]:

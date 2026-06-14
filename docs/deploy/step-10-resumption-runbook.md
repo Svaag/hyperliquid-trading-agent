@@ -22,12 +22,13 @@ Implemented through step 9:
 - RSS plus optional Tavily/SerpAPI/NewsAPI/Perplexity/X integrations
 - PostgreSQL persistence with Alembic migration
 - Local paper-trade simulator
+- High-stakes multi-agent debate path for paper/manual trade proposals
 - Dockerfile and Docker Compose
 
 Last local validation:
 
 ```bash
-uv run pytest -q                         # 11 passed
+uv run pytest -q                         # 22 passed
 uv run ruff check .                      # all checks passed
 uv run mypy hyperliquid_trading_agent    # success
 uv run alembic upgrade head --sql        # generated migration SQL
@@ -93,6 +94,12 @@ PERPLEXITY_API_KEY=
 X_BEARER_TOKEN=
 
 METRICS_BEARER_TOKEN=
+AGENT_API_BEARER_TOKEN=
+HIGH_STAKES_DEBATE_ENABLED=false
+HIGH_STAKES_PROMPT_STYLE=standard
+HIGH_STAKES_INFO_PROVIDER=sdk_preferred
+HIGH_STAKES_MAX_DATA_ESCALATIONS=1
+HIGH_STAKES_SMART_MONEY_ADDRESSES=
 ```
 
 Minimum viable secrets:
@@ -219,6 +226,7 @@ Expected behavior:
 - Bot answers with trading-support format.
 - BTC/ETH/SOL market questions use live Hyperliquid data.
 - Paper trade question returns size/notional/risk and stores audit/paper-trade records.
+- If `HIGH_STAKES_DEBATE_ENABLED=true`, explicit high-stakes trade setup prompts return audited manual/paper proposals with institutional prompt rubrics, route-relevant Hyperliquid endpoint coverage, optional official SDK `Info` data, and no live execution.
 - Off-topic question is refused.
 - No mainnet trade execution is possible.
 

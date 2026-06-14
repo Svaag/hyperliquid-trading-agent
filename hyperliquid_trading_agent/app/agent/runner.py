@@ -6,9 +6,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hyperliquid_trading_agent.app.agent.guardrails import classify_request
+from hyperliquid_trading_agent.app.agent.high_stakes.graph import HighStakesDebateGraph
+from hyperliquid_trading_agent.app.agent.high_stakes.routing import route_high_stakes
+from hyperliquid_trading_agent.app.agent.high_stakes.schemas import TradeProposalRequest
 from hyperliquid_trading_agent.app.agent.model_gateway import ModelGateway, ModelGatewayError
 from hyperliquid_trading_agent.app.agent.prompts import DEFAULT_RESPONSE_TEMPLATE, SYSTEM_PROMPT
 from hyperliquid_trading_agent.app.agent.tools import AgentTools, ToolResult
+from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.paper.schemas import PaperTradeRequest
@@ -55,15 +59,27 @@ class AgentResponse:
     tool_results: list[ToolResult] = field(default_factory=list)
     model_used: str | None = None
     fallback_used: bool = False
+    decision_run_id: str | None = None
+    proposal_id: str | None = None
+    high_stakes: bool = False
 
 
 class TradingAgentRunner:
     """Trading-support orchestration with semantic tool selection and LLM fallback."""
 
-    def __init__(self, tools: AgentTools, model_gateway: ModelGateway, repository: Repository | None = None):
+    def __init__(
+        self,
+        tools: AgentTools,
+        model_gateway: ModelGateway,
+        repository: Repository | None = None,
+        settings: Settings | None = None,
+        high_stakes_graph: HighStakesDebateGraph | None = None,
+    ):
         self.tools = tools
         self.model_gateway = model_gateway
         self.repository = repository
+        self.settings = settings
+        self.high_stakes_graph = high_stakes_graph
 
     async def answer(self, prompt: str, context: AgentContext | None = None) -> AgentResponse:
         context = context or AgentContext()
@@ -76,6 +92,9 @@ class TradingAgentRunner:
 
         tool_results: list[ToolResult] = []
         try:
+            high_stakes = await self._maybe_answer_high_stakes(prompt=redacted_prompt, context=context, started=started)
+            if high_stakes is not None:
+                return high_stakes
             tool_results = await self._gather_context(prompt, context)
             model_context = {
                 "prompt": redacted_prompt,
@@ -122,6 +141,45 @@ class TradingAgentRunner:
                 tool_results=tool_results,
                 fallback_used=True,
             )
+
+    async def _maybe_answer_high_stakes(self, prompt: str, context: AgentContext, started: float) -> AgentResponse | None:
+        if not self.settings or not self.settings.high_stakes_debate_enabled or self.high_stakes_graph is None:
+            return None
+        route = route_high_stakes(
+            prompt,
+            activation_policy=self.settings.high_stakes_activation_policy,
+            max_coins=self.settings.high_stakes_max_coins,
+        )
+        if not route.activate:
+            return None
+        result = await self.high_stakes_graph.run(
+            TradeProposalRequest(prompt=prompt, force_debate=False),
+            agent_context={
+                "source": context.source,
+                "actor": context.discord_user_id or context.source,
+                "discord_guild_id": context.discord_guild_id,
+                "discord_channel_id": context.discord_channel_id,
+                "discord_thread_id": context.discord_thread_id,
+            },
+        )
+        await self._audit(
+            "high_stakes_request_answered",
+            context,
+            {
+                "prompt": prompt,
+                "status": result.status,
+                "run_id": result.run_id,
+                "proposal_id": result.proposal_id,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+            },
+        )
+        return AgentResponse(
+            content=result.content,
+            model_used="multi-agent-debate",
+            decision_run_id=result.run_id,
+            proposal_id=result.proposal_id,
+            high_stakes=True,
+        )
 
     async def _gather_context(self, prompt: str, context: AgentContext) -> list[ToolResult]:
         lowered = prompt.lower()

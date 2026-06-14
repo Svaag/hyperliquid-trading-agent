@@ -10,3 +10,5 @@ HYPERLIQUID_REQUESTS = Counter("hyperliquid_trading_agent_hl_requests_total", "H
 HYPERLIQUID_LATENCY = Histogram("hyperliquid_trading_agent_hl_request_seconds", "Hyperliquid request latency", ["type"])
 MODEL_CALLS = Counter("hyperliquid_trading_agent_model_calls_total", "LLM calls", ["provider", "result"])
 MODEL_LATENCY = Histogram("hyperliquid_trading_agent_model_call_seconds", "LLM call latency", ["provider"])
+DECISION_RUNS = Counter("hyperliquid_trading_agent_decision_runs_total", "High-stakes decision runs", ["status"])
+DECISION_LATENCY = Histogram("hyperliquid_trading_agent_decision_run_seconds", "High-stakes decision run latency", ["status"])
