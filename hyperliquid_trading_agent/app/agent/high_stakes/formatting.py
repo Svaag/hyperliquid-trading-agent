@@ -97,7 +97,7 @@ def _should_use_compact_position_review(proposal: TradeProposal, judge: JudgeDec
     model_fallback = any("model_fallback" in item or "Model fallback" in item for item in proposal.warnings + proposal.risks)
     judge_fallback = bool(judge and judge.model is None)
     has_position = bool(proposal.coin and proposal.entry is not None and proposal.stop is not None)
-    return has_position and (model_fallback or judge_fallback)
+    return has_position and (bool(proposal.tracking_plan) or model_fallback or judge_fallback)
 
 
 def _format_compact_position_review(proposal: TradeProposal, judge: JudgeDecision | None = None) -> str:

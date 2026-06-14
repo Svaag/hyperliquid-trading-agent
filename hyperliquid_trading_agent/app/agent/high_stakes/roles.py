@@ -103,7 +103,7 @@ class HighStakesRoleRunner:
         # Free/dev models can hang or return malformed JSON. Keep each role on a
         # short leash and let deterministic fallbacks complete the debate rather
         # than timing out the entire graph with an unusable final answer.
-        timeout_seconds = min(25.0, max(8.0, self.settings.high_stakes_timeout_seconds / 8))
+        timeout_seconds = min(45.0, max(12.0, self.settings.high_stakes_timeout_seconds / 6))
         return await asyncio.wait_for(self.model_gateway.complete_structured(*args, **kwargs), timeout=timeout_seconds)
 
 

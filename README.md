@@ -71,7 +71,7 @@ DISCORD_ALLOWED_CHANNEL_IDS=
 Model chain:
 
 ```env
-AGENT_MODEL_CHAIN=openrouter:anthropic/claude-sonnet-4.6,openrouter:deepseek/deepseek-v4-pro
+AGENT_MODEL_CHAIN=openrouter:openai/gpt-oss-120b:free,openrouter:openai/gpt-oss-20b:free,openrouter:liquid/lfm-2.5-1.2b-instruct:free,openrouter:nvidia/nemotron-3-nano-30b-a3b:free
 OPENROUTER_API_KEY=
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=

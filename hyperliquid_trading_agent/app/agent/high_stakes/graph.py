@@ -199,6 +199,7 @@ class HighStakesDebateGraph:
         state_for_role["round"] = next_round
         result = await self.role_runner.draft_setup(state_for_role)
         draft = result.parsed if isinstance(result.parsed, TradeSetupDraft) else TradeSetupDraft()
+        draft = _merge_deterministic_setup(draft, state)
         coverage = state.get("data_coverage", DataCoverage())
         opinion = RoleOpinion(
             role="analyst",
@@ -394,6 +395,32 @@ def _replace_round_role(outputs: list[RoleOpinion], opinion: RoleOpinion, round_
     return kept
 
 
+def _merge_deterministic_setup(draft: TradeSetupDraft, state: HighStakesGraphState) -> TradeSetupDraft:
+    context = state.get("context")
+    features = context.features if context else {}
+    parsed = features.get("parsed_setup", {}) if isinstance(features, dict) else {}
+    route = state.get("route")
+    coins = getattr(route, "coins", []) or []
+    updates: dict[str, Any] = {}
+    if coins and (not draft.coin or str(draft.coin).upper() not in {str(coin).upper() for coin in coins}):
+        updates["coin"] = coins[0]
+    for field_name in ["side", "entry", "stop", "take_profit", "timeframe", "risk_pct", "account_equity_usd"]:
+        value = parsed.get(field_name)
+        if value is not None:
+            updates[field_name] = value
+    if parsed.get("stop") is not None:
+        updates["invalidation"] = f"Stop at {parsed.get('stop')}"
+    merged = draft.model_copy(update=updates) if updates else draft
+    needs = []
+    if merged.entry is None:
+        needs.append("entry")
+    if merged.stop is None:
+        needs.append("stop")
+    if merged.side is None:
+        needs.append("side")
+    return merged.model_copy(update={"needs": needs})
+
+
 def _debate_participation(role_outputs: list[RoleOpinion], judge: JudgeDecision) -> list[dict[str, Any]]:
     order = ["analyst", "quant", "research", "risk", "treasury", "execution", "adversary"]
     by_role = {item.role: item for item in role_outputs}
@@ -472,7 +499,7 @@ def _build_proposal(state: HighStakesGraphState) -> TradeProposal:
         agent_context=state.get("agent_context", {}),
     )
     deterministic_rationale = _deterministic_position_rationale(features, draft, tracking_plan)
-    if deterministic_rationale and judge.model is None:
+    if deterministic_rationale and draft.coin and draft.entry is not None and draft.stop is not None:
         rationale = deterministic_rationale
     else:
         rationale = list(judge.final_rationale) or deterministic_rationale
