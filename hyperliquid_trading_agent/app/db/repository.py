@@ -17,11 +17,15 @@ from hyperliquid_trading_agent.app.db.models import (
     NewsItem,
     PaperTradeIdea,
     PaperTradeSnapshot,
+    PositionTracker,
     ToolCall,
+    TrackedLevel,
+    TrackingEvent,
     TradeProposalRecord,
 )
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.security import redact_secrets
+from hyperliquid_trading_agent.app.tracking.schemas import PositionTrackingPlan
 
 log = get_logger(__name__)
 
@@ -347,3 +351,267 @@ class Repository:
         except Exception as exc:  # pragma: no cover
             log.warning("trade_proposal_get_failed", proposal_id=proposal_id, error=type(exc).__name__)
             return None
+
+    async def create_position_tracker(self, plan: PositionTrackingPlan, proposal_id: str | None = None, run_id: str | None = None) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            plan_json = redact_secrets(plan.model_dump(mode="json"))
+            async with self.sessionmaker() as session:
+                tracker = PositionTracker(
+                    id=plan.id,
+                    proposal_id=proposal_id or plan.proposal_id,
+                    run_id=run_id or plan.run_id,
+                    source=str(plan.metadata.get("source") or "auto_high_stakes"),
+                    status=plan.status,
+                    coin=plan.coin.upper(),
+                    side=plan.side,
+                    entry_px=plan.entry,
+                    stop_px=plan.stop,
+                    take_profit_px=plan.take_profit,
+                    current_px=plan.current_price_at_arm,
+                    last_px=None,
+                    last_price_at_ms=None,
+                    price_source=plan.price_source,
+                    expires_at=_datetime_from_ms(plan.expires_at_ms),
+                    discord_guild_id=plan.discord_guild_id,
+                    discord_channel_id=plan.discord_channel_id,
+                    discord_thread_id=plan.discord_thread_id,
+                    discord_user_id=plan.discord_user_id,
+                    plan_json=plan_json,
+                    metadata_json=redact_secrets(plan.metadata),
+                    updated_at=datetime.now(UTC),
+                )
+                session.add(tracker)
+                for level in plan.levels:
+                    session.add(
+                        TrackedLevel(
+                            id=level.id,
+                            tracker_id=plan.id,
+                            kind=level.kind,
+                            label=level.label,
+                            price=level.price,
+                            direction=level.direction,
+                            terminal=level.terminal,
+                            severity=level.severity,
+                            armed=level.armed,
+                            hit_count=level.hit_count,
+                            rearm_band_bps=level.rearm_band_bps,
+                            metadata_json=redact_secrets(level.metadata),
+                        )
+                    )
+                await session.commit()
+                return tracker.id
+        except Exception as exc:  # pragma: no cover
+            log.warning("position_tracker_create_failed", coin=plan.coin, error=type(exc).__name__)
+            return None
+
+    async def get_active_position_trackers(self) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        try:
+            async with self.sessionmaker() as session:
+                result = await session.execute(select(PositionTracker).where(PositionTracker.status.in_(["pending", "active"])))
+                trackers = list(result.scalars().all())
+                return [await self._tracker_to_dict(session, item) for item in trackers]
+        except Exception as exc:  # pragma: no cover
+            log.warning("active_position_trackers_get_failed", error=type(exc).__name__)
+            return []
+
+    async def get_position_tracker(self, tracker_id: str) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                item = await session.get(PositionTracker, tracker_id)
+                return await self._tracker_to_dict(session, item) if item is not None else None
+        except Exception as exc:  # pragma: no cover
+            log.warning("position_tracker_get_failed", tracker_id=tracker_id, error=type(exc).__name__)
+            return None
+
+    async def list_position_trackers(
+        self,
+        status: str | None = None,
+        coin: str | None = None,
+        discord_thread_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        try:
+            async with self.sessionmaker() as session:
+                stmt = select(PositionTracker).order_by(PositionTracker.created_at.desc()).limit(limit)
+                if status:
+                    stmt = stmt.where(PositionTracker.status == status)
+                if coin:
+                    stmt = stmt.where(PositionTracker.coin == coin.upper())
+                if discord_thread_id:
+                    stmt = stmt.where(PositionTracker.discord_thread_id == discord_thread_id)
+                result = await session.execute(stmt)
+                trackers = list(result.scalars().all())
+                return [await self._tracker_to_dict(session, item) for item in trackers]
+        except Exception as exc:  # pragma: no cover
+            log.warning("position_trackers_list_failed", error=type(exc).__name__)
+            return []
+
+    async def update_position_tracker_price(self, tracker_id: str, current_px: float, previous_px: float | None, timestamp_ms: int) -> None:
+        if self.sessionmaker is None:
+            return
+        try:
+            async with self.sessionmaker() as session:
+                tracker = await session.get(PositionTracker, tracker_id)
+                if tracker is not None:
+                    tracker.last_px = previous_px
+                    tracker.current_px = current_px
+                    tracker.last_price_at_ms = timestamp_ms
+                    tracker.updated_at = datetime.now(UTC)
+                    if tracker.status == "pending":
+                        tracker.status = "active"
+                    await session.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("position_tracker_price_update_failed", tracker_id=tracker_id, error=type(exc).__name__)
+
+    async def update_tracked_level_state(self, level_id: str, armed: bool, hit_count: int, last_triggered_at: datetime | None = None) -> None:
+        if self.sessionmaker is None:
+            return
+        try:
+            async with self.sessionmaker() as session:
+                level = await session.get(TrackedLevel, level_id)
+                if level is not None:
+                    level.armed = armed
+                    level.hit_count = hit_count
+                    level.last_triggered_at = last_triggered_at
+                    await session.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("tracked_level_update_failed", level_id=level_id, error=type(exc).__name__)
+
+    async def set_position_tracker_status(self, tracker_id: str, status: str, reason: str = "") -> None:
+        if self.sessionmaker is None:
+            return
+        try:
+            async with self.sessionmaker() as session:
+                tracker = await session.get(PositionTracker, tracker_id)
+                if tracker is not None:
+                    tracker.status = status
+                    tracker.updated_at = datetime.now(UTC)
+                    if status in {"completed", "expired", "stopped", "error"}:
+                        tracker.completed_at = datetime.now(UTC)
+                    await session.commit()
+            if reason:
+                await self.record_tracking_event(tracker_id=tracker_id, event_type=f"tracker_{status}", coin="", payload={"reason": reason})
+        except Exception as exc:  # pragma: no cover
+            log.warning("position_tracker_status_update_failed", tracker_id=tracker_id, status=status, error=type(exc).__name__)
+
+    async def record_tracking_event(
+        self,
+        tracker_id: str,
+        event_type: str,
+        coin: str,
+        price: float | None = None,
+        level_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+        alert_destination: str | None = None,
+        alert_status: str | None = None,
+    ) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                event = TrackingEvent(
+                    tracker_id=tracker_id,
+                    level_id=level_id,
+                    event_type=event_type,
+                    coin=coin.upper() if coin else "",
+                    price=price,
+                    payload_json=redact_secrets(payload or {}),
+                    alert_destination=alert_destination,
+                    alert_status=alert_status,
+                )
+                session.add(event)
+                await session.flush()
+                await session.commit()
+                return event.id
+        except Exception as exc:  # pragma: no cover
+            log.warning("tracking_event_record_failed", tracker_id=tracker_id, event_type=event_type, error=type(exc).__name__)
+            return None
+
+    async def list_tracking_events(self, tracker_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        try:
+            async with self.sessionmaker() as session:
+                result = await session.execute(select(TrackingEvent).where(TrackingEvent.tracker_id == tracker_id).order_by(TrackingEvent.created_at.desc()).limit(limit))
+                return [_event_to_dict(item) for item in result.scalars().all()]
+        except Exception as exc:  # pragma: no cover
+            log.warning("tracking_events_list_failed", tracker_id=tracker_id, error=type(exc).__name__)
+            return []
+
+    async def _tracker_to_dict(self, session: AsyncSession, tracker: PositionTracker) -> dict[str, Any]:
+        levels_result = await session.execute(select(TrackedLevel).where(TrackedLevel.tracker_id == tracker.id).order_by(TrackedLevel.created_at.asc()))
+        events_result = await session.execute(select(TrackingEvent).where(TrackingEvent.tracker_id == tracker.id).order_by(TrackingEvent.created_at.desc()).limit(20))
+        return {
+            "id": tracker.id,
+            "proposal_id": tracker.proposal_id,
+            "run_id": tracker.run_id,
+            "source": tracker.source,
+            "status": tracker.status,
+            "coin": tracker.coin,
+            "side": tracker.side,
+            "entry": tracker.entry_px,
+            "stop": tracker.stop_px,
+            "take_profit": tracker.take_profit_px,
+            "current_price": tracker.current_px,
+            "last_price": tracker.last_px,
+            "last_price_at_ms": tracker.last_price_at_ms,
+            "price_source": tracker.price_source,
+            "expires_at": tracker.expires_at.isoformat() if tracker.expires_at else None,
+            "completed_at": tracker.completed_at.isoformat() if tracker.completed_at else None,
+            "discord_guild_id": tracker.discord_guild_id,
+            "discord_channel_id": tracker.discord_channel_id,
+            "discord_thread_id": tracker.discord_thread_id,
+            "discord_user_id": tracker.discord_user_id,
+            "plan": tracker.plan_json,
+            "metadata": tracker.metadata_json,
+            "levels": [_level_to_dict(item) for item in levels_result.scalars().all()],
+            "recent_events": [_event_to_dict(item) for item in events_result.scalars().all()],
+            "created_at": tracker.created_at.isoformat() if tracker.created_at else None,
+            "updated_at": tracker.updated_at.isoformat() if tracker.updated_at else None,
+        }
+
+
+def _datetime_from_ms(value: int) -> datetime:
+    return datetime.fromtimestamp(value / 1000, tz=UTC)
+
+
+def _level_to_dict(level: TrackedLevel) -> dict[str, Any]:
+    return {
+        "id": level.id,
+        "tracker_id": level.tracker_id,
+        "kind": level.kind,
+        "label": level.label,
+        "price": level.price,
+        "direction": level.direction,
+        "terminal": level.terminal,
+        "severity": level.severity,
+        "armed": level.armed,
+        "hit_count": level.hit_count,
+        "rearm_band_bps": level.rearm_band_bps,
+        "last_triggered_at": level.last_triggered_at.isoformat() if level.last_triggered_at else None,
+        "metadata": level.metadata_json,
+        "created_at": level.created_at.isoformat() if level.created_at else None,
+    }
+
+
+def _event_to_dict(event: TrackingEvent) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "tracker_id": event.tracker_id,
+        "level_id": event.level_id,
+        "event_type": event.event_type,
+        "coin": event.coin,
+        "price": event.price,
+        "payload": event.payload_json,
+        "alert_destination": event.alert_destination,
+        "alert_status": event.alert_status,
+        "created_at": event.created_at.isoformat() if event.created_at else None,
+    }

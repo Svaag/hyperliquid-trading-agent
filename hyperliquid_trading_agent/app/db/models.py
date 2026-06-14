@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -151,3 +151,82 @@ class TradeProposalRecord(TimestampMixin, Base):
     side: Mapped[str | None] = mapped_column(String(16))
     proposal_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     content: Mapped[str] = mapped_column(Text, default="")
+
+
+class PositionTracker(TimestampMixin, Base):
+    __tablename__ = "position_trackers"
+    __table_args__ = (
+        Index("ix_position_trackers_status_coin", "status", "coin"),
+        Index("ix_position_trackers_discord_thread", "discord_thread_id"),
+        Index("ix_position_trackers_proposal_id", "proposal_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_id)
+    proposal_id: Mapped[str | None] = mapped_column(ForeignKey("trade_proposals.id"))
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("decision_runs.id"))
+    source: Mapped[str] = mapped_column(String(64), default="auto_high_stakes", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    coin: Mapped[str] = mapped_column(String(64), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    entry_px: Mapped[float] = mapped_column(Float, nullable=False)
+    stop_px: Mapped[float] = mapped_column(Float, nullable=False)
+    take_profit_px: Mapped[float | None] = mapped_column(Float)
+    current_px: Mapped[float | None] = mapped_column(Float)
+    last_px: Mapped[float | None] = mapped_column(Float)
+    last_price_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    price_source: Mapped[str] = mapped_column(String(32), default="allMids", nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    discord_guild_id: Mapped[str | None] = mapped_column(String(32))
+    discord_channel_id: Mapped[str | None] = mapped_column(String(32))
+    discord_thread_id: Mapped[str | None] = mapped_column(String(32))
+    discord_user_id: Mapped[str | None] = mapped_column(String(32))
+    plan_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    levels: Mapped[list[TrackedLevel]] = relationship(back_populates="tracker")
+    events: Mapped[list[TrackingEvent]] = relationship(back_populates="tracker")
+
+
+class TrackedLevel(TimestampMixin, Base):
+    __tablename__ = "tracked_levels"
+    __table_args__ = (
+        Index("ix_tracked_levels_tracker_id", "tracker_id"),
+        Index("ix_tracked_levels_kind", "kind"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_id)
+    tracker_id: Mapped[str] = mapped_column(ForeignKey("position_trackers.id"), nullable=False)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    direction: Mapped[str] = mapped_column(String(16), nullable=False)
+    terminal: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    armed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    hit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rearm_band_bps: Mapped[float] = mapped_column(Float, nullable=False, default=10.0)
+    last_triggered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    tracker: Mapped[PositionTracker] = relationship(back_populates="levels")
+    events: Mapped[list[TrackingEvent]] = relationship(back_populates="level")
+
+
+class TrackingEvent(TimestampMixin, Base):
+    __tablename__ = "tracking_events"
+    __table_args__ = (
+        Index("ix_tracking_events_tracker_id_created_at", "tracker_id", "created_at"),
+        Index("ix_tracking_events_event_type", "event_type"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_id)
+    tracker_id: Mapped[str] = mapped_column(ForeignKey("position_trackers.id"), nullable=False)
+    level_id: Mapped[str | None] = mapped_column(ForeignKey("tracked_levels.id"))
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    coin: Mapped[str] = mapped_column(String(64), nullable=False)
+    price: Mapped[float | None] = mapped_column(Float)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    alert_destination: Mapped[str | None] = mapped_column(String(64))
+    alert_status: Mapped[str | None] = mapped_column(String(32))
+    tracker: Mapped[PositionTracker] = relationship(back_populates="events")
+    level: Mapped[TrackedLevel | None] = relationship(back_populates="events")
