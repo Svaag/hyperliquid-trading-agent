@@ -11,6 +11,7 @@ from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.hyperliquid.ws_worker import HyperliquidWebSocketWorker, SubscriptionSpec
 from hyperliquid_trading_agent.app.logging import get_logger
+from hyperliquid_trading_agent.app.tracking.commands import TrackingCommand
 from hyperliquid_trading_agent.app.tracking.schemas import (
     CrossDirection,
     LevelHitEvent,
@@ -158,6 +159,19 @@ class PositionTrackingService:
         self._last_price_update_at_ms = timestamp_ms
         return events
 
+    async def handle_thread_command(self, command: TrackingCommand, discord_thread_id: str) -> str:
+        if self.repository is None:
+            return "Tracking storage is unavailable, so I cannot inspect or modify trackers."
+        if command.action == "status":
+            return await self._thread_status(discord_thread_id, command)
+        if command.action == "events":
+            return await self._thread_events(discord_thread_id, command)
+        if command.action in {"stop", "pause", "resume"}:
+            return await self._set_thread_status(discord_thread_id, command)
+        if command.action == "set_ttl" and command.ttl_hours:
+            return await self._set_thread_ttl(discord_thread_id, command)
+        return "I understood this as a tracking command, but it is not supported yet."
+
     def status(self) -> dict[str, Any]:
         active_by_status: dict[str, int] = {}
         for tracker in self._trackers.values():
@@ -171,6 +185,72 @@ class PositionTrackingService:
             "last_reload_at_ms": self._last_reload_at_ms,
             "last_price_update_at_ms": self._last_price_update_at_ms,
         }
+
+    async def _thread_status(self, discord_thread_id: str, command: TrackingCommand) -> str:
+        if self.repository is None:
+            return "Tracking storage is unavailable."
+        repo = self.repository
+        rows = await repo.list_position_trackers(discord_thread_id=discord_thread_id, limit=20)
+        rows = _filter_rows(rows, command)
+        if not rows:
+            return "No trackers are attached to this thread."
+        lines = ["Tracking status:"]
+        for row in rows[:10]:
+            levels = row.get("levels", [])
+            active_levels = [level for level in levels if level.get("armed")]
+            current = row.get("current_price")
+            lines.append(
+                f"- {row.get('coin')} {row.get('side')} | status={row.get('status')} | current={_fmt_price(current)} | "
+                f"entry={_fmt_price(row.get('entry'))} stop={_fmt_price(row.get('stop'))} | armed_levels={len(active_levels)}/{len(levels)} | id={row.get('id')}"
+            )
+        return "\n".join(lines)
+
+    async def _thread_events(self, discord_thread_id: str, command: TrackingCommand) -> str:
+        if self.repository is None:
+            return "Tracking storage is unavailable."
+        repo = self.repository
+        rows = await repo.list_position_trackers(discord_thread_id=discord_thread_id, limit=20)
+        rows = _filter_rows(rows, command)
+        if not rows:
+            return "No trackers are attached to this thread."
+        events = await repo.list_tracking_events(str(rows[0]["id"]), limit=8)
+        if not events:
+            return f"No tracking events yet for {rows[0].get('coin')} tracker {rows[0].get('id')}."
+        lines = [f"Recent tracking events for {rows[0].get('coin')}:"]
+        for event in events:
+            lines.append(f"- {event.get('event_type')} at {_fmt_price(event.get('price'))} ({event.get('created_at')})")
+        return "\n".join(lines)
+
+    async def _set_thread_status(self, discord_thread_id: str, command: TrackingCommand) -> str:
+        if self.repository is None:
+            return "Tracking storage is unavailable."
+        repo = self.repository
+        rows = await repo.list_position_trackers(discord_thread_id=discord_thread_id, limit=50)
+        rows = [row for row in _filter_rows(rows, command) if row.get("status") in {"pending", "active", "paused"}]
+        if not rows:
+            return "No matching active trackers found in this thread."
+        target_status = {"stop": "stopped", "pause": "paused", "resume": "active"}[command.action]
+        for row in rows:
+            await repo.set_position_tracker_status(str(row["id"]), target_status, reason=f"discord_command:{command.action}")
+        await self.reload_active_trackers()
+        verb = "Stopped" if command.action == "stop" else "Paused" if command.action == "pause" else "Resumed"
+        return f"{verb} {len(rows)} tracker(s) in this thread."
+
+    async def _set_thread_ttl(self, discord_thread_id: str, command: TrackingCommand) -> str:
+        if self.repository is None:
+            return "Tracking storage is unavailable."
+        repo = self.repository
+        rows = await repo.list_position_trackers(discord_thread_id=discord_thread_id, limit=50)
+        rows = [row for row in _filter_rows(rows, command) if row.get("status") in {"pending", "active", "paused"}]
+        if not rows:
+            return "No matching active trackers found in this thread."
+        assert command.ttl_hours is not None
+        expires_at_ms = int(time.time() * 1000) + command.ttl_hours * 60 * 60 * 1000
+        for row in rows:
+            await repo.set_position_tracker_expiry(str(row["id"]), expires_at_ms)
+            await repo.record_tracking_event(str(row["id"]), "tracker_ttl_updated", str(row.get("coin") or ""), payload={"ttl_hours": command.ttl_hours, "expires_at_ms": expires_at_ms})
+        await self.reload_active_trackers()
+        return f"Updated {len(rows)} tracker(s) to expire in {command.ttl_hours}h."
 
     async def _sync_subscription(self) -> None:
         async with self._lock:
@@ -377,3 +457,17 @@ def _float_or_none(value: Any) -> float | None:
 
 def _alert_destination(plan: PositionTrackingPlan) -> str | None:
     return f"discord_thread:{plan.discord_thread_id}" if plan.discord_thread_id else None
+
+
+def _filter_rows(rows: list[dict[str, Any]], command: TrackingCommand) -> list[dict[str, Any]]:
+    filtered = rows
+    if command.tracker_id:
+        filtered = [row for row in filtered if str(row.get("id", "")).lower() == command.tracker_id]
+    if command.coin:
+        filtered = [row for row in filtered if str(row.get("coin", "")).upper() == command.coin.upper()]
+    return filtered
+
+
+def _fmt_price(value: Any) -> str:
+    parsed = _float_or_none(value)
+    return "n/a" if parsed is None else f"{parsed:g}"

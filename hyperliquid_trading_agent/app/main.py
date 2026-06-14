@@ -27,6 +27,8 @@ from hyperliquid_trading_agent.app.hyperliquid.ws_worker import HyperliquidWebSo
 from hyperliquid_trading_agent.app.logging import configure_logging, get_logger
 from hyperliquid_trading_agent.app.metrics import SERVICE_INFO, UP
 from hyperliquid_trading_agent.app.news.service import NewsService
+from hyperliquid_trading_agent.app.tracking.alerts import DiscordAlertSink
+from hyperliquid_trading_agent.app.tracking.service import PositionTrackingService
 
 log = get_logger(__name__)
 
@@ -62,11 +64,14 @@ async def lifespan(app: FastAPI):
     model_gateway = ModelGateway(settings=settings)
     high_stakes_context = HighStakesContextBuilder(tools=tools, settings=settings, sdk_info=sdk_info)
     high_stakes_roles = HighStakesRoleRunner(model_gateway=model_gateway, settings=settings)
+    ws_worker = HyperliquidWebSocketWorker(settings=settings)
+    tracking_service = PositionTrackingService(settings=settings, repository=repository, ws_worker=ws_worker)
     high_stakes_graph = HighStakesDebateGraph(
         settings=settings,
         context_builder=high_stakes_context,
         role_runner=high_stakes_roles,
         repository=repository,
+        tracking_service=tracking_service,
     )
     runner = TradingAgentRunner(
         tools=tools,
@@ -75,8 +80,8 @@ async def lifespan(app: FastAPI):
         settings=settings,
         high_stakes_graph=high_stakes_graph,
     )
-    ws_worker = HyperliquidWebSocketWorker(settings=settings)
-    bot = DiscordTradingBot(settings=settings, runner=runner)
+    bot = DiscordTradingBot(settings=settings, runner=runner, tracking_service=tracking_service)
+    tracking_service.alert_sink = DiscordAlertSink(bot)
 
     app.state.engine = engine
     app.state.repository = repository
@@ -87,12 +92,17 @@ async def lifespan(app: FastAPI):
     app.state.high_stakes_graph = high_stakes_graph
     app.state.discord_bot = bot
     app.state.ws_worker = ws_worker
+    app.state.tracking_service = tracking_service
 
     bot_task: asyncio.Task | None = None
     ws_task: asyncio.Task | None = None
-    if settings.hyperliquid_ws_enabled:
+    tracking_task: asyncio.Task | None = None
+    if settings.hyperliquid_ws_enabled or settings.position_tracking_enabled:
         ws_task = asyncio.create_task(ws_worker.start(), name="hyperliquid-ws")
         log.info("hyperliquid_ws_task_started")
+    if settings.position_tracking_enabled:
+        tracking_task = asyncio.create_task(tracking_service.start(), name="position-tracking")
+        log.info("position_tracking_task_started")
     if settings.discord_bot_token:
         bot_task = asyncio.create_task(bot.start(), name="discord-bot")
         log.info("discord_bot_task_started")
@@ -103,12 +113,13 @@ async def lifespan(app: FastAPI):
     finally:
         UP.set(0)
         await bot.stop()
+        await tracking_service.stop()
         await ws_worker.stop()
         if sdk_info is not None:
             await sdk_info.close()
         await hyperliquid.close()
         await engine.dispose()
-        for task in [bot_task, ws_task]:
+        for task in [bot_task, tracking_task, ws_task]:
             if task is not None:
                 task.cancel()
                 try:

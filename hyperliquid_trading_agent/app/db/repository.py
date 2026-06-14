@@ -499,6 +499,22 @@ class Repository:
         except Exception as exc:  # pragma: no cover
             log.warning("tracked_level_update_failed", level_id=level_id, error=type(exc).__name__)
 
+    async def set_position_tracker_expiry(self, tracker_id: str, expires_at_ms: int) -> None:
+        if self.sessionmaker is None:
+            return
+        try:
+            async with self.sessionmaker() as session:
+                tracker = await session.get(PositionTracker, tracker_id)
+                if tracker is not None:
+                    tracker.expires_at = _datetime_from_ms(expires_at_ms)
+                    plan = dict(tracker.plan_json or {})
+                    plan["expires_at_ms"] = expires_at_ms
+                    tracker.plan_json = plan
+                    tracker.updated_at = datetime.now(UTC)
+                    await session.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("position_tracker_expiry_update_failed", tracker_id=tracker_id, error=type(exc).__name__)
+
     async def set_position_tracker_status(self, tracker_id: str, status: str, reason: str = "") -> None:
         if self.sessionmaker is None:
             return

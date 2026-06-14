@@ -407,7 +407,7 @@ def test_hyperliquid_validation_helpers():
 
 
 def test_trade_proposal_api_requires_token_outside_dev():
-    app = create_app(Settings(environment="prod", high_stakes_debate_enabled=True, agent_api_bearer_token="", discord_bot_token=""))
+    app = create_app(Settings(environment="prod", high_stakes_debate_enabled=True, agent_api_bearer_token="", discord_bot_token="", position_tracking_enabled=False))
     with TestClient(app) as client:
         response = client.post("/trade/proposals", json={"prompt": "long BTC entry 100 stop 95"})
 
@@ -415,7 +415,7 @@ def test_trade_proposal_api_requires_token_outside_dev():
 
 
 def test_trade_proposal_api_reports_disabled_in_dev():
-    app = create_app(Settings(environment="dev", high_stakes_debate_enabled=False, discord_bot_token=""))
+    app = create_app(Settings(environment="dev", high_stakes_debate_enabled=False, discord_bot_token="", position_tracking_enabled=False))
     with TestClient(app) as client:
         response = client.post("/trade/proposals", json={"prompt": "long BTC entry 100 stop 95"})
 

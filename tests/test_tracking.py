@@ -2,8 +2,23 @@ from __future__ import annotations
 
 from hyperliquid_trading_agent.app.agent.high_stakes.formatting import format_trade_proposal
 from hyperliquid_trading_agent.app.agent.high_stakes.schemas import JudgeDecision, TradeProposal
+from hyperliquid_trading_agent.app.tracking.alerts import format_level_hit_alert
+from hyperliquid_trading_agent.app.tracking.commands import parse_tracking_command
 from hyperliquid_trading_agent.app.tracking.levels import derive_position_tracking_plan, summarize_tracking_plan
+from hyperliquid_trading_agent.app.tracking.schemas import LevelHitEvent
 from hyperliquid_trading_agent.app.tracking.service import evaluate_level
+
+
+def test_tracking_command_parser_understands_thread_controls():
+    assert parse_tracking_command("tracking status").action == "status"  # type: ignore[union-attr]
+    stop = parse_tracking_command("stop tracking VVV")
+    assert stop is not None
+    assert stop.action == "stop"
+    assert stop.coin == "VVV"
+    ttl = parse_tracking_command("track until 7d")
+    assert ttl is not None
+    assert ttl.action == "set_ttl"
+    assert ttl.ttl_hours == 168
 
 
 def test_derive_long_position_tracking_plan_from_canonical_features():
@@ -76,6 +91,30 @@ def test_crossing_engine_detects_initial_terminal_breach_only():
     hard_stop = next(level for level in plan.levels if level.kind == "hard_stop")
 
     assert evaluate_level(hard_stop, None, 15.4, first_update=True).already_breached is True
+
+
+def test_alert_format_includes_level_meaning_and_no_execution():
+    features = {"market": {"VVV": {"mid": 16.25}}, "candles": {"VVV": {"recent_support": 15.63}}}
+    plan = derive_position_tracking_plan(coin="VVV", side="long", entry=16.4, stop=15.5, features=features, now_ms=1)
+    assert plan is not None
+    level = next(item for item in plan.levels if item.kind == "technical_exit")
+    event = LevelHitEvent(
+        tracker_id=plan.id,
+        coin="VVV",
+        side="long",
+        level_id=level.id,
+        level_kind=level.kind,
+        level_price=level.price,
+        current_price=15.62,
+        direction=level.direction,
+        terminal=level.terminal,
+        recommended_action="exit",
+    )
+
+    content = format_level_hit_alert(plan, level, event)
+
+    assert "technical reduce/exit trigger" in content
+    assert "No trade was placed" in content
 
 
 def test_formatter_uses_tracking_plan_levels():

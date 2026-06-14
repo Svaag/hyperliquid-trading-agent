@@ -8,6 +8,8 @@ from hyperliquid_trading_agent.app.agent.runner import AgentContext, TradingAgen
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.metrics import DISCORD_MESSAGES
+from hyperliquid_trading_agent.app.tracking.commands import parse_tracking_command
+from hyperliquid_trading_agent.app.tracking.service import PositionTrackingService
 
 discord: Any
 try:  # pragma: no cover - import availability depends on runtime extras
@@ -29,9 +31,10 @@ class DiscordContext:
 class DiscordTradingBot:
     """Mention-driven Discord support desk bot."""
 
-    def __init__(self, settings: Settings, runner: TradingAgentRunner | None = None):
+    def __init__(self, settings: Settings, runner: TradingAgentRunner | None = None, tracking_service: PositionTrackingService | None = None):
         self.settings = settings
         self.runner = runner
+        self.tracking_service = tracking_service
         self.client = None
         if discord is not None:
             intents = discord.Intents.default()
@@ -94,9 +97,16 @@ class DiscordTradingBot:
             if not prompt:
                 await message.reply("Mention me with a trading, Hyperliquid, market, macro, or news question.", mention_author=False)
                 return
+            tracking_command = parse_tracking_command(prompt)
             try:
                 async with message.channel.typing():
                     thread = await _ensure_thread(message, prompt)
+                    if tracking_command is not None and self.tracking_service is not None:
+                        content = await self.tracking_service.handle_thread_command(tracking_command, _maybe_str(getattr(thread, "id", None)) or "")
+                        for chunk in _chunk(content, self.settings.discord_max_response_chars):
+                            await thread.send(chunk)
+                        DISCORD_MESSAGES.labels(result="tracking_command").inc()
+                        return
                     agent_context = AgentContext(
                         source="discord",
                         discord_guild_id=_maybe_str(getattr(getattr(message, "guild", None), "id", None)),
