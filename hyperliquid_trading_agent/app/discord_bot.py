@@ -69,7 +69,11 @@ class DiscordTradingBot:
 
         @self.client.event
         async def on_message(message):
-            if message.author.bot or self.client.user is None or self.client.user not in message.mentions:
+            if message.author.bot or self.client.user is None:
+                return
+            mentioned = self.client.user in message.mentions
+            thread_continuation = _is_bot_thread(getattr(message, "channel", None), self.client.user)
+            if not mentioned and not thread_continuation:
                 return
             role_ids = {int(getattr(role, "id", 0)) for role in getattr(message.author, "roles", [])}
             channel_id = _authorized_channel_id(message)
@@ -121,7 +125,7 @@ def _authorized_channel_id(message) -> int | None:
 
 
 async def _ensure_thread(message, prompt: str):
-    if hasattr(message.channel, "send") and getattr(message.channel, "type", None).__class__.__name__ == "ThreadType":
+    if _is_thread_channel(getattr(message, "channel", None)):
         return message.channel
     if callable(getattr(message, "create_thread", None)):
         name = _thread_name(prompt)
@@ -135,6 +139,26 @@ async def _ensure_thread(message, prompt: str):
         except Exception as exc:  # pragma: no cover - Discord permission/runtime behavior
             log.warning("discord_thread_create_failed", error=type(exc).__name__)
     return message.channel
+
+
+def _is_thread_channel(channel) -> bool:
+    if channel is None:
+        return False
+    if discord is not None and hasattr(discord, "Thread") and isinstance(channel, discord.Thread):
+        return True
+    channel_type = getattr(getattr(channel, "type", None), "name", "")
+    if channel_type in {"public_thread", "private_thread", "news_thread"}:
+        return True
+    return getattr(channel, "owner_id", None) is not None and getattr(channel, "parent", None) is not None
+
+
+def _is_bot_thread(channel, bot_user) -> bool:
+    if not _is_thread_channel(channel):
+        return False
+    bot_id = getattr(bot_user, "id", None)
+    if bot_id is None:
+        return False
+    return getattr(channel, "owner_id", None) == bot_id
 
 
 def _thread_name(prompt: str) -> str:

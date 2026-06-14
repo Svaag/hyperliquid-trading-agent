@@ -11,6 +11,7 @@ from hyperliquid_trading_agent.app.discord_bot import (
     DiscordContext,
     DiscordTradingBot,
     _chunk,
+    _is_bot_thread,
     _message_prompt_without_mentions,
 )
 from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
@@ -117,6 +118,25 @@ def test_discord_authorization_channel_and_role():
 
     assert bot.is_authorized(DiscordContext(guild_id=1, channel_id=42, author_id=3), role_ids={7}) is True
     assert bot.is_authorized(DiscordContext(guild_id=1, channel_id=42, author_id=3), role_ids={8}) is False
+
+
+class FakeUser:
+    id = 123
+
+
+class FakeThread:
+    owner_id = 123
+    parent = object()
+
+
+class FakeOtherThread:
+    owner_id = 456
+    parent = object()
+
+
+def test_discord_thread_continuation_detection():
+    assert _is_bot_thread(FakeThread(), FakeUser()) is True
+    assert _is_bot_thread(FakeOtherThread(), FakeUser()) is False
 
 
 def test_paper_trade_simulator_plan():
