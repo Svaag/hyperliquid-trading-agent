@@ -244,17 +244,18 @@ async def test_model_gateway_skips_empty_model_response(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_model_gateway_attempt_timeout_falls_through_to_next_model(monkeypatch):
-    import asyncio
-
     import litellm
 
     calls = []
+    timeouts = []
 
     async def fake_acompletion(**kwargs):
         calls.append(kwargs["model"])
+        timeouts.append(kwargs.get("timeout"))
+        # The gateway must hand litellm a real per-attempt timeout (enforced at the HTTP
+        # layer); a slow first model raises and the chain falls through to the fallback.
         if len(calls) == 1:
-            await asyncio.sleep(5)  # first model hangs well past the per-attempt leash
-            return FakeCompletion("too slow")
+            raise TimeoutError("simulated provider timeout")
         return FakeCompletion("fast fallback")
 
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
@@ -264,13 +265,28 @@ async def test_model_gateway_attempt_timeout_falls_through_to_next_model(monkeyp
         "prompt",
         "system",
         model_chain=["openrouter:slow", "openrouter:fast"],
-        attempt_timeout_seconds=0.05,
+        attempt_timeout_budget=30.0,
     )
 
     assert calls == ["openrouter/slow", "openrouter/fast"]
     assert result.content == "fast fallback"
     assert result.model == "openrouter:fast"
     assert "timeout" in result.attempts[0]
+    # Budget is front-loaded: the primary attempt gets a larger slice than the fallback.
+    assert timeouts[0] > timeouts[1]
+
+
+def test_front_loaded_timeouts_front_loads_primary():
+    from hyperliquid_trading_agent.app.agent.model_gateway import _front_loaded_timeouts
+
+    assert _front_loaded_timeouts(None, 3) is None
+    assert _front_loaded_timeouts(45.0, 1) == [45.0]
+
+    schedule = _front_loaded_timeouts(45.0, 4)
+    assert schedule is not None
+    assert schedule[0] == pytest.approx(45.0 * 0.55)  # primary gets the bulk
+    assert schedule[0] > schedule[1]
+    assert all(slice_ >= 8.0 for slice_ in schedule)  # fallbacks keep a usable floor
 
 
 @pytest.mark.asyncio

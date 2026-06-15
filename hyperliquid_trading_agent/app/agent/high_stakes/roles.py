@@ -48,7 +48,7 @@ class HighStakesRoleRunner:
                 temperature=0.15,
                 max_tokens=1400,
                 context={"state": compact_context(await self._state_for_role_model("analyst", state))},
-                timeout_seconds=self._role_timeout_seconds(state),
+                timeout_seconds=self._role_timeout_seconds(state, "analyst"),
             )
             return RoleCallResult(response.parsed, response.raw_content, response.model, response.provider, _elapsed_ms(started))
         except Exception as exc:
@@ -71,7 +71,7 @@ class HighStakesRoleRunner:
                 temperature=0.1,
                 max_tokens=1400,
                 context={"state": compact_context(await self._state_for_role_model(role, state))},
-                timeout_seconds=self._role_timeout_seconds(state),
+                timeout_seconds=self._role_timeout_seconds(state, role),
             )
             parsed = response.parsed
             if isinstance(parsed, RoleOpinion):
@@ -94,7 +94,7 @@ class HighStakesRoleRunner:
                 temperature=0.05,
                 max_tokens=1600,
                 context={"state": compact_context(await self._state_for_role_model("judge", state))},
-                timeout_seconds=self._role_timeout_seconds(state),
+                timeout_seconds=self._role_timeout_seconds(state, "judge"),
             )
             decision = response.parsed
             if isinstance(decision, JudgeDecision):
@@ -136,46 +136,49 @@ class HighStakesRoleRunner:
             return ""
 
     async def _complete_structured_with_timeout(self, *args: Any, **kwargs: Any):
-        # Free/dev models can hang or return malformed JSON. Keep each role on a
-        # short leash and let deterministic fallbacks complete the debate rather
-        # than timing out the entire graph with an unusable final answer.
+        # Models can hang or return malformed JSON. The gateway front-loads the role budget
+        # across the fallback chain and enforces each slice with litellm's native (HTTP-level)
+        # timeout, which actually interrupts an in-flight call — asyncio.wait_for does not, it
+        # just waits for the late result. The outer wait_for here is only a coarse backstop
+        # above the gateway's own per-attempt deadlines.
         timeout_seconds = float(kwargs.pop("timeout_seconds", self._default_role_timeout_seconds()))
-        # Split that leash across the role's fallback chain so a single hung model
-        # cannot eat the whole budget before faster fallbacks are reached.
-        chain = kwargs.get("model_chain") or []
-        kwargs.setdefault("attempt_timeout_seconds", self._attempt_timeout_seconds(timeout_seconds, len(chain)))
-        return await asyncio.wait_for(self.model_gateway.complete_structured(*args, **kwargs), timeout=timeout_seconds)
+        kwargs.setdefault("attempt_timeout_budget", timeout_seconds)
+        return await asyncio.wait_for(
+            self.model_gateway.complete_structured(*args, **kwargs), timeout=timeout_seconds + 15.0
+        )
 
-    def _attempt_timeout_seconds(self, role_budget: float, chain_len: int) -> float:
-        # Give each model in the fallback chain a fair slice of the role budget so the
-        # chain can actually fall through within one role's leash. The floor keeps a
-        # working free model (~6s typical) from being cut off when the chain is long.
-        return max(8.0, role_budget / max(1, chain_len))
-
-    def _role_timeout_seconds(self, state: dict[str, Any]) -> float:
+    def _role_timeout_seconds(self, state: dict[str, Any], role: str) -> float:
         total = float(self.settings.high_stakes_timeout_seconds)
         reserve_seconds = min(45.0, max(20.0, total * 0.15))
         remaining = max(0.0, total - self._elapsed_seconds(state) - reserve_seconds)
-        phases = self._sequential_phases(state)
-        # Budget the next call from the wall-clock that is actually left, divided by the
-        # sequential phases in a round. We intentionally do NOT divide by max_rounds:
-        # most debates converge in one round, and pre-dividing by the worst-case round
-        # count collapsed every call to a starvation leash (e.g. 240s/3 rounds -> 17s)
-        # while leaving most of the budget unused. Dividing *remaining* time by phases
-        # is self-limiting — each phase consumes a fraction, so the round stays within
-        # budget and any revision round simply re-budgets from what is left.
-        return min(45.0, max(8.0, remaining / phases))
+        # Budget from the wall-clock that is actually left, divided by the phases still to
+        # run in this round (not all phases). Dividing by *remaining* phases keeps the judge —
+        # which runs last and used to be starved to ~27s — on an equal footing with earlier
+        # phases, while staying self-limiting: fast phases leave more for the rest, slow phases
+        # borrow from what is left. We never divide by max_rounds (revision rounds re-budget).
+        phases = self._active_phases(state)
+        position = phases.index(self._phase_of_role(role)) if self._phase_of_role(role) in phases else 0
+        phases_remaining = max(1, len(phases) - position)
+        return min(50.0, max(8.0, remaining / phases_remaining))
 
-    def _sequential_phases(self, state: dict[str, Any]) -> int:
+    def _active_phases(self, state: dict[str, Any]) -> list[str]:
         route = state.get("route")
         selected = set(getattr(route, "selected_roles", []) or [])
-        phases = 1  # analyst/proposer
+        phases = ["proposer"]
         if selected & {"quant", "research", "risk", "treasury", "execution"}:
-            phases += 1  # bounded concurrent reviewer batch
+            phases.append("reviewers")  # bounded concurrent reviewer batch
         if "adversary" in selected:
-            phases += 1  # adversary sees reviewer outputs
-        phases += 1  # judge
+            phases.append("adversary")  # adversary sees reviewer outputs
+        phases.append("judge")
         return phases
+
+    @staticmethod
+    def _phase_of_role(role: str) -> str:
+        if role == "analyst":
+            return "proposer"
+        if role in {"adversary", "judge"}:
+            return role
+        return "reviewers"
 
     def _elapsed_seconds(self, state: dict[str, Any]) -> float:
         started_at = state.get("started_at")

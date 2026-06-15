@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
@@ -100,7 +99,7 @@ class ModelGateway:
         temperature: float = 0.2,
         max_tokens: int = 1400,
         context: dict[str, Any] | None = None,
-        attempt_timeout_seconds: float | None = None,
+        attempt_timeout_budget: float | None = None,
     ) -> ModelResponse:
         messages = [
             {"role": "system", "content": system_prompt},
@@ -115,7 +114,7 @@ class ModelGateway:
             messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            attempt_timeout_seconds=attempt_timeout_seconds,
+            attempt_timeout_budget=attempt_timeout_budget,
         )
 
     async def complete_structured(
@@ -128,7 +127,7 @@ class ModelGateway:
         temperature: float = 0.1,
         max_tokens: int = 1600,
         context: dict[str, Any] | None = None,
-        attempt_timeout_seconds: float | None = None,
+        attempt_timeout_budget: float | None = None,
     ) -> StructuredModelResponse:
         schema = response_model.model_json_schema()
         structured_system = (
@@ -142,7 +141,7 @@ class ModelGateway:
             temperature=temperature,
             max_tokens=max_tokens,
             context=context,
-            attempt_timeout_seconds=attempt_timeout_seconds,
+            attempt_timeout_budget=attempt_timeout_budget,
         )
         try:
             parsed = _parse_structured_content(response.content, response_model)
@@ -159,7 +158,7 @@ class ModelGateway:
                 temperature=0.0,
                 max_tokens=max_tokens,
                 context=context,
-                attempt_timeout_seconds=attempt_timeout_seconds,
+                attempt_timeout_budget=attempt_timeout_budget,
             )
             parsed = _parse_structured_content(repaired.content, response_model)
             return StructuredModelResponse(
@@ -184,19 +183,28 @@ class ModelGateway:
         *,
         temperature: float,
         max_tokens: int,
-        attempt_timeout_seconds: float | None = None,
+        attempt_timeout_budget: float | None = None,
     ) -> ModelResponse:
         try:
+            import litellm
             from litellm import acompletion
         except Exception as exc:  # pragma: no cover - dependency is present in runtime image
             raise ModelGatewayError("litellm is not installed") from exc
 
+        # litellm's `timeout` is enforced by httpx at the HTTP layer and reliably aborts a
+        # slow/hung call (asyncio.wait_for does not — it waits for the late result). Spread
+        # the role budget front-loaded across the chain so the primary gets the bulk and a
+        # timed-out attempt falls through to the next, faster fallback model.
+        timeout_error: type[BaseException] = getattr(litellm, "Timeout", TimeoutError)
+        schedule = _front_loaded_timeouts(attempt_timeout_budget, len(attempts))
+
         errors: list[str] = []
-        for attempt in attempts:
+        for index, attempt in enumerate(attempts):
             if attempt.missing_reason:
                 errors.append(f"{attempt.model}: {attempt.missing_reason}")
                 continue
             started = time.perf_counter()
+            per_attempt_timeout = schedule[index] if schedule else None
             try:
                 kwargs: dict[str, Any] = {
                     "model": attempt.litellm_model,
@@ -208,14 +216,9 @@ class ModelGateway:
                     kwargs["api_key"] = attempt.api_key
                 if attempt.api_base:
                     kwargs["api_base"] = attempt.api_base
-                # Bound each attempt so one hung/queued model (common on free tiers)
-                # cannot consume the whole chain budget before faster fallback models
-                # are tried. Timeouts fall through to the next attempt, not the caller.
-                call = acompletion(**kwargs)
-                if attempt_timeout_seconds is not None:
-                    response = await asyncio.wait_for(call, timeout=attempt_timeout_seconds)
-                else:
-                    response = await call
+                if per_attempt_timeout is not None:
+                    kwargs["timeout"] = per_attempt_timeout
+                response = await acompletion(**kwargs)
                 content = (response.choices[0].message.content or "").strip()
                 if not content:
                     MODEL_CALLS.labels(provider=attempt.provider, result="empty").inc()
@@ -226,7 +229,7 @@ class ModelGateway:
                 MODEL_CALLS.labels(provider=attempt.provider, result="ok").inc()
                 MODEL_LATENCY.labels(provider=attempt.provider).observe(time.perf_counter() - started)
                 return ModelResponse(content=content, model=attempt.model, provider=attempt.provider, attempts=errors)
-            except TimeoutError:
+            except (TimeoutError, timeout_error):
                 MODEL_CALLS.labels(provider=attempt.provider, result="timeout").inc()
                 MODEL_LATENCY.labels(provider=attempt.provider).observe(time.perf_counter() - started)
                 errors.append(f"{attempt.model}: timeout")
@@ -234,7 +237,7 @@ class ModelGateway:
                     "model_attempt_timeout",
                     model=attempt.model,
                     provider=attempt.provider,
-                    timeout_seconds=attempt_timeout_seconds,
+                    timeout_seconds=per_attempt_timeout,
                 )
             except Exception as exc:
                 MODEL_CALLS.labels(provider=attempt.provider, result="error").inc()
@@ -295,6 +298,26 @@ class ModelGateway:
                 missing_reason=None if key else "KIMI_API_KEY is not set",
             )
         return ModelAttempt(model=model, provider=provider, litellm_model=model)
+
+
+_MIN_ATTEMPT_TIMEOUT = 8.0
+
+
+def _front_loaded_timeouts(budget: float | None, count: int) -> list[float] | None:
+    """Split a chain budget across `count` attempts, front-loaded onto the primary.
+
+    The primary (frontier) model gets the largest slice so a slow-but-working call can
+    finish; remaining attempts share the rest with a floor so a timed-out primary still
+    leaves real time for a smaller, faster fallback. Returns None when no budget is set.
+    """
+    if budget is None or count <= 0:
+        return None
+    if count == 1:
+        return [budget]
+    primary = max(_MIN_ATTEMPT_TIMEOUT, budget * 0.55)
+    remainder = max(_MIN_ATTEMPT_TIMEOUT * (count - 1), budget - primary)
+    fallback = remainder / (count - 1)
+    return [primary] + [fallback] * (count - 1)
 
 
 def _parse_structured_content(content: str, response_model: type[StructuredModelT]) -> StructuredModelT:
