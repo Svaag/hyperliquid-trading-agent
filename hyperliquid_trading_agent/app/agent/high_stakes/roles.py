@@ -112,12 +112,17 @@ class HighStakesRoleRunner:
     def _role_timeout_seconds(self, state: dict[str, Any]) -> float:
         route = state.get("route")
         selected = set(getattr(route, "selected_roles", []) or [])
-        review_roles = {"quant", "research", "risk", "treasury", "execution", "adversary"}
-        calls_per_round = 1 + len(selected & review_roles) + 1  # proposer + selected reviewers + judge
+        parallel_roles = {"quant", "research", "risk", "treasury", "execution"}
+        sequential_phases = 1  # analyst/proposer
+        if selected & parallel_roles:
+            sequential_phases += 1  # bounded concurrent reviewer batch
+        if "adversary" in selected:
+            sequential_phases += 1  # adversary sees reviewer outputs
+        sequential_phases += 1  # judge
         rounds = max(1, int(getattr(self.settings, "high_stakes_max_rounds", 1) or 1))
         reserve_seconds = min(45.0, max(20.0, self.settings.high_stakes_timeout_seconds * 0.15))
         budget = max(30.0, self.settings.high_stakes_timeout_seconds - reserve_seconds)
-        return min(30.0, max(8.0, budget / max(1, calls_per_round * rounds)))
+        return min(35.0, max(8.0, budget / max(1, sequential_phases * rounds)))
 
     def _default_role_timeout_seconds(self) -> float:
         return min(30.0, max(8.0, self.settings.high_stakes_timeout_seconds / 8))

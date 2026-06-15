@@ -84,6 +84,7 @@ class Settings(BaseSettings):
     high_stakes_info_provider: Literal["sdk_preferred", "rest_only", "sdk_only"] = "sdk_preferred"
     high_stakes_max_rounds: int = 3
     high_stakes_timeout_seconds: int = 90
+    high_stakes_review_concurrency: int = 3
     high_stakes_max_coins: int = 3
     high_stakes_max_data_escalations: int = 1
     high_stakes_require_account_for_autonomous: bool = False

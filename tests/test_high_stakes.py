@@ -9,7 +9,7 @@ from hyperliquid_trading_agent.app.agent.high_stakes.features import parse_trade
 from hyperliquid_trading_agent.app.agent.high_stakes.formatting import format_trade_proposal
 from hyperliquid_trading_agent.app.agent.high_stakes.graph import HighStakesDebateGraph
 from hyperliquid_trading_agent.app.agent.high_stakes.prompts import ROLES, role_system_prompt
-from hyperliquid_trading_agent.app.agent.high_stakes.roles import HighStakesRoleRunner
+from hyperliquid_trading_agent.app.agent.high_stakes.roles import HighStakesRoleRunner, RoleCallResult
 from hyperliquid_trading_agent.app.agent.high_stakes.routing import route_high_stakes
 from hyperliquid_trading_agent.app.agent.high_stakes.schemas import (
     CritiqueResolution,
@@ -115,6 +115,22 @@ class FakeTrackingService:
 class TimeoutCompiledGraph:
     async def ainvoke(self, initial):
         raise TimeoutError()
+
+
+class ConcurrentFakeRoleRunner:
+    def __init__(self):
+        self.active = 0
+        self.max_active = 0
+
+    async def review(self, role, state):
+        import asyncio
+
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        await asyncio.sleep(0.05)
+        self.active -= 1
+        opinion = RoleOpinion(role=role, stance="mixed", summary=f"{role} done")
+        return RoleCallResult(opinion, opinion.model_dump_json(), "fake-model", "fake", 50)
 
 
 class FakeAsyncSDKInfo:
@@ -459,6 +475,33 @@ def test_role_timeout_budget_keeps_position_reviews_inside_graph_budget():
     route = route_high_stakes("I entered VVV at 16.40 with stop loss at 15.50 - hold or take profit?")
 
     assert runner._role_timeout_seconds({"route": route}) < 20
+
+
+@pytest.mark.asyncio
+async def test_high_stakes_review_roles_run_concurrently():
+    settings = Settings(high_stakes_review_concurrency=3)
+    role_runner = ConcurrentFakeRoleRunner()
+    graph = HighStakesDebateGraph(
+        settings=settings,
+        context_builder=object(),  # type: ignore[arg-type]
+        role_runner=role_runner,  # type: ignore[arg-type]
+    )
+    route = route_high_stakes("high stakes VVV long entry 16.40 stop 15.50 execute with research news")
+    state = {
+        "request": TradeProposalRequest(prompt="x"),
+        "prompt": "x",
+        "route": route,
+        "round": 1,
+        "role_outputs": [RoleOpinion(role="analyst", stance="mixed", summary="draft")],
+        "warnings": [],
+        "errors": [],
+    }
+
+    updates = await graph._parallel_reviews(state)  # type: ignore[arg-type]
+    roles = {item.role for item in updates["role_outputs"]}
+
+    assert role_runner.max_active > 1
+    assert {"quant", "research", "risk", "execution"}.issubset(roles)
 
 
 @pytest.mark.asyncio

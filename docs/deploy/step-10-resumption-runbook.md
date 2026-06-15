@@ -99,6 +99,7 @@ HIGH_STAKES_DEBATE_ENABLED=false
 HIGH_STAKES_PROMPT_STYLE=standard
 HIGH_STAKES_INFO_PROVIDER=sdk_preferred
 HIGH_STAKES_MAX_DATA_ESCALATIONS=1
+HIGH_STAKES_REVIEW_CONCURRENCY=3
 HIGH_STAKES_SMART_MONEY_ADDRESSES=
 DEBATE_MODEL_DIVERSITY_POLICY=warn
 # Production: set DEBATE_JUDGE_MODEL_CHAIN to the strongest available frontier/main model.
@@ -240,7 +241,7 @@ Expected behavior:
 - Bot answers with trading-support format.
 - BTC/ETH/SOL market questions use live Hyperliquid data.
 - Paper trade question returns size/notional/risk and stores audit/paper-trade records.
-- If `HIGH_STAKES_DEBATE_ENABLED=true`, explicit high-stakes trade setup prompts return audited manual/paper proposals with institutional prompt rubrics, route-relevant Hyperliquid endpoint coverage, optional official SDK `Info` data, and no live execution.
+- If `HIGH_STAKES_DEBATE_ENABLED=true`, explicit high-stakes trade setup prompts return audited manual/paper proposals with institutional prompt rubrics, route-relevant Hyperliquid endpoint coverage, optional official SDK `Info` data, bounded concurrent reviewer calls, and no live execution.
 - Valid position reviews auto-arm live level tracking; inside the bot-created thread, `tracking status` should list the active tracker and `stop tracking` should stop it.
 - Off-topic question is refused.
 - No mainnet trade execution is possible.

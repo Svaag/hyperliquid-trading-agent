@@ -182,11 +182,7 @@ class HighStakesDebateGraph:
         graph.add_node("triage", self._triage)
         graph.add_node("gather_context", self._gather_context)
         graph.add_node("proposer", self._proposer)
-        graph.add_node("quant_review", self._review_node("quant"))
-        graph.add_node("research_review", self._review_node("research"))
-        graph.add_node("risk_review", self._review_node("risk"))
-        graph.add_node("treasury_review", self._review_node("treasury"))
-        graph.add_node("execution_review", self._review_node("execution"))
+        graph.add_node("parallel_reviews", self._parallel_reviews)
         graph.add_node("adversary_review", self._review_node("adversary"))
         graph.add_node("judge", self._judge)
         graph.add_node("gather_escalated_context", self._gather_escalated_context)
@@ -194,12 +190,8 @@ class HighStakesDebateGraph:
         graph.add_edge(START, "triage")
         graph.add_edge("triage", "gather_context")
         graph.add_edge("gather_context", "proposer")
-        graph.add_edge("proposer", "quant_review")
-        graph.add_edge("quant_review", "research_review")
-        graph.add_edge("research_review", "risk_review")
-        graph.add_edge("risk_review", "treasury_review")
-        graph.add_edge("treasury_review", "execution_review")
-        graph.add_edge("execution_review", "adversary_review")
+        graph.add_edge("proposer", "parallel_reviews")
+        graph.add_edge("parallel_reviews", "adversary_review")
         graph.add_edge("adversary_review", "judge")
         graph.add_conditional_edges("judge", self._judge_route, {"escalate": "gather_escalated_context", "revise": "proposer", "finalize": "finalize"})
         graph.add_edge("gather_escalated_context", "proposer")
@@ -295,22 +287,53 @@ class HighStakesDebateGraph:
         await self._snapshot(_merged_state(state, updates), "proposer")
         return updates
 
+    async def _parallel_reviews(self, state: HighStakesGraphState) -> dict[str, Any]:
+        route = state.get("route")
+        selected = set(getattr(route, "selected_roles", []) or [])
+        roles = [role for role in ["quant", "research", "risk", "treasury", "execution"] if role in selected]
+        if not roles:
+            updates = {"role_outputs": state.get("role_outputs", [])}
+            await self._snapshot(_merged_state(state, updates), "parallel_reviews")
+            return updates
+
+        concurrency = max(1, int(getattr(self.settings, "high_stakes_review_concurrency", 3) or 1))
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def run_bounded(role: str) -> tuple[str, RoleCallResult, RoleOpinion]:
+            async with semaphore:
+                return await self._run_review_role(role, state)
+
+        results = await asyncio.gather(*(run_bounded(role) for role in roles))
+        round_index = int(state.get("round", 0))
+        role_outputs = list(state.get("role_outputs", []))
+        for role, result, opinion in results:
+            role_outputs = _replace_round_role(role_outputs, opinion, round_index)
+        await asyncio.gather(*(self._record_role(state, role, round_index, result, opinion) for role, result, opinion in results))
+        updates = {"role_outputs": role_outputs}
+        await self._snapshot(_merged_state(state, updates), "parallel_reviews")
+        return updates
+
+    async def _run_review_role(self, role: str, state: HighStakesGraphState) -> tuple[str, RoleCallResult, RoleOpinion]:
+        result = await self.role_runner.review(role, dict(state))
+        opinion = result.parsed if isinstance(result.parsed, RoleOpinion) else RoleOpinion(role=role, stance="error", summary="Invalid role output")
+        opinion = opinion.model_copy(
+            update={
+                "role": role,
+                "call_status": result.status,
+                "latency_ms": result.latency_ms,
+                "model": result.model or opinion.model,
+                "provider": result.provider or opinion.provider,
+            }
+        )
+        return role, result, opinion
+
     def _review_node(self, role: str):
         async def node(state: HighStakesGraphState) -> dict[str, Any]:
-            result = await self.role_runner.review(role, dict(state))
-            opinion = result.parsed if isinstance(result.parsed, RoleOpinion) else RoleOpinion(role=role, stance="error", summary="Invalid role output")
-            opinion = opinion.model_copy(
-                update={
-                    "role": role,
-                    "call_status": result.status,
-                    "latency_ms": result.latency_ms,
-                    "model": result.model or opinion.model,
-                    "provider": result.provider or opinion.provider,
-                }
-            )
-            role_outputs = _replace_round_role(state.get("role_outputs", []), opinion, int(state.get("round", 0)))
+            role_name, result, opinion = await self._run_review_role(role, state)
+            round_index = int(state.get("round", 0))
+            role_outputs = _replace_round_role(state.get("role_outputs", []), opinion, round_index)
             updates = {"role_outputs": role_outputs}
-            await self._record_role(state, role, int(state.get("round", 0)), result, opinion)
+            await self._record_role(state, role_name, round_index, result, opinion)
             await self._snapshot(_merged_state(state, updates), f"{role}_review")
             return updates
 

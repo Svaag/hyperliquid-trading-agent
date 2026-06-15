@@ -88,6 +88,7 @@ HIGH_STAKES_PROMPT_STYLE=standard
 HIGH_STAKES_INFO_PROVIDER=sdk_preferred
 HIGH_STAKES_MAX_ROUNDS=3
 HIGH_STAKES_TIMEOUT_SECONDS=90
+HIGH_STAKES_REVIEW_CONCURRENCY=3
 HIGH_STAKES_MAX_COINS=3
 HIGH_STAKES_MAX_DATA_ESCALATIONS=1
 DEBATE_MODEL_DIVERSITY_POLICY=warn
@@ -106,7 +107,7 @@ DEBATE_JUDGE_MODEL_CHAIN=openrouter:openai/gpt-oss-120b:free,openrouter:openai/g
 
 The debate model contract is: role primary models should differ, adversarial reviewers should not share the proposer/quant primary, and the Judge should use a distinct strongest/main model. `DEBATE_MODEL_DIVERSITY_POLICY=warn|strict|off` controls diagnostics; `/health/config` reports the contract status. Development defaults use free OpenRouter models; in production, replace `DEBATE_JUDGE_MODEL_CHAIN` with the best available frontier/main model and keep other roles on varied open-source model families.
 
-Role chains default to role-specific free-model chains when unset. `/trade/proposals` forces the high-stakes graph when enabled and requires `AGENT_API_BEARER_TOKEN` outside dev/test/local. `HIGH_STAKES_PROMPT_STYLE=aggressive` changes desk tone but does not relax vetoes or no-execution rules. `HIGH_STAKES_INFO_PROVIDER=sdk_preferred` uses the official Hyperliquid Python SDK `Info` client for read-only high-stakes data where available, with REST `/info` fallback for missing official endpoints.
+Role chains default to role-specific free-model chains when unset. `/trade/proposals` forces the high-stakes graph when enabled and requires `AGENT_API_BEARER_TOKEN` outside dev/test/local. `HIGH_STAKES_PROMPT_STYLE=aggressive` changes desk tone but does not relax vetoes or no-execution rules. `HIGH_STAKES_INFO_PROVIDER=sdk_preferred` uses the official Hyperliquid Python SDK `Info` client for read-only high-stakes data where available, with REST `/info` fallback for missing official endpoints. `HIGH_STAKES_REVIEW_CONCURRENCY` bounds concurrent independent reviewer calls after the analyst draft; adversary and judge still run after reviewer outputs.
 
 Hyperliquid:
 

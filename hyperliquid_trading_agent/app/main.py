@@ -173,6 +173,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "info_provider": settings.high_stakes_info_provider,
                 "max_rounds": settings.high_stakes_max_rounds,
                 "timeout_seconds": settings.high_stakes_timeout_seconds,
+                "review_concurrency": settings.high_stakes_review_concurrency,
                 "max_coins": settings.high_stakes_max_coins,
                 "max_data_escalations": settings.high_stakes_max_data_escalations,
                 "account_allowlist_count": len(settings.account_allowlist),
