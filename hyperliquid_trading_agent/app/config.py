@@ -8,19 +8,66 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_MODEL_CHAIN = "openrouter:openai/gpt-oss-120b:free,openrouter:openai/gpt-oss-20b:free,openrouter:liquid/lfm-2.5-1.2b-instruct:free,openrouter:nvidia/nemotron-3-nano-30b-a3b:free"
 ROLE_ORDER = ["analyst", "quant", "research", "risk", "treasury", "execution", "adversary", "judge"]
+
+# Model pool. Nex-N2-Pro is the dev-environment "frontier" primary; the rest are
+# smaller models kept as fallbacks because they are reliably fast/available (gpt-oss-20b
+# returned in ~6s in production), so a role always reaches a real LLM before the
+# deterministic last resort.
+_NEX = "openrouter:nex-agi/nex-n2-pro:free"
+_GPT_OSS_120B = "openrouter:openai/gpt-oss-120b:free"
+_GPT_OSS_20B = "openrouter:openai/gpt-oss-20b:free"
+_QWEN_80B = "openrouter:qwen/qwen3-next-80b-a3b-instruct:free"
+_LLAMA_70B = "openrouter:meta-llama/llama-3.3-70b-instruct:free"
+_GEMMA_26B = "openrouter:google/gemma-4-26b-a4b-it:free"
+_NEMOTRON_30B = "openrouter:nvidia/nemotron-3-nano-30b-a3b:free"
+_LFM_1B = "openrouter:liquid/lfm-2.5-1.2b-instruct:free"
+
+# Role -> primary model grid. Nex is the broad team primary, but never on both ends of
+# an interacting (review) edge, so it does not systematically grade its own homework.
+# The decision spine (analyst -> adversary -> judge) and the quant/risk cross-check use
+# distinct models; the mutually-independent reviewers may share the Nex primary because
+# they never review each other. See DEBATE_INTERACTION_EDGES for the enforced relations.
 DEFAULT_DEBATE_ROLE_MODEL_CHAINS = {
-    # Development/free defaults intentionally use different primary models so
-    # adversarial review is not one model grading its own work. In production,
-    # set DEBATE_JUDGE_MODEL_CHAIN to the strongest available frontier/main model.
-    "analyst": "openrouter:qwen/qwen3-next-80b-a3b-instruct:free,openrouter:openai/gpt-oss-120b:free,openrouter:nex-agi/nex-n2-pro:free",
-    "quant": "openrouter:nvidia/nemotron-3-nano-30b-a3b:free,openrouter:openai/gpt-oss-20b:free,openrouter:nex-agi/nex-n2-pro:free",
-    "research": "openrouter:google/gemma-4-26b-a4b-it:free,openrouter:openai/gpt-oss-20b:free,openrouter:nex-agi/nex-n2-pro:free",
-    "risk": "openrouter:openai/gpt-oss-20b:free,openrouter:nvidia/nemotron-3-nano-30b-a3b:free,openrouter:nex-agi/nex-n2-pro:free",
-    "treasury": "openrouter:liquid/lfm-2.5-1.2b-instruct:free,openrouter:openai/gpt-oss-20b:free,openrouter:nex-agi/nex-n2-pro:free",
-    "execution": "openrouter:nex-agi/nex-n2-pro:free,openrouter:liquid/lfm-2.5-1.2b-instruct:free,openrouter:openai/gpt-oss-20b:free",
-    "adversary": "openrouter:meta-llama/llama-3.3-70b-instruct:free,openrouter:openai/gpt-oss-120b:free,openrouter:nex-agi/nex-n2-pro:free",
-    "judge": "openrouter:openai/gpt-oss-120b:free,openrouter:openai/gpt-oss-20b:free,openrouter:nex-agi/nex-n2-pro:free",
+    "analyst": ",".join([_QWEN_80B, _GPT_OSS_120B, _GPT_OSS_20B, _LFM_1B]),
+    "quant": ",".join([_NEX, _GPT_OSS_20B, _NEMOTRON_30B, _LFM_1B]),
+    "research": ",".join([_NEX, _GEMMA_26B, _GPT_OSS_20B, _LFM_1B]),
+    "risk": ",".join([_GPT_OSS_20B, _NEMOTRON_30B, _LFM_1B]),
+    "treasury": ",".join([_NEX, _GPT_OSS_20B, _LFM_1B]),
+    "execution": ",".join([_NEX, _NEMOTRON_30B, _GPT_OSS_20B, _LFM_1B]),
+    "adversary": ",".join([_LLAMA_70B, _GPT_OSS_120B, _GPT_OSS_20B, _LFM_1B]),
+    "judge": ",".join([_GPT_OSS_120B, _QWEN_80B, _GPT_OSS_20B, _LFM_1B]),
 }
+
+# Roles that directly scrutinise each other's output. Sharing a primary model across any
+# of these edges means one model effectively reviews its own homework, so the grid keeps
+# the endpoints on distinct primaries. Independent parallel reviewers (e.g. research vs
+# treasury) are deliberately NOT linked here, so they may share the team primary (Nex).
+DEBATE_INTERACTION_EDGES: tuple[tuple[str, str], ...] = (
+    # Decision spine: proposer -> adversary -> judge.
+    ("analyst", "adversary"),
+    ("analyst", "judge"),
+    ("adversary", "judge"),
+    # Every reviewer grades the analyst's draft.
+    ("analyst", "quant"),
+    ("analyst", "research"),
+    ("analyst", "risk"),
+    ("analyst", "treasury"),
+    ("analyst", "execution"),
+    # The adversary attacks using the reviewers' findings.
+    ("adversary", "quant"),
+    ("adversary", "research"),
+    ("adversary", "risk"),
+    ("adversary", "treasury"),
+    ("adversary", "execution"),
+    # The judge weighs every reviewer.
+    ("judge", "quant"),
+    ("judge", "research"),
+    ("judge", "risk"),
+    ("judge", "treasury"),
+    ("judge", "execution"),
+    # Quant and risk cross-check the same numbers, so keep them diverse.
+    ("quant", "risk"),
+)
 DEFAULT_RSS_FEEDS = (
     "https://www.coindesk.com/arc/outboundfeeds/rss/"
     ",https://cointelegraph.com/rss"
@@ -432,34 +479,29 @@ class Settings(BaseSettings):
 
     def debate_model_contract(self) -> dict[str, object]:
         primary = self.debate_role_primary_models
-        duplicates = _duplicate_primary_models(primary)
-        judge_model = primary.get("judge")
-        reviewer_roles = [role for role in self.debate_role_names if role != "judge"]
-        judge_overlap = [role for role in reviewer_roles if primary.get(role) == judge_model and judge_model]
-        homework_pairs = []
-        if primary.get("analyst") and primary.get("adversary") == primary.get("analyst"):
-            homework_pairs.append("analyst/adversary")
-        if primary.get("quant") and primary.get("risk") == primary.get("quant"):
-            homework_pairs.append("quant/risk")
+        # A conflict is two *interacting* roles sharing a primary model — i.e. one model
+        # reviewing its own homework. Independent parallel reviewers may share the team
+        # primary (Nex), so a plain duplicate across non-interacting roles is allowed.
+        conflicts = [
+            f"{a}/{b}:{primary[a]}"
+            for a, b in DEBATE_INTERACTION_EDGES
+            if primary.get(a) and primary.get(a) == primary.get(b)
+        ]
+        shared_primary = _duplicate_primary_models(primary)
         warnings: list[str] = []
-        if duplicates:
-            warnings.append("duplicate primary models across roles")
-        if judge_overlap:
-            warnings.append("judge primary model overlaps with reviewer roles")
-        if homework_pairs:
-            warnings.append("adversarial reviewer primary overlaps with reviewed role")
+        if conflicts:
+            warnings.append("interacting roles share a primary model (self-review)")
         ok = not warnings
         status = "ok" if ok else "violation" if self.debate_model_diversity_policy == "strict" else "warning"
         return {
             "policy": self.debate_model_diversity_policy,
             "status": status,
             "primary_by_role": primary,
-            "duplicate_primary_models": duplicates,
-            "judge_primary_model": judge_model,
-            "judge_primary_overlaps_roles": judge_overlap,
-            "homework_overlap_pairs": homework_pairs,
+            "interaction_conflicts": conflicts,
+            "shared_primary_models": shared_primary,
+            "judge_primary_model": primary.get("judge"),
             "warnings": warnings,
-            "production_guidance": "Use a distinct strongest/frontier model for DEBATE_JUDGE_MODEL_CHAIN; keep analyst/quant/risk/adversary on different primary model families.",
+            "production_guidance": "Nex-N2-Pro is the dev frontier primary; keep the decision spine (analyst/adversary/judge) and quant/risk on distinct primaries. In production set DEBATE_JUDGE_MODEL_CHAIN to the strongest available frontier/main model.",
         }
 
 

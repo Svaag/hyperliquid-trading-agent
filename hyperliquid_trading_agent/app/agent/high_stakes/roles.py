@@ -140,22 +140,48 @@ class HighStakesRoleRunner:
         # short leash and let deterministic fallbacks complete the debate rather
         # than timing out the entire graph with an unusable final answer.
         timeout_seconds = float(kwargs.pop("timeout_seconds", self._default_role_timeout_seconds()))
+        # Split that leash across the role's fallback chain so a single hung model
+        # cannot eat the whole budget before faster fallbacks are reached.
+        chain = kwargs.get("model_chain") or []
+        kwargs.setdefault("attempt_timeout_seconds", self._attempt_timeout_seconds(timeout_seconds, len(chain)))
         return await asyncio.wait_for(self.model_gateway.complete_structured(*args, **kwargs), timeout=timeout_seconds)
 
+    def _attempt_timeout_seconds(self, role_budget: float, chain_len: int) -> float:
+        # Give each model in the fallback chain a fair slice of the role budget so the
+        # chain can actually fall through within one role's leash. The floor keeps a
+        # working free model (~6s typical) from being cut off when the chain is long.
+        return max(8.0, role_budget / max(1, chain_len))
+
     def _role_timeout_seconds(self, state: dict[str, Any]) -> float:
+        total = float(self.settings.high_stakes_timeout_seconds)
+        reserve_seconds = min(45.0, max(20.0, total * 0.15))
+        remaining = max(0.0, total - self._elapsed_seconds(state) - reserve_seconds)
+        phases = self._sequential_phases(state)
+        # Budget the next call from the wall-clock that is actually left, divided by the
+        # sequential phases in a round. We intentionally do NOT divide by max_rounds:
+        # most debates converge in one round, and pre-dividing by the worst-case round
+        # count collapsed every call to a starvation leash (e.g. 240s/3 rounds -> 17s)
+        # while leaving most of the budget unused. Dividing *remaining* time by phases
+        # is self-limiting — each phase consumes a fraction, so the round stays within
+        # budget and any revision round simply re-budgets from what is left.
+        return min(45.0, max(8.0, remaining / phases))
+
+    def _sequential_phases(self, state: dict[str, Any]) -> int:
         route = state.get("route")
         selected = set(getattr(route, "selected_roles", []) or [])
-        parallel_roles = {"quant", "research", "risk", "treasury", "execution"}
-        sequential_phases = 1  # analyst/proposer
-        if selected & parallel_roles:
-            sequential_phases += 1  # bounded concurrent reviewer batch
+        phases = 1  # analyst/proposer
+        if selected & {"quant", "research", "risk", "treasury", "execution"}:
+            phases += 1  # bounded concurrent reviewer batch
         if "adversary" in selected:
-            sequential_phases += 1  # adversary sees reviewer outputs
-        sequential_phases += 1  # judge
-        rounds = max(1, int(getattr(self.settings, "high_stakes_max_rounds", 1) or 1))
-        reserve_seconds = min(45.0, max(20.0, self.settings.high_stakes_timeout_seconds * 0.15))
-        budget = max(30.0, self.settings.high_stakes_timeout_seconds - reserve_seconds)
-        return min(35.0, max(8.0, budget / max(1, sequential_phases * rounds)))
+            phases += 1  # adversary sees reviewer outputs
+        phases += 1  # judge
+        return phases
+
+    def _elapsed_seconds(self, state: dict[str, Any]) -> float:
+        started_at = state.get("started_at")
+        if not isinstance(started_at, (int, float)):
+            return 0.0
+        return max(0.0, time.perf_counter() - float(started_at))
 
     def _default_role_timeout_seconds(self) -> float:
         return min(30.0, max(8.0, self.settings.high_stakes_timeout_seconds / 8))

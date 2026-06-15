@@ -164,12 +164,28 @@ def test_debate_model_contract_reports_role_diversity():
     primary = contract["primary_by_role"]
 
     assert contract["status"] == "ok"
+    # Nex is the broad team primary across the independent reviewers...
+    assert primary["quant"] == primary["research"] == primary["treasury"] == primary["execution"]
+    assert "nex-n2-pro" in primary["quant"]
+    # ...but the decision spine and the quant/risk cross-check stay distinct.
     assert primary["judge"] != primary["analyst"]
     assert primary["adversary"] != primary["analyst"]
+    assert primary["adversary"] != primary["judge"]
     assert primary["risk"] != primary["quant"]
 
 
-def test_debate_model_contract_warns_on_duplicate_primary_models():
+def test_debate_model_contract_allows_shared_primary_on_independent_reviewers():
+    # Independent parallel reviewers may share the team primary; this is not self-review.
+    settings = Settings()
+    contract = settings.debate_model_contract()
+
+    assert contract["status"] == "ok"
+    assert contract["interaction_conflicts"] == []
+    # The shared primary is reported for visibility even though it is allowed.
+    assert any(len(roles) > 1 for roles in contract["shared_primary_models"].values())
+
+
+def test_debate_model_contract_warns_when_interacting_roles_share_a_model():
     settings = Settings(
         debate_analyst_model_chain="openrouter:same/free",
         debate_quant_model_chain="openrouter:same/free",
@@ -180,8 +196,10 @@ def test_debate_model_contract_warns_on_duplicate_primary_models():
     contract = settings.debate_model_contract()
 
     assert contract["status"] == "warning"
-    assert "duplicate primary models across roles" in contract["warnings"]
-    assert "judge primary model overlaps with reviewer roles" in contract["warnings"]
+    assert "interacting roles share a primary model (self-review)" in contract["warnings"]
+    conflicts = contract["interaction_conflicts"]
+    assert any(c.startswith("analyst/adversary") for c in conflicts)
+    assert any(c.startswith("quant/risk") for c in conflicts)
 
 
 def test_model_gateway_provider_mapping(monkeypatch):
@@ -220,6 +238,37 @@ async def test_model_gateway_skips_empty_model_response(monkeypatch):
     assert result.content == "usable response"
     assert result.model == "openrouter:second"
     assert "empty response" in result.attempts[0]
+
+
+@pytest.mark.asyncio
+async def test_model_gateway_attempt_timeout_falls_through_to_next_model(monkeypatch):
+    import asyncio
+
+    import litellm
+
+    calls = []
+
+    async def fake_acompletion(**kwargs):
+        calls.append(kwargs["model"])
+        if len(calls) == 1:
+            await asyncio.sleep(5)  # first model hangs well past the per-attempt leash
+            return FakeCompletion("too slow")
+        return FakeCompletion("fast fallback")
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    settings = Settings(agent_model_chain="openrouter:slow,openrouter:fast", openrouter_api_key="or-key")
+
+    result = await ModelGateway(settings).complete_with_chain(
+        "prompt",
+        "system",
+        model_chain=["openrouter:slow", "openrouter:fast"],
+        attempt_timeout_seconds=0.05,
+    )
+
+    assert calls == ["openrouter/slow", "openrouter/fast"]
+    assert result.content == "fast fallback"
+    assert result.model == "openrouter:fast"
+    assert "timeout" in result.attempts[0]
 
 
 @pytest.mark.asyncio

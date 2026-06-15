@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -99,6 +100,7 @@ class ModelGateway:
         temperature: float = 0.2,
         max_tokens: int = 1400,
         context: dict[str, Any] | None = None,
+        attempt_timeout_seconds: float | None = None,
     ) -> ModelResponse:
         messages = [
             {"role": "system", "content": system_prompt},
@@ -108,7 +110,13 @@ class ModelGateway:
             },
         ]
         attempts = [self._attempt_from_model(model) for model in (model_chain or self.settings.model_chain)]
-        return await self._complete_attempts(attempts, messages, temperature=temperature, max_tokens=max_tokens)
+        return await self._complete_attempts(
+            attempts,
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            attempt_timeout_seconds=attempt_timeout_seconds,
+        )
 
     async def complete_structured(
         self,
@@ -120,6 +128,7 @@ class ModelGateway:
         temperature: float = 0.1,
         max_tokens: int = 1600,
         context: dict[str, Any] | None = None,
+        attempt_timeout_seconds: float | None = None,
     ) -> StructuredModelResponse:
         schema = response_model.model_json_schema()
         structured_system = (
@@ -133,6 +142,7 @@ class ModelGateway:
             temperature=temperature,
             max_tokens=max_tokens,
             context=context,
+            attempt_timeout_seconds=attempt_timeout_seconds,
         )
         try:
             parsed = _parse_structured_content(response.content, response_model)
@@ -149,6 +159,7 @@ class ModelGateway:
                 temperature=0.0,
                 max_tokens=max_tokens,
                 context=context,
+                attempt_timeout_seconds=attempt_timeout_seconds,
             )
             parsed = _parse_structured_content(repaired.content, response_model)
             return StructuredModelResponse(
@@ -173,6 +184,7 @@ class ModelGateway:
         *,
         temperature: float,
         max_tokens: int,
+        attempt_timeout_seconds: float | None = None,
     ) -> ModelResponse:
         try:
             from litellm import acompletion
@@ -196,7 +208,14 @@ class ModelGateway:
                     kwargs["api_key"] = attempt.api_key
                 if attempt.api_base:
                     kwargs["api_base"] = attempt.api_base
-                response = await acompletion(**kwargs)
+                # Bound each attempt so one hung/queued model (common on free tiers)
+                # cannot consume the whole chain budget before faster fallback models
+                # are tried. Timeouts fall through to the next attempt, not the caller.
+                call = acompletion(**kwargs)
+                if attempt_timeout_seconds is not None:
+                    response = await asyncio.wait_for(call, timeout=attempt_timeout_seconds)
+                else:
+                    response = await call
                 content = (response.choices[0].message.content or "").strip()
                 if not content:
                     MODEL_CALLS.labels(provider=attempt.provider, result="empty").inc()
@@ -207,6 +226,16 @@ class ModelGateway:
                 MODEL_CALLS.labels(provider=attempt.provider, result="ok").inc()
                 MODEL_LATENCY.labels(provider=attempt.provider).observe(time.perf_counter() - started)
                 return ModelResponse(content=content, model=attempt.model, provider=attempt.provider, attempts=errors)
+            except TimeoutError:
+                MODEL_CALLS.labels(provider=attempt.provider, result="timeout").inc()
+                MODEL_LATENCY.labels(provider=attempt.provider).observe(time.perf_counter() - started)
+                errors.append(f"{attempt.model}: timeout")
+                log.warning(
+                    "model_attempt_timeout",
+                    model=attempt.model,
+                    provider=attempt.provider,
+                    timeout_seconds=attempt_timeout_seconds,
+                )
             except Exception as exc:
                 MODEL_CALLS.labels(provider=attempt.provider, result="error").inc()
                 MODEL_LATENCY.labels(provider=attempt.provider).observe(time.perf_counter() - started)

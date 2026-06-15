@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -486,12 +488,32 @@ async def test_high_stakes_timeout_returns_deterministic_position_review():
     assert "Fallback:" in response.content
 
 
-def test_role_timeout_budget_keeps_position_reviews_inside_graph_budget():
+def test_role_timeout_budget_uses_remaining_walltime_not_round_count():
     settings = Settings(high_stakes_timeout_seconds=240, high_stakes_max_rounds=3)
     runner = HighStakesRoleRunner(model_gateway=object(), settings=settings)  # type: ignore[arg-type]
     route = route_high_stakes("I entered VVV at 16.40 with stop loss at 15.50 - hold or take profit?")
 
-    assert runner._role_timeout_seconds({"route": route}) < 20
+    # A fresh run gives each call a healthy slice of the budget instead of the old
+    # max_rounds-starved 17s leash, while still respecting the per-call cap.
+    fresh = runner._role_timeout_seconds({"route": route})
+    assert 30.0 <= fresh <= 45.0
+
+    # As wall-clock is consumed the leash shrinks toward the floor and never goes
+    # negative, so a slow debate keeps falling back deterministically inside budget.
+    late = runner._role_timeout_seconds({"route": route, "started_at": time.perf_counter() - 230})
+    assert 8.0 <= late < fresh
+
+
+def test_attempt_timeout_splits_role_budget_across_chain():
+    runner = HighStakesRoleRunner(model_gateway=object(), settings=Settings())  # type: ignore[arg-type]
+
+    # Each model in the chain gets a fair slice so the chain can fall through within
+    # the role leash; a single hung model cannot consume the whole budget.
+    assert runner._attempt_timeout_seconds(45.0, 3) == pytest.approx(15.0)
+    # The floor keeps a working free model from being cut off on long chains.
+    assert runner._attempt_timeout_seconds(8.0, 4) == 8.0
+    # Degenerate chains never divide by zero.
+    assert runner._attempt_timeout_seconds(30.0, 0) == 30.0
 
 
 @pytest.mark.asyncio
