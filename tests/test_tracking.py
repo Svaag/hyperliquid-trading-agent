@@ -164,8 +164,8 @@ def test_formatter_uses_tracking_plan_levels():
     assert "Resistance confirmation: cross up through 16.904" in content
     assert "Re-check Hyperliquid" not in content
     assert "Liquidity: spread ~4.20 bps" in content
-    assert "Team participation:" in content
-    assert "Model-backed: none." in content
-    assert "Deterministic fallback / model timeout: Analyst, Quant, Judge." in content
-    assert "Not activated for this route: Research." in content
+    assert "**Team participation:**" in content
+    assert "Models: none." in content
+    assert "Fallback/timeouts: Analyst, Quant, Judge." in content
+    assert "Skipped: Research." in content
     assert summarize_tracking_plan(plan)

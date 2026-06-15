@@ -155,6 +155,31 @@ class Repository:
             )
             await session.commit()
 
+    async def get_recent_messages(self, thread_id: str | None, limit: int = 8) -> list[dict[str, Any]]:
+        if self.sessionmaker is None or thread_id is None:
+            return []
+        try:
+            async with self.sessionmaker() as session:
+                result = await session.execute(
+                    select(ConversationMessage)
+                    .where(ConversationMessage.thread_id == thread_id)
+                    .order_by(ConversationMessage.created_at.desc())
+                    .limit(limit)
+                )
+                messages = list(reversed(result.scalars().all()))
+                return [
+                    {
+                        "role": item.role,
+                        "content": item.content,
+                        "discord_user_id": item.discord_user_id,
+                        "created_at": item.created_at.isoformat() if item.created_at else None,
+                    }
+                    for item in messages
+                ]
+        except Exception as exc:  # pragma: no cover
+            log.warning("recent_messages_get_failed", thread_id=thread_id, error=type(exc).__name__)
+            return []
+
     async def record_news_item(self, source: str, title: str, url: str, summary: str = "") -> None:
         if self.sessionmaker is None:
             return

@@ -10,6 +10,7 @@ from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.discord_bot import (
     DiscordContext,
     DiscordTradingBot,
+    _build_conversation_context,
     _chunk,
     _is_bot_thread,
     _message_prompt_without_mentions,
@@ -200,6 +201,21 @@ class FakeOtherThread:
 def test_discord_thread_continuation_detection():
     assert _is_bot_thread(FakeThread(), FakeUser()) is True
     assert _is_bot_thread(FakeOtherThread(), FakeUser()) is False
+
+
+def test_discord_conversation_context_includes_replied_post_and_recent_memory():
+    context = _build_conversation_context(
+        "VVV position review — long from 16.4, stop 15.5",
+        [
+            {"role": "user", "content": "I entered VVV at 16.40 with stop 15.50"},
+            {"role": "assistant", "content": "Levels to watch: Hard stop 15.5"},
+        ],
+    )
+
+    assert "Message being replied to" in context
+    assert "VVV position review" in context
+    assert "Recent thread memory" in context
+    assert "Hard stop 15.5" in context
 
 
 def test_paper_trade_simulator_plan():

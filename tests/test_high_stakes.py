@@ -85,8 +85,12 @@ class HighStakesFakeTools:
 
 
 class AskFakeGraph:
+    def __init__(self):
+        self.prompts = []
+
     async def run(self, request, agent_context=None):
         assert request.force_debate is False
+        self.prompts.append(request.prompt)
         return TradeProposalResponse(
             run_id="run-1",
             proposal_id="proposal-1",
@@ -269,6 +273,24 @@ def test_parse_trade_setup_handles_position_hold_language():
     assert setup["stop"] == 15.50
 
 
+def test_general_proposal_format_omits_empty_sections():
+    proposal = TradeProposal(
+        status="no_trade",
+        judge_summary="No setup was supplied.",
+        role_summaries={"treasury": "Role not activated for this route.", "adversary": "No adversary summary available."},
+    )
+    decision = JudgeDecision(status="no_trade", confidence=0.8, summary="No setup was supplied.")
+
+    content = format_trade_proposal(proposal, decision)
+
+    assert "**Decision:**" in content
+    assert "Accepted critiques" not in content
+    assert "Deferred critiques" not in content
+    assert "Treasury" not in content
+    assert "Adversary" not in content
+    assert "No endpoint coverage summary" not in content
+
+
 def test_compact_position_review_hides_model_fallback_noise():
     proposal = TradeProposal(
         status="manual_review_required",
@@ -385,11 +407,12 @@ async def test_sdk_info_client_wraps_official_info_without_exchange():
 
 @pytest.mark.asyncio
 async def test_runner_routes_high_stakes_ask_path():
+    graph = AskFakeGraph()
     runner = TradingAgentRunner(
         tools=object(),  # type: ignore[arg-type]
         model_gateway=object(),  # type: ignore[arg-type]
         settings=Settings(high_stakes_debate_enabled=True),
-        high_stakes_graph=AskFakeGraph(),  # type: ignore[arg-type]
+        high_stakes_graph=graph,  # type: ignore[arg-type]
     )
 
     response = await runner.answer("Plan a long BTC entry 100 stop 95 risk 1", context=AgentContext(source="test"))
@@ -398,6 +421,30 @@ async def test_runner_routes_high_stakes_ask_path():
     assert response.decision_run_id == "run-1"
     assert response.proposal_id == "proposal-1"
     assert response.content == "high stakes answer"
+
+
+@pytest.mark.asyncio
+async def test_runner_injects_discord_thread_context_for_followup_position_questions():
+    graph = AskFakeGraph()
+    runner = TradingAgentRunner(
+        tools=object(),  # type: ignore[arg-type]
+        model_gateway=object(),  # type: ignore[arg-type]
+        settings=Settings(high_stakes_debate_enabled=True),
+        high_stakes_graph=graph,  # type: ignore[arg-type]
+    )
+
+    response = await runner.answer(
+        "What about moving stop loss up to above my entry?",
+        context=AgentContext(
+            source="discord",
+            conversation_context="Previous bot post: VVV position review — long from 16.4, stop 15.5. Levels to watch: hard stop 15.5.",
+        ),
+    )
+
+    assert response.high_stakes is True
+    assert graph.prompts
+    assert "Prior Discord thread context" in graph.prompts[0]
+    assert "VVV position review" in graph.prompts[0]
 
 
 def test_hyperliquid_validation_helpers():

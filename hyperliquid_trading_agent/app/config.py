@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     discord_allowed_channel_ids: str = ""
     discord_allowed_role_ids: str = ""
     discord_admin_user_ids: str = ""
-    discord_max_response_chars: int = 1800
+    discord_max_response_chars: int = 1900
 
     agent_model_chain: str = Field(default=DEFAULT_MODEL_CHAIN, validation_alias="AGENT_MODEL_CHAIN")
     openrouter_api_key: str = ""

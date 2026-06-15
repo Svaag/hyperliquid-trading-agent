@@ -101,27 +101,87 @@ class DiscordTradingBot:
             try:
                 async with message.channel.typing():
                     thread = await _ensure_thread(message, prompt)
+                    thread_id = _maybe_str(getattr(thread, "id", None))
                     if tracking_command is not None and self.tracking_service is not None:
-                        content = await self.tracking_service.handle_thread_command(tracking_command, _maybe_str(getattr(thread, "id", None)) or "")
+                        content = await self.tracking_service.handle_thread_command(tracking_command, thread_id or "")
                         for chunk in _chunk(content, self.settings.discord_max_response_chars):
                             await thread.send(chunk)
                         DISCORD_MESSAGES.labels(result="tracking_command").inc()
                         return
+                    repository = getattr(self.runner, "repository", None)
+                    db_thread_id = None
+                    recent_messages: list[dict[str, Any]] = []
+                    if repository is not None:
+                        db_thread_id = await repository.upsert_discord_thread(
+                            discord_guild_id=_maybe_str(getattr(getattr(message, "guild", None), "id", None)),
+                            discord_channel_id=_maybe_str(channel_id),
+                            discord_thread_id=thread_id,
+                            title=_thread_name(prompt),
+                        )
+                        recent_messages = await repository.get_recent_messages(db_thread_id, limit=8)
+                        await repository.add_message(db_thread_id, "user", prompt, discord_user_id=_maybe_str(getattr(message.author, "id", None)))
+                    referenced_content = await _referenced_message_content(message, self.client.user)
                     agent_context = AgentContext(
                         source="discord",
                         discord_guild_id=_maybe_str(getattr(getattr(message, "guild", None), "id", None)),
                         discord_channel_id=_maybe_str(channel_id),
-                        discord_thread_id=_maybe_str(getattr(thread, "id", None)),
+                        discord_thread_id=thread_id,
                         discord_user_id=_maybe_str(getattr(message.author, "id", None)),
+                        conversation_context=_build_conversation_context(referenced_content, recent_messages),
                     )
                     response = await self.runner.answer(prompt, context=agent_context)
                     for chunk in _chunk(response.content, self.settings.discord_max_response_chars):
                         await thread.send(chunk)
+                    if repository is not None:
+                        await repository.add_message(db_thread_id, "assistant", response.content)
                 DISCORD_MESSAGES.labels(result="ok").inc()
             except Exception as exc:  # pragma: no cover - Discord runtime behavior
                 DISCORD_MESSAGES.labels(result="error").inc()
                 log.exception("discord_message_failed", error=type(exc).__name__)
                 await message.reply("I hit an internal error while answering. No trade was placed.", mention_author=False)
+
+
+async def _referenced_message_content(message, bot_user) -> str:
+    reference = getattr(message, "reference", None)
+    if reference is None:
+        return ""
+    resolved = getattr(reference, "resolved", None)
+    if resolved is None and callable(getattr(getattr(message, "channel", None), "fetch_message", None)):
+        message_id = getattr(reference, "message_id", None)
+        if message_id is not None:
+            try:
+                resolved = await message.channel.fetch_message(message_id)
+            except Exception:  # pragma: no cover - Discord fetch permissions/runtime
+                resolved = None
+    if resolved is None:
+        return ""
+    bot_id = getattr(bot_user, "id", None)
+    author_id = getattr(getattr(resolved, "author", None), "id", None)
+    if bot_id is not None and author_id is not None and author_id != bot_id:
+        return ""
+    return str(getattr(resolved, "content", "") or "").strip()
+
+
+def _build_conversation_context(referenced_content: str = "", recent_messages: list[dict[str, Any]] | None = None) -> str:
+    parts: list[str] = []
+    if referenced_content.strip():
+        parts.append("Message being replied to:\n" + _trim_context_text(referenced_content, 1800))
+    recent = recent_messages or []
+    if recent:
+        lines = []
+        for item in recent[-8:]:
+            role = str(item.get("role") or "message").title()
+            content = _trim_context_text(str(item.get("content") or ""), 700)
+            if content:
+                lines.append(f"{role}: {content}")
+        if lines:
+            parts.append("Recent thread memory:\n" + "\n".join(lines))
+    return "\n\n".join(parts)[:5000]
+
+
+def _trim_context_text(text: str, max_chars: int) -> str:
+    cleaned = " ".join(text.split())
+    return cleaned if len(cleaned) <= max_chars else cleaned[: max_chars - 1].rstrip() + "…"
 
 
 def _message_prompt_without_mentions(content: str) -> str:

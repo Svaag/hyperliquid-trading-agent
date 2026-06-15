@@ -12,85 +12,99 @@ def format_trade_proposal(proposal: TradeProposal, judge: JudgeDecision | None =
         return _format_compact_position_review(proposal, judge)
 
     coverage = judge.data_coverage if judge and judge.data_coverage else None
-    accepted = list(judge.accepted_critiques if judge else [])
-    deferred = list(judge.deferred_critiques if judge else [])
-    adversary = proposal.role_summaries.get("adversary", "No adversary summary available.")
-    treasury = proposal.role_summaries.get("treasury", "No account-specific treasury review was activated or available.")
+    accepted = [item for item in (judge.accepted_critiques if judge else []) if _meaningful_text(item)]
+    deferred = [item for item in (judge.deferred_critiques if judge else []) if _meaningful_text(item)]
+    adversary = proposal.role_summaries.get("adversary", "")
+    treasury = proposal.role_summaries.get("treasury", "")
     confidence = judge.confidence if judge else None
     lines = [
-        "Decision:",
-        proposal.judge_summary or (judge.summary if judge else "No judge summary available."),
-        "",
-        "Status:",
-        f"{proposal.status}" + (f" | confidence={confidence:.0%}" if confidence is not None else ""),
-        "",
-        "Endpoint coverage:",
+        f"**Decision:** {proposal.judge_summary or (judge.summary if judge else 'No judge summary available.')}",
+        f"**Status:** `{proposal.status}`" + (f" | confidence={confidence:.0%}" if confidence is not None else ""),
     ]
+
     if coverage:
-        lines.append(f"- {coverage.coverage_score:.0%} coverage: {len(coverage.used_endpoints)}/{len(coverage.required_endpoints)} required endpoints used.")
-        if coverage.used_endpoints:
-            lines.append(f"- Used: {', '.join(coverage.used_endpoints[:12])}")
+        coverage_lines = [f"{coverage.coverage_score:.0%}: {len(coverage.used_endpoints)}/{len(coverage.required_endpoints)} required endpoints used"]
         if coverage.missing_endpoints:
-            lines.append(f"- Missing/failed: {', '.join((coverage.missing_endpoints + coverage.stale_or_failed_endpoints)[:12])}")
-    elif proposal.tool_summary:
-        lines.extend(f"- {item}" for item in proposal.tool_summary[:10])
-    else:
-        lines.append("- No endpoint coverage summary available.")
+            coverage_lines.append(f"Missing/failed: {', '.join((coverage.missing_endpoints + coverage.stale_or_failed_endpoints)[:8])}")
+        _add_section(lines, "Endpoint coverage", coverage_lines)
 
     participation = _format_debate_participation(proposal.debate_participation)
-    if participation:
-        lines.extend(["", "Team participation:"])
-        lines.extend(participation)
+    _add_section(lines, "Team participation", participation)
+    _add_section(lines, "Accepted critiques", accepted[:6])
+    _add_section(lines, "Deferred critiques", deferred[:6])
 
-    lines.extend(["", "Accepted critiques:"])
-    lines.extend(f"- {item}" for item in accepted[:8]) if accepted else lines.append("- None recorded as accepted by Judge.")
-    lines.extend(["", "Deferred critiques:"])
-    lines.extend(f"- {item}" for item in deferred[:8]) if deferred else lines.append("- None recorded as deferred by Judge.")
-
-    lines.extend(["", "Setup:"])
-    lines.append(f"- Coin/side: {proposal.coin or 'unknown'} {proposal.side or 'unknown'}")
-    lines.append(f"- Entry / stop / take-profit: {proposal.entry} / {proposal.stop} / {proposal.take_profit}")
+    setup_lines = []
+    if proposal.coin or proposal.side:
+        setup_lines.append(f"Coin/side: {proposal.coin or 'unknown'} {proposal.side or 'unknown'}")
+    if proposal.entry is not None or proposal.stop is not None or proposal.take_profit is not None:
+        setup_lines.append(f"Entry / stop / take-profit: {proposal.entry} / {proposal.stop} / {proposal.take_profit}")
     if proposal.timeframe:
-        lines.append(f"- Timeframe: {proposal.timeframe}")
+        setup_lines.append(f"Timeframe: {proposal.timeframe}")
     if proposal.thesis:
-        lines.append(f"- Thesis: {proposal.thesis}")
-    lines.append(f"- Invalidation: {proposal.invalidation or 'missing'}")
+        setup_lines.append(f"Thesis: {proposal.thesis}")
+    if proposal.invalidation and "missing" not in proposal.invalidation.lower():
+        setup_lines.append(f"Invalidation: {proposal.invalidation}")
+    _add_section(lines, "Setup", setup_lines)
 
-    lines.extend(["", "Rationale / tape read:"])
-    if proposal.rationale:
-        lines.extend(f"- {item}" for item in proposal.rationale[:8])
-    else:
-        lines.append("- No rationale was produced.")
+    _add_section(lines, "Rationale", proposal.rationale[:5])
 
-    lines.extend(["", "Risk:"])
+    risk_lines = []
     if proposal.risk_usd is not None:
-        lines.append(f"- Max planned loss to stop: ${proposal.risk_usd} ({proposal.risk_pct}% configured risk).")
+        risk_lines.append(f"Max planned loss to stop: ${proposal.risk_usd:g}" + (f" ({proposal.risk_pct:g}% configured risk)" if proposal.risk_pct is not None else ""))
     if proposal.size_units is not None or proposal.notional_usd is not None:
-        lines.append(f"- Size/notional: {proposal.size_units} units, ${proposal.notional_usd}")
-    lines.extend(f"- {item}" for item in proposal.risks[:8])
+        risk_lines.append(f"Size/notional: {proposal.size_units} units, ${proposal.notional_usd}")
+    risk_lines.extend(_dedupe_text([item for item in proposal.risks if _meaningful_text(item)])[:6])
+    _add_section(lines, "Risk", risk_lines)
 
-    lines.extend(["", "Execution readiness:"])
-    if proposal.checklist:
-        lines.extend(f"- {item}" for item in proposal.checklist[:10])
-    else:
-        lines.append("- No execution-readiness checklist was produced.")
+    execution_lines = [_clean_checklist_item(item) for item in proposal.checklist]
+    _add_section(lines, "Liquidity / execution", [item for item in execution_lines if item][:3])
 
-    lines.extend(["", "Treasury/account:", f"- {treasury}"])
-    lines.extend(["", "Adversary objections:", f"- {adversary}"])
-
-    lines.extend(["", "What would change the decision:"])
+    if _meaningful_text(treasury):
+        _add_section(lines, "Treasury", [treasury])
+    if _meaningful_text(adversary):
+        _add_section(lines, "Adversary", [adversary])
     if judge and judge.data_requests:
-        lines.extend(f"- More data requested: {item.endpoint_family} ({item.reason})" for item in judge.data_requests[:5])
-    elif deferred:
-        lines.extend(f"- Resolve: {item}" for item in deferred[:5])
-    else:
-        lines.append("- Fresh price, funding, liquidity, account exposure, or news data that contradicts the thesis.")
+        _add_section(lines, "Needs more data", [f"{item.endpoint_family}: {item.reason}" for item in judge.data_requests[:5]])
 
-    lines.extend(["", "No-execution caveat:"])
-    lines.append("- No trade was placed. This is a non-executing proposal/review.")
-    lines.append("- Autonomous/live exchange execution is disabled; exchange_actions is intentionally empty.")
-    lines.extend(f"- {item}" for item in _public_warnings(proposal.warnings)[:8])
-    return "\n".join(str(line) for line in lines if line is not None)[:7000]
+    note_lines = _public_warnings(proposal.warnings)[:5]
+    note_lines.append("No trade was placed; live execution remains disabled.")
+    _add_section(lines, "Notes", note_lines)
+    return "\n".join(str(line) for line in lines if line is not None)[:2400]
+
+
+def _add_section(lines: list[str], title: str, items: list[str]) -> None:
+    cleaned = [str(item).strip() for item in items if _meaningful_text(str(item))]
+    if not cleaned:
+        return
+    lines.extend(["", f"**{title}:**"])
+    lines.extend(f"- {item}" for item in cleaned)
+
+
+def _dedupe_text(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        normalized = " ".join(str(item).split()).lower()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            out.append(str(item))
+    return out
+
+
+def _meaningful_text(text: str) -> bool:
+    lowered = " ".join(str(text).strip().lower().split())
+    if not lowered:
+        return False
+    empty_markers = (
+        "none recorded",
+        "role not activated",
+        "no adversary summary available",
+        "no account-specific treasury review",
+        "no execution-readiness checklist",
+        "fresh price, funding, liquidity",
+        "deterministic fallback adversary review",
+    )
+    return not any(marker in lowered for marker in empty_markers)
 
 
 def _should_use_compact_position_review(proposal: TradeProposal, judge: JudgeDecision | None) -> bool:
@@ -103,9 +117,9 @@ def _should_use_compact_position_review(proposal: TradeProposal, judge: JudgeDec
 def _format_compact_position_review(proposal: TradeProposal, judge: JudgeDecision | None = None) -> str:
     confidence = judge.confidence if judge else 0.35
     lines = [
-        f"{proposal.coin} position review — {proposal.side or 'position'} from {proposal.entry}, stop {proposal.stop}",
+        f"**{proposal.coin} position review** — {proposal.side or 'position'} from `{proposal.entry}`, stop `{proposal.stop}`",
         "",
-        "Read:",
+        "**Read:**",
     ]
     rationale = [item for item in proposal.rationale if "model" not in item.lower()]
     if rationale:
@@ -115,23 +129,19 @@ def _format_compact_position_review(proposal: TradeProposal, judge: JudgeDecisio
 
     tracking_levels = summarize_tracking_plan(proposal.tracking_plan)
     if tracking_levels:
-        lines.extend(["", "Levels to watch:"])
+        lines.extend(["", "**Levels to watch:**"])
         lines.extend(f"- {item}" for item in tracking_levels[:6])
         tracking_status = _tracking_status_line(proposal.tracking_plan)
         if tracking_status:
-            lines.extend(["", "Live tracking:", f"- {tracking_status}"])
+            lines.extend(["", "**Live tracking:**", f"- {tracking_status}"])
             lines.append('- In the thread, say "tracking status" or "stop tracking" to control it.')
 
     participation = _format_debate_participation(proposal.debate_participation)
     if participation:
-        lines.extend(["", "Team participation:"])
+        lines.extend(["", "**Team participation:**"])
         lines.extend(participation)
 
-    lines.extend(["", "Decision frame:"])
-    lines.append("- Hold case: price respects the terminal downside/upside trigger above and confirms through the relevant reclaim/resistance/support level.")
-    lines.append("- Reduce/exit case: price loses the terminal technical trigger, cannot reclaim entry before the event you care about, or liquidity thins into the open.")
-
-    lines.extend(["", "Risk:"])
+    lines.extend(["", "**Risk:**"])
     if proposal.risk_usd is not None:
         lines.append(f"- Planned loss to stop: ${proposal.risk_usd:g}" + (f" ({proposal.risk_pct:g}% configured risk)." if proposal.risk_pct is not None else "."))
     else:
@@ -140,14 +150,14 @@ def _format_compact_position_review(proposal: TradeProposal, judge: JudgeDecisio
 
     useful_checklist = [_clean_checklist_item(item) for item in proposal.checklist if _clean_checklist_item(item)]
     if useful_checklist:
-        lines.extend(["", "Execution / liquidity checks:"])
-        lines.extend(f"- {item}" for item in useful_checklist[:3])
+        lines.extend(["", "**Liquidity / execution:**"])
+        lines.extend(f"- {item}" for item in useful_checklist[:2])
 
     public_warnings = _public_warnings(proposal.warnings)
     if public_warnings:
-        lines.extend(["", "Notes:"])
-        lines.extend(f"- {item}" for item in public_warnings[:3])
-    return "\n".join(str(line) for line in lines if line is not None)[:3500]
+        lines.extend(["", "**Notes:**"])
+        lines.extend(f"- {item}" for item in public_warnings[:2])
+    return "\n".join(str(line) for line in lines if line is not None)[:1900]
 
 
 def _format_debate_participation(participation: list[dict]) -> list[str]:
@@ -158,26 +168,18 @@ def _format_debate_participation(participation: list[dict]) -> list[str]:
     skipped = [item for item in participation if item.get("status") in {"abstain", "not_run"}]
     errored = [item for item in participation if item.get("status") == "error"]
     lines: list[str] = []
-    if model_backed:
-        lines.append("- Model-backed: " + ", ".join(_role_with_model(item) for item in model_backed) + ".")
-    else:
-        lines.append("- Model-backed: none.")
+    lines.append("Models: " + (", ".join(_role_name(item) for item in model_backed) if model_backed else "none") + ".")
     if fallback:
-        lines.append("- Deterministic fallback / model timeout: " + ", ".join(_role_name(item) for item in fallback) + ".")
+        lines.append("Fallback/timeouts: " + ", ".join(_role_name(item) for item in fallback) + ".")
     if skipped:
-        lines.append("- Not activated for this route: " + ", ".join(_role_name(item) for item in skipped) + ".")
+        lines.append("Skipped: " + ", ".join(_role_name(item) for item in skipped) + ".")
     if errored:
-        lines.append("- Role errors: " + ", ".join(_role_name(item) for item in errored) + ".")
+        lines.append("Errors: " + ", ".join(_role_name(item) for item in errored) + ".")
     return lines
 
 
 def _role_name(item: dict) -> str:
     return str(item.get("role", "unknown")).replace("_", " ").title()
-
-
-def _role_with_model(item: dict) -> str:
-    model = str(item.get("model") or "unknown")
-    return f"{_role_name(item)} ({model})"
 
 
 def _tracking_status_line(plan_payload: dict | None) -> str:
