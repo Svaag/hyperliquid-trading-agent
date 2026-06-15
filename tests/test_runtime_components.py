@@ -208,6 +208,7 @@ def test_discord_conversation_context_includes_replied_post_and_recent_memory():
         "VVV position review — long from 16.4, stop 15.5",
         [
             {"role": "user", "content": "I entered VVV at 16.40 with stop 15.50"},
+            {"role": "assistant", "content": "High-stakes debate timed out before convergence"},
             {"role": "assistant", "content": "Levels to watch: Hard stop 15.5"},
         ],
     )
@@ -216,6 +217,7 @@ def test_discord_conversation_context_includes_replied_post_and_recent_memory():
     assert "VVV position review" in context
     assert "Recent thread memory" in context
     assert "Hard stop 15.5" in context
+    assert "timed out before convergence" not in context
 
 
 def test_paper_trade_simulator_plan():

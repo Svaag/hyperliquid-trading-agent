@@ -547,6 +547,7 @@ def _debate_participation(role_outputs: list[RoleOpinion], judge: JudgeDecision)
                 "provider": opinion.provider,
                 "latency_ms": opinion.latency_ms,
                 "summary": opinion.summary,
+                "fallback_reason": _role_fallback_reason(opinion),
             }
         )
     rows.append(
@@ -557,9 +558,28 @@ def _debate_participation(role_outputs: list[RoleOpinion], judge: JudgeDecision)
             "provider": judge.provider,
             "latency_ms": judge.latency_ms,
             "summary": judge.summary,
+            "fallback_reason": _judge_fallback_reason(judge),
         }
     )
     return rows
+
+
+def _role_fallback_reason(opinion: RoleOpinion) -> str:
+    for item in list(opinion.risks) + list(opinion.recommendations):
+        text = str(item)
+        if "Model fallback" in text:
+            return text.split(":", 1)[1].strip() if ":" in text else text
+        if "model_fallback" in text:
+            return text.split(":", 1)[1].strip() if ":" in text else text
+    return ""
+
+
+def _judge_fallback_reason(judge: JudgeDecision) -> str:
+    for item in judge.final_warnings:
+        text = str(item)
+        if text.startswith("judge_model_fallback:"):
+            return text.split(":", 1)[1].strip()
+    return ""
 
 
 def _build_proposal(state: HighStakesGraphState) -> TradeProposal:

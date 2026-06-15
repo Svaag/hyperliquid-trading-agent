@@ -166,6 +166,6 @@ def test_formatter_uses_tracking_plan_levels():
     assert "Liquidity: spread ~4.20 bps" in content
     assert "**Team participation:**" in content
     assert "Models: none." in content
-    assert "Fallback/timeouts: Analyst, Quant, Judge." in content
+    assert "Fallback: Analyst (22.5s), Quant (22.5s), Judge (22.5s)." in content
     assert "Skipped: Research." in content
     assert summarize_tracking_plan(plan)

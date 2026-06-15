@@ -50,7 +50,7 @@ class HighStakesRoleRunner:
             )
             return RoleCallResult(response.parsed, response.raw_content, response.model, response.provider, _elapsed_ms(started))
         except Exception as exc:
-            fallback = fallback_draft(state, reason=type(exc).__name__)
+            fallback = fallback_draft(state, reason=_error_reason(exc))
             return RoleCallResult(fallback, fallback.model_dump_json(), None, None, _elapsed_ms(started), status="fallback")
 
     async def review(self, role: str, state: dict[str, Any]) -> RoleCallResult:
@@ -78,7 +78,7 @@ class HighStakesRoleRunner:
                 opinion = RoleOpinion(role=role, stance="error", summary="Structured role response had the wrong schema.")
             return RoleCallResult(opinion, response.raw_content, response.model, response.provider, _elapsed_ms(started))
         except Exception as exc:
-            opinion = fallback_opinion(role, state, reason=type(exc).__name__)
+            opinion = fallback_opinion(role, state, reason=_error_reason(exc))
             return RoleCallResult(opinion, opinion.model_dump_json(), None, None, _elapsed_ms(started), status="fallback")
 
     async def judge(self, state: dict[str, Any]) -> RoleCallResult:
@@ -99,7 +99,7 @@ class HighStakesRoleRunner:
                 decision = _force_no_execution(decision.model_copy(update={"model": response.model, "provider": response.provider}), state)
             return RoleCallResult(decision, response.raw_content, response.model, response.provider, _elapsed_ms(started))
         except Exception as exc:
-            decision = fallback_judge(state, reason=type(exc).__name__)
+            decision = fallback_judge(state, reason=_error_reason(exc))
             return RoleCallResult(decision, decision.model_dump_json(), None, None, _elapsed_ms(started), status="fallback")
 
     async def _complete_structured_with_timeout(self, *args: Any, **kwargs: Any):
@@ -273,6 +273,17 @@ def _state_for_model(state: dict[str, Any]) -> dict[str, Any]:
         "errors": state.get("errors"),
     }
     return model_to_jsonable(allowed)
+
+
+def _error_reason(exc: Exception) -> str:
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    text = " ".join(str(exc).split())
+    if text.startswith("All configured model attempts failed or lacked credentials:"):
+        text = text.split(":", 1)[1].strip()
+    if not text:
+        text = type(exc).__name__
+    return text[:500]
 
 
 def _elapsed_ms(started: float) -> int:

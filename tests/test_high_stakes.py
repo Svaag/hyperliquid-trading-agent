@@ -294,6 +294,23 @@ def test_parse_trade_setup_handles_position_hold_language():
     assert setup["stop"] == 15.50
 
 
+def test_debate_participation_shows_fallback_reason_and_latency():
+    proposal = TradeProposal(
+        status="manual_review_required",
+        judge_summary="Review degraded.",
+        debate_participation=[
+            {"role": "analyst", "status": "ok", "model": "openrouter:qwen/qwen3-next-80b-a3b-instruct:free", "latency_ms": 1200},
+            {"role": "quant", "status": "fallback", "fallback_reason": "nvidia/nemotron: empty response; openai/gpt-oss: RateLimitError", "latency_ms": 9000},
+        ],
+    )
+
+    content = format_trade_proposal(proposal)
+
+    assert "Analyst (qwen/qwen3-next-80b-a3b-ins…" in content
+    assert "Quant (nvidia/nemotron: empty response" in content
+    assert "9.0s" in content
+
+
 def test_general_proposal_format_omits_empty_sections():
     proposal = TradeProposal(
         status="no_trade",
@@ -466,7 +483,7 @@ async def test_high_stakes_timeout_returns_deterministic_position_review():
     assert "High-stakes debate timed out" not in response.content
     assert "**Levels to watch:**" in response.content
     assert "**Team participation:**" in response.content
-    assert "Fallback/timeouts" in response.content
+    assert "Fallback:" in response.content
 
 
 def test_role_timeout_budget_keeps_position_reviews_inside_graph_budget():

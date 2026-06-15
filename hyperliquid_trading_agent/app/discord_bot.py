@@ -171,12 +171,27 @@ def _build_conversation_context(referenced_content: str = "", recent_messages: l
         lines = []
         for item in recent[-8:]:
             role = str(item.get("role") or "message").title()
-            content = _trim_context_text(str(item.get("content") or ""), 700)
+            raw_content = str(item.get("content") or "")
+            if _skip_memory_message(role, raw_content):
+                continue
+            content = _trim_context_text(raw_content, 700)
             if content:
                 lines.append(f"{role}: {content}")
         if lines:
             parts.append("Recent thread memory:\n" + "\n".join(lines))
     return "\n\n".join(parts)[:5000]
+
+
+def _skip_memory_message(role: str, content: str) -> bool:
+    if role.lower() != "assistant":
+        return False
+    lowered = " ".join(content.lower().split())
+    noisy_markers = (
+        "high-stakes debate timed out before convergence",
+        "deterministic_debate_fallback",
+        "manual_review_required",
+    )
+    return any(marker in lowered for marker in noisy_markers)
 
 
 def _trim_context_text(text: str, max_chars: int) -> str:

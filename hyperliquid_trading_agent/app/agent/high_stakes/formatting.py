@@ -172,14 +172,37 @@ def _format_debate_participation(participation: list[dict]) -> list[str]:
     skipped = [item for item in participation if item.get("status") in {"abstain", "not_run"}]
     errored = [item for item in participation if item.get("status") == "error"]
     lines: list[str] = []
-    lines.append("Models: " + (", ".join(_role_name(item) for item in model_backed) if model_backed else "none") + ".")
+    lines.append("Models: " + (", ".join(_role_detail(item, include_model=True) for item in model_backed) if model_backed else "none") + ".")
     if fallback:
-        lines.append("Fallback/timeouts: " + ", ".join(_role_name(item) for item in fallback) + ".")
+        lines.append("Fallback: " + ", ".join(_role_detail(item, include_reason=True) for item in fallback) + ".")
     if skipped:
         lines.append("Skipped: " + ", ".join(_role_name(item) for item in skipped) + ".")
     if errored:
-        lines.append("Errors: " + ", ".join(_role_name(item) for item in errored) + ".")
+        lines.append("Errors: " + ", ".join(_role_detail(item, include_reason=True) for item in errored) + ".")
     return lines
+
+
+def _role_detail(item: dict, *, include_model: bool = False, include_reason: bool = False) -> str:
+    bits = []
+    if include_model and item.get("model"):
+        bits.append(_short_model(str(item.get("model"))))
+    if include_reason and item.get("fallback_reason"):
+        bits.append(_short_reason(str(item.get("fallback_reason"))))
+    latency = item.get("latency_ms")
+    if isinstance(latency, (int, float)) and latency > 0:
+        bits.append(f"{latency / 1000:.1f}s")
+    return _role_name(item) + (f" ({', '.join(bits)})" if bits else "")
+
+
+def _short_model(model: str) -> str:
+    cleaned = model.replace("openrouter:", "")
+    return cleaned if len(cleaned) <= 28 else cleaned[:27].rstrip("-/") + "…"
+
+
+def _short_reason(reason: str) -> str:
+    cleaned = " ".join(reason.replace("openrouter:", "").split())
+    cleaned = cleaned.replace("All configured model attempts failed or lacked credentials:", "").strip()
+    return cleaned if len(cleaned) <= 70 else cleaned[:69].rstrip(" ;,") + "…"
 
 
 def _role_name(item: dict) -> str:
