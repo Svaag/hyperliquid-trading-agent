@@ -164,14 +164,16 @@ def test_debate_model_contract_reports_role_diversity():
     primary = contract["primary_by_role"]
 
     assert contract["status"] == "ok"
-    # Nex is the broad team primary across the independent reviewers...
-    assert primary["quant"] == primary["research"] == primary["treasury"] == primary["execution"]
-    assert "nex-n2-pro" in primary["quant"]
-    # ...but the decision spine and the quant/risk cross-check stay distinct.
+    # The decision spine uses three distinct frontier models; reviewers stay distinct from
+    # the analyst they grade, and quant != risk.
     assert primary["judge"] != primary["analyst"]
     assert primary["adversary"] != primary["analyst"]
     assert primary["adversary"] != primary["judge"]
     assert primary["risk"] != primary["quant"]
+    assert all(primary[reviewer] != primary["analyst"] for reviewer in ("quant", "research", "risk", "treasury", "execution"))
+    # Opus 4.8 judges; Qwen3.7-Max proposes.
+    assert "claude-opus-4.8" in primary["judge"]
+    assert "qwen3.7-max" in primary["analyst"]
 
 
 def test_debate_model_contract_allows_shared_primary_on_independent_reviewers():

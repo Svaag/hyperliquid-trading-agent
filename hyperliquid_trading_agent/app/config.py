@@ -6,42 +6,44 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-DEFAULT_MODEL_CHAIN = "openrouter:openai/gpt-oss-120b:free,openrouter:openai/gpt-oss-20b:free,openrouter:liquid/lfm-2.5-1.2b-instruct:free,openrouter:nvidia/nemotron-3-nano-30b-a3b:free"
+# Paid OpenRouter model pool (June 2026). Free-tier latency was unfixable, so the debate
+# runs on paid models sized to each role: frontier reasoners on the decision spine,
+# cheap-but-strong reasoners on the parallel reviewers.
+_OPUS = "openrouter:anthropic/claude-opus-4.8"  # #1 AA Index, GDPval (financial) leader
+_SONNET = "openrouter:anthropic/claude-sonnet-4.6"  # best on Finance-Agent bench
+_QWEN_MAX = "openrouter:qwen/qwen3.7-max"  # top reasoning+agentic, 1M ctx
+_GEMINI_PRO = "openrouter:google/gemini-3.1-pro-preview"  # leads reasoning/data-analysis
+_GROK = "openrouter:x-ai/grok-4.3"  # strong agentic/tool-use, cheap frontier
+_DS_PRO = "openrouter:deepseek/deepseek-v4-pro"  # #2 open reasoning, GDPval value leader
+_DS_FLASH = "openrouter:deepseek/deepseek-v4-flash"  # near-Pro reasoning, cheapest workhorse
+_RING = "openrouter:inclusionai/ring-2.6-1t"  # elite reasoning (ARC-AGI/AIME), very cheap
+_MIMO = "openrouter:xiaomi/mimo-v2.5"  # Pro-level agentic at half cost
+_MINIMAX = "openrouter:minimax/minimax-m3"  # best agentic tool-use (weak raw reasoning)
+
+DEFAULT_MODEL_CHAIN = ",".join([_DS_FLASH, _MIMO, _DS_PRO])
+
 ROLE_ORDER = ["analyst", "quant", "research", "risk", "treasury", "execution", "adversary", "judge"]
 
-# Model pool. Nex-N2-Pro is the dev-environment "frontier" primary; the rest are
-# smaller models kept as fallbacks because they are reliably fast/available (gpt-oss-20b
-# returned in ~6s in production), so a role always reaches a real LLM before the
-# deterministic last resort.
-_NEX = "openrouter:nex-agi/nex-n2-pro:free"
-_GPT_OSS_120B = "openrouter:openai/gpt-oss-120b:free"
-_GPT_OSS_20B = "openrouter:openai/gpt-oss-20b:free"
-_QWEN_80B = "openrouter:qwen/qwen3-next-80b-a3b-instruct:free"
-_LLAMA_70B = "openrouter:meta-llama/llama-3.3-70b-instruct:free"
-_GEMMA_26B = "openrouter:google/gemma-4-26b-a4b-it:free"
-_NEMOTRON_30B = "openrouter:nvidia/nemotron-3-nano-30b-a3b:free"
-_LFM_1B = "openrouter:liquid/lfm-2.5-1.2b-instruct:free"
-
-# Role -> primary model grid. Nex is the broad team primary, but never on both ends of
-# an interacting (review) edge, so it does not systematically grade its own homework.
-# The decision spine (analyst -> adversary -> judge) and the quant/risk cross-check use
-# distinct models; the mutually-independent reviewers may share the Nex primary because
-# they never review each other. See DEBATE_INTERACTION_EDGES for the enforced relations.
+# Role -> model chain grid (primary first, then reliable paid fallbacks). The decision
+# spine (analyst -> adversary -> judge) uses three distinct frontier labs (Alibaba ->
+# Google -> Anthropic) for genuine cross-examination; the analyst is distinct from every
+# reviewer (so no reviewer grades its own draft) and quant != risk. Six model families
+# span the eight roles. See DEBATE_INTERACTION_EDGES for the enforced relations.
 DEFAULT_DEBATE_ROLE_MODEL_CHAINS = {
-    "analyst": ",".join([_QWEN_80B, _GPT_OSS_120B, _GPT_OSS_20B, _LFM_1B]),
-    "quant": ",".join([_NEX, _GPT_OSS_20B, _NEMOTRON_30B, _LFM_1B]),
-    "research": ",".join([_NEX, _GEMMA_26B, _GPT_OSS_20B, _LFM_1B]),
-    "risk": ",".join([_GPT_OSS_20B, _NEMOTRON_30B, _LFM_1B]),
-    "treasury": ",".join([_NEX, _GPT_OSS_20B, _LFM_1B]),
-    "execution": ",".join([_NEX, _NEMOTRON_30B, _GPT_OSS_20B, _LFM_1B]),
-    "adversary": ",".join([_LLAMA_70B, _GPT_OSS_120B, _GPT_OSS_20B, _LFM_1B]),
-    "judge": ",".join([_GPT_OSS_120B, _QWEN_80B, _GPT_OSS_20B, _LFM_1B]),
+    "analyst": ",".join([_QWEN_MAX, _DS_PRO, _MIMO]),
+    "quant": ",".join([_DS_PRO, _DS_FLASH, _RING]),
+    "research": ",".join([_MIMO, _DS_FLASH, _MINIMAX]),
+    "risk": ",".join([_RING, _DS_FLASH, _MIMO]),
+    "treasury": ",".join([_DS_FLASH, _MIMO]),
+    "execution": ",".join([_DS_FLASH, _MIMO, _MINIMAX]),
+    "adversary": ",".join([_GEMINI_PRO, _GROK, _DS_PRO]),
+    "judge": ",".join([_OPUS, _SONNET, _DS_PRO]),
 }
 
 # Roles that directly scrutinise each other's output. Sharing a primary model across any
 # of these edges means one model effectively reviews its own homework, so the grid keeps
-# the endpoints on distinct primaries. Independent parallel reviewers (e.g. research vs
-# treasury) are deliberately NOT linked here, so they may share the team primary (Nex).
+# the endpoints on distinct primaries. Independent parallel reviewers (e.g. treasury vs
+# execution) are deliberately NOT linked here, so they may share a cheap reviewer model.
 DEBATE_INTERACTION_EDGES: tuple[tuple[str, str], ...] = (
     # Decision spine: proposer -> adversary -> judge.
     ("analyst", "adversary"),
