@@ -3,23 +3,34 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
+from uuid import uuid4
 
 from hyperliquid_trading_agent.app.agent.model_gateway import ModelGateway
 from hyperliquid_trading_agent.app.autonomy.discord import (
     AutonomyAlertSink,
     format_market_map,
+    format_memories,
     format_orders,
     format_portfolio_snapshot,
     format_positions,
     format_signal_alert,
     format_signal_detail,
+    format_signal_evaluation,
     format_signals,
+    format_tuning_proposal,
+    format_tuning_proposals,
 )
 from hyperliquid_trading_agent.app.autonomy.market_map import MarketMapReducer
 from hyperliquid_trading_agent.app.autonomy.newswire import AutonomyNewswire
 from hyperliquid_trading_agent.app.autonomy.portfolio import PaperPortfolioService, RiskControlError
-from hyperliquid_trading_agent.app.autonomy.schemas import AutonomyCommand, MarketAsset, NewsEvent, TradeSignal
+from hyperliquid_trading_agent.app.autonomy.schemas import (
+    AutonomyCommand,
+    MarketAsset,
+    NewsEvent,
+    OperatorFeedback,
+    TradeSignal,
+)
 from hyperliquid_trading_agent.app.autonomy.signals import SignalEngine, maybe_attach_model_insight
 from hyperliquid_trading_agent.app.autonomy.universe import MarketUniverseResolver
 from hyperliquid_trading_agent.app.config import Settings
@@ -56,6 +67,10 @@ class AutonomousTradingLoopService:
         ws_worker: Any | None = None,
         model_gateway: ModelGateway | None = None,
         alert_sink: AutonomyAlertSink | None = None,
+        evaluation_service: Any | None = None,
+        memory_service: Any | None = None,
+        report_service: Any | None = None,
+        tuning_service: Any | None = None,
     ):
         self.settings = settings
         self.repository = repository
@@ -64,6 +79,10 @@ class AutonomousTradingLoopService:
         self.ws_worker = ws_worker
         self.model_gateway = model_gateway
         self.alert_sink = alert_sink
+        self.evaluation_service = evaluation_service
+        self.memory_service = memory_service
+        self.report_service = report_service
+        self.tuning_service = tuning_service
         self.universe_resolver = MarketUniverseResolver(settings, hyperliquid)
         self.reducer = MarketMapReducer()
         self.newswire = AutonomyNewswire(settings, news)
@@ -90,6 +109,10 @@ class AutonomousTradingLoopService:
             return
         self.running = True
         self.paused = False
+        if self.memory_service is not None and callable(getattr(self.memory_service, "load", None)):
+            await self.memory_service.load()
+        if self.evaluation_service is not None and callable(getattr(self.evaluation_service, "load_open", None)):
+            await self.evaluation_service.load_open()
         if self.ws_worker is not None:
             self._subscription_id = await self.ws_worker.subscribe(SubscriptionSpec("allMids"), self._on_all_mids)
         self._task = asyncio.create_task(self._run(), name="autonomous-trading-loop")
@@ -127,6 +150,10 @@ class AutonomousTradingLoopService:
             "last_error": self.last_error,
             "paper_portfolio_id": self.portfolio.portfolio.id if self.portfolio.portfolio else None,
             "portfolio_equity_usd": snapshot.equity_usd if snapshot else None,
+            "evaluation": self.evaluation_service.status() if self.evaluation_service is not None and callable(getattr(self.evaluation_service, "status", None)) else {},
+            "memory": self.memory_service.status() if self.memory_service is not None and callable(getattr(self.memory_service, "status", None)) else {},
+            "reports": self.report_service.status() if self.report_service is not None and callable(getattr(self.report_service, "status", None)) else {},
+            "tuning_proposals": self.tuning_service.status() if self.tuning_service is not None and callable(getattr(self.tuning_service, "status", None)) else {},
             "warnings": [*self.settings.autonomy_config_warnings(), *self.universe_resolver.warnings],
         }
 
@@ -166,6 +193,8 @@ class AutonomousTradingLoopService:
         AUTONOMY_PAPER_ORDERS.labels(status="filled").inc()
         AUTONOMY_PAPER_FILLS.labels(symbol=fill.symbol).inc()
         await self._persist_signal(updated, approved_by=actor)
+        if self.evaluation_service is not None:
+            await self.evaluation_service.update_signal_status(updated, paper_position_id=position.id)
         await self._record_event(
             "signal_approved_paper_ordered",
             actor=actor,
@@ -182,6 +211,8 @@ class AutonomousTradingLoopService:
         self.signals[updated.id] = updated
         AUTONOMY_SIGNALS_REJECTED.inc()
         await self._persist_signal(updated, rejected_by=actor)
+        if self.evaluation_service is not None:
+            await self.evaluation_service.update_signal_status(updated)
         await self._record_event("signal_rejected", actor=actor, symbol=signal.symbol, payload={"signal_id": signal.id, "reason": reason, "exchange_actions": []})
         return updated
 
@@ -192,6 +223,8 @@ class AutonomousTradingLoopService:
         updated = signal.model_copy(update={"status": "expired"})
         self.signals[updated.id] = updated
         await self._persist_signal(updated)
+        if self.evaluation_service is not None:
+            await self.evaluation_service.update_signal_status(updated)
         await self._record_event("signal_expired", actor=actor, symbol=signal.symbol, payload={"signal_id": signal.id, "exchange_actions": []})
         return updated
 
@@ -227,6 +260,43 @@ class AutonomousTradingLoopService:
                 return format_orders(list(self.portfolio.orders.values()))
             if command.action == "market_map":
                 return format_market_map(self.reducer.snapshot())
+            if command.action == "signal_outcome" and command.signal_id and self.evaluation_service is not None:
+                evaluation = await self.evaluation_service.get_by_signal_id(command.signal_id)
+                return format_signal_evaluation(evaluation.model_dump(mode="json") if evaluation else None)
+            if command.action == "daily_report" and self.report_service is not None:
+                report = await self.report_service.generate_daily(post=False)
+                return report.summary
+            if command.action == "weekly_report" and self.report_service is not None:
+                report = await self.report_service.generate_weekly(post=False)
+                return report.summary
+            if command.action == "token_capital" and self.report_service is not None:
+                latest = getattr(self.report_service, "latest_token_capital", None)
+                if latest is None:
+                    report = await self.report_service.generate_daily(post=False)
+                    latest = report.token_capital
+                return f"Token Capital: **{latest.total_score:.0f}/100**\nRisk-adjusted: `{latest.risk_adjusted_performance_score:.0f}` | Signal quality: `{latest.signal_quality_score:.0f}` | Memory: `{latest.memory_compounding_score:.0f}` | Risk: `{latest.risk_discipline_score:.0f}`\nNo strategy changes were applied."
+            if command.action == "feedback_signal" and command.signal_id and self.memory_service is not None:
+                feedback = OperatorFeedback(id=f"fb_{uuid4().hex}", source="discord", actor_id=user_id, target_type="signal", target_id=command.signal_id, rating=cast(Any, command.rating or "unclear"), note=command.note, created_at_ms=_now_ms(), metadata={"exchange_actions": []})
+                await self.memory_service.record_feedback(feedback)
+                return f"Feedback recorded for signal `{command.signal_id}` as `{feedback.rating}`. No strategy settings were changed."
+            if command.action == "feedback_bot" and self.memory_service is not None:
+                feedback = OperatorFeedback(id=f"fb_{uuid4().hex}", source="discord", actor_id=user_id, target_type="bot", target_id="discord_bot", rating=cast(Any, command.rating or "unclear"), note=command.note, created_at_ms=_now_ms(), metadata={"exchange_actions": []})
+                await self.memory_service.record_feedback(feedback)
+                return "Bot feedback recorded. It can become an operator-output lesson only after evidence-gated validation."
+            if command.action == "memories" and self.memory_service is not None:
+                items = await self.memory_service.list_lessons(role=command.role, status="active", include_shadow=False, limit=20)
+                return format_memories(items, title=f"Active {command.role or 'role'} memories")
+            if command.action == "memory" and command.lesson_id and self.memory_service is not None:
+                item = await self.memory_service.get_lesson(command.lesson_id)
+                return format_memories([item], title="Memory") if item else "Memory not found."
+            if command.action == "tuning_proposals" and self.tuning_service is not None:
+                items = await self.tuning_service.list(status=None, limit=20)
+                return format_tuning_proposals(items)
+            if command.action == "tuning_proposal" and command.proposal_id and self.tuning_service is not None:
+                item = await self.tuning_service.get(command.proposal_id)
+                return format_tuning_proposal(item)
+            if command.action == "apply_tuning_proposal":
+                return "Tuning proposals are observe-and-recommend only in this phase. Apply manually after review. No runtime strategy settings were changed."
         except Exception as exc:
             return f"Autonomy command failed: {type(exc).__name__}. No live trade was placed."
         return "Unknown autonomy command."
@@ -257,7 +327,11 @@ class AutonomousTradingLoopService:
         mids = await self._current_mids()
         if mids:
             self.reducer.apply_all_mids(mids, timestamp_ms=ts)
-            await self.portfolio.mark_to_market({key.upper(): float(value) for key, value in mids.items() if _float(value) is not None}, timestamp_ms=ts)
+            numeric_mids = {key.upper(): float(value) for key, value in mids.items() if _float(value) is not None}
+            await self.portfolio.mark_to_market(numeric_mids, timestamp_ms=ts)
+            if self.evaluation_service is not None:
+                for symbol, price in numeric_mids.items():
+                    await self.evaluation_service.on_price(symbol, price, ts)
             self.last_market_data_at_ms = ts
         if ts - self._last_deep_scan_ms >= self.settings.autonomy_deep_scan_interval_seconds * 1000:
             await self._deep_market_scan(ts)
@@ -274,6 +348,13 @@ class AutonomousTradingLoopService:
         self.reducer.apply_paper_positions(self.portfolio.open_positions(), timestamp_ms=ts)
         await self._persist_market_observations()
         await self._generate_and_post_signals(ts)
+        if self.evaluation_service is not None:
+            await self.evaluation_service.mark_due(ts)
+            await self.evaluation_service.expire_overdue_signals(ts)
+        if self.memory_service is not None:
+            await self.memory_service.archive_expired(now_ms=ts)
+        if self.report_service is not None:
+            await self.report_service.maybe_run_scheduled(ts)
         if ts - self._last_portfolio_snapshot_ms >= self.settings.autonomy_portfolio_snapshot_seconds * 1000:
             snapshot = await self.portfolio.snapshot(ts)
             AUTONOMY_PORTFOLIO_EQUITY.set(snapshot.equity_usd)
@@ -354,12 +435,14 @@ class AutonomousTradingLoopService:
             enriched = signal
             if self._can_call_model_insight(signal):
                 AUTONOMY_MODEL_INSIGHT_CALLS.labels(result="attempt").inc()
-                enriched = await maybe_attach_model_insight(signal, self.model_gateway, self.settings)
+                enriched = await maybe_attach_model_insight(signal, self.model_gateway, self.settings, memory_service=self.memory_service)
                 self._model_call_timestamps.append(time.monotonic())
                 AUTONOMY_MODEL_INSIGHT_CALLS.labels(result="ok" if enriched.model_insight and enriched.model_insight.get("status") != "unavailable" else "fallback").inc()
             self.signals[enriched.id] = enriched
             AUTONOMY_SIGNALS_CREATED.labels(signal_type=enriched.signal_type).inc()
             await self._persist_signal(enriched)
+            if self.evaluation_service is not None:
+                await self.evaluation_service.create_for_signal(enriched, market_regime=self.reducer.snapshot().risk_regime)
             await self._record_event("signal_created", symbol=enriched.symbol, payload={"signal_id": enriched.id, "score": enriched.score, "exchange_actions": []})
             await self._post_signal(enriched)
 
@@ -380,6 +463,8 @@ class AutonomousTradingLoopService:
         self.signals[posted.id] = posted
         AUTONOMY_SIGNALS_POSTED.inc()
         await self._persist_signal(posted)
+        if self.evaluation_service is not None:
+            await self.evaluation_service.update_signal_status(posted)
         await self._record_event("signal_posted", symbol=posted.symbol, payload={"signal_id": posted.id, "discord_message_id": message_id, "exchange_actions": []})
 
     async def _on_all_mids(self, message: dict[str, Any]) -> None:
@@ -390,7 +475,11 @@ class AutonomousTradingLoopService:
         ts = _now_ms()
         self.reducer.apply_all_mids({str(key).upper(): value for key, value in mids.items()}, timestamp_ms=ts)
         self.last_market_data_at_ms = ts
-        await self.portfolio.mark_to_market({str(key).upper(): float(value) for key, value in mids.items() if _float(value) is not None}, timestamp_ms=ts)
+        numeric_mids = {str(key).upper(): float(value) for key, value in mids.items() if _float(value) is not None}
+        await self.portfolio.mark_to_market(numeric_mids, timestamp_ms=ts)
+        if self.evaluation_service is not None:
+            for symbol, price in numeric_mids.items():
+                await self.evaluation_service.on_price(symbol, price, ts)
 
     async def _persist_market_observations(self) -> None:
         if self.repository is None or not getattr(self.repository, "enabled", False):

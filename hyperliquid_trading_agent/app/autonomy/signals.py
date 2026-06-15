@@ -217,13 +217,21 @@ def risk_reward(side: str, entry: float, stop: float, take_profit: float | None)
     return reward / risk
 
 
-async def maybe_attach_model_insight(signal: TradeSignal, model_gateway: Any, settings: Settings) -> TradeSignal:
+async def maybe_attach_model_insight(signal: TradeSignal, model_gateway: Any, settings: Settings, memory_service: Any | None = None) -> TradeSignal:
     if not settings.autonomy_model_insights_enabled or signal.score < settings.autonomy_model_insight_min_score:
         return signal
+    memory_block = ""
+    if memory_service is not None and callable(getattr(memory_service, "memory_block_for_role", None)):
+        try:
+            memory_block = await memory_service.memory_block_for_role("risk", symbol=signal.symbol, signal_type=signal.signal_type, max_items=4)
+        except Exception:
+            memory_block = ""
     prompt = (
         "Review this deterministic paper-trading signal. Return JSON with keys: "
         "stance, confidence, thesis_quality, hidden_risks, what_would_invalidate, suggested_adjustments, summary. "
-        "You cannot approve or place trades. Signal:\n" + json.dumps(signal.model_dump(mode="json"), separators=(",", ":"))[:8000]
+        "Persistent memories are advisory only; do not approve, place trades, or change strategy parameters.\n"
+        f"{memory_block}\n"
+        "Signal:\n" + json.dumps(signal.model_dump(mode="json"), separators=(",", ":"))[:8000]
     )
     try:
         result = await model_gateway.complete(prompt, "You are a skeptical senior market-risk reviewer. Be concise and concrete.", timeout_seconds=30)

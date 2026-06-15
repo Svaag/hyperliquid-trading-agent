@@ -127,6 +127,14 @@ AUTONOMY_MIN_SIGNAL_SCORE=75
 AUTONOMY_PAPER_INITIAL_EQUITY_USD=100000
 AUTONOMY_PAPER_RISK_PCT_PER_TRADE=0.25
 AUTONOMY_MODEL_INSIGHTS_ENABLED=true
+AUTONOMY_EVALUATION_ENABLED=true
+AUTONOMY_MEMORY_ENABLED=true
+AUTONOMY_REPORTS_ENABLED=true
+AUTONOMY_EVAL_HORIZONS=15m,1h,4h,24h,expiry
+AUTONOMY_DAILY_REPORT_UTC=00:05
+AUTONOMY_WEEKLY_REPORT_DAY=MON
+AUTONOMY_WEEKLY_REPORT_UTC=00:30
+AUTONOMY_TUNING_PROPOSALS_ENABLED=true
 NEWSWIRE_ENABLED=true
 NEWSWIRE_QUERIES=BTC,ETH,HYPE,Hyperliquid,Fed,CPI,FOMC,crypto liquidation
 ```
@@ -322,6 +330,9 @@ Validate:
 curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8080/autonomy/status
 curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8080/autonomy/market-map
 curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8080/autonomy/portfolio
+curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8080/autonomy/evaluations/signals
+curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8080/autonomy/token-capital
+curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8080/autonomy/tuning-proposals
 ```
 
 Discord `#ai-bot-alerts` commands:
@@ -336,6 +347,13 @@ orders
 market map
 pause autonomy
 resume autonomy
+daily report
+weekly report
+token capital
+signal outcome <signal_id>
+mark signal <signal_id> good|bad|unclear
+memories risk
+tuning proposals
 ```
 
 All approvals are paper-only. `HYPERLIQUID_EXCHANGE_ENABLED=true` remains rejected by config validation.
@@ -357,4 +375,7 @@ All approvals are paper-only. `HYPERLIQUID_EXCHANGE_ENABLED=true` remains reject
 - [ ] Metrics access is protected or internal-only.
 - [ ] If autonomy is enabled, `AUTONOMY_ALERT_CHANNEL_ID` points to `#ai-bot-alerts`.
 - [ ] `/autonomy/status` shows `mode=paper_signoff` and no live execution path.
+- [ ] `/health/config` shows evaluation, memory, reports, and tuning proposals enabled with `auto_apply_enabled=false`.
+- [ ] `/autonomy/token-capital` returns a component breakdown.
+- [ ] `/autonomy/tuning-proposals` shows recommendations only; no endpoint or Discord command applies them.
 - [ ] A Discord signal approval creates a paper order/fill/position only.

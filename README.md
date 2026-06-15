@@ -21,8 +21,10 @@ design.
   - `GET /tracking/positions/{tracker_id}/events`
   - `POST /tracking/positions/{tracker_id}/pause|resume|stop`
   - `GET /autonomy/status|universe|market-map|signals|portfolio|positions|orders|fills|news`
+  - `GET /autonomy/evaluations/signals`, `/autonomy/token-capital`, `/autonomy/reports/daily|weekly`, `/autonomy/memory/*`, `/autonomy/tuning-proposals`
   - `POST /autonomy/pause|resume`
   - `POST /autonomy/signals/{signal_id}/approve|reject|expire`
+  - `POST /autonomy/evaluations/run`, `/autonomy/reports/daily/run`, `/autonomy/reports/weekly/run`, `/autonomy/feedback`
   - `GET /metrics`
 - Discord mention bot with guild/channel/role allowlists and threaded answers.
 - Risk-routed high-stakes multi-agent debate engine for paper/manual trade proposals only, with institutional role rubrics, endpoint coverage, and optional official SDK `Info` data.
@@ -37,7 +39,7 @@ design.
 - RSS news, optional Tavily/SerpAPI/NewsAPI/Perplexity search, optional X recent search.
 - Semantic tool gathering for market snapshots, funding, candles, account public state, fills, docs, news, and paper trades.
 - PostgreSQL persistence for audit events, tool calls, conversations, cache, news, paper trades, debate runs, role outputs, state snapshots, trade proposals, autonomous market state, signals, paper orders/fills/positions, and portfolio snapshots.
-- Alembic migrations through `0004_autonomous_loop`.
+- Alembic migrations through `0005_signal_evaluation_memory`.
 - Dockerfile and Docker Compose with Postgres.
 
 ## Quick start
@@ -151,11 +153,39 @@ AUTONOMY_MIN_SIGNAL_SCORE=75
 AUTONOMY_PAPER_INITIAL_EQUITY_USD=100000
 AUTONOMY_PAPER_RISK_PCT_PER_TRADE=0.25
 AUTONOMY_MODEL_INSIGHTS_ENABLED=true
+
+# Persistent Alpha Memory / signal evaluation loop (observe-and-recommend only)
+AUTONOMY_EVALUATION_ENABLED=true
+AUTONOMY_MEMORY_ENABLED=true
+AUTONOMY_REPORTS_ENABLED=true
+AUTONOMY_EVAL_HORIZONS=15m,1h,4h,24h,expiry
+AUTONOMY_EVAL_MAX_OPEN_SIGNALS=500
+AUTONOMY_EVAL_PRICE_SOURCE=allMids
+AUTONOMY_DAILY_REPORT_ENABLED=true
+AUTONOMY_DAILY_REPORT_UTC=00:05
+AUTONOMY_WEEKLY_REPORT_ENABLED=true
+AUTONOMY_WEEKLY_REPORT_DAY=MON
+AUTONOMY_WEEKLY_REPORT_UTC=00:30
+AUTONOMY_MEMORY_ROLE_MAX_ACTIVE=200
+AUTONOMY_MEMORY_OPERATOR_MAX_ACTIVE=100
+AUTONOMY_MEMORY_CANDIDATE_TTL_DAYS=30
+AUTONOMY_MEMORY_SHADOW_TTL_DAYS=60
+AUTONOMY_MEMORY_ROLE_TTL_DAYS=30
+AUTONOMY_MEMORY_PROCESS_TTL_DAYS=90
+AUTONOMY_MEMORY_INCIDENT_TTL_DAYS=14
+AUTONOMY_ROLE_LESSON_MIN_SAMPLES=5
+AUTONOMY_OPERATOR_LESSON_MIN_SAMPLES=3
+AUTONOMY_SIGNAL_LESSON_MIN_SAMPLES=20
+AUTONOMY_LESSON_MIN_CONFIDENCE=0.70
+AUTONOMY_STRATEGY_LESSON_MIN_CONFIDENCE=0.75
+AUTONOMY_TUNING_PROPOSALS_ENABLED=true
+AUTONOMY_TUNING_PROPOSAL_TTL_DAYS=14
+
 NEWSWIRE_ENABLED=true
 NEWSWIRE_QUERIES=BTC,ETH,HYPE,Hyperliquid,Fed,CPI,FOMC,crypto liquidation
 ```
 
-When `AUTONOMY_ENABLED=true`, the service watches the configured universe, builds a deterministic market mental map, generates scored signals, posts qualifying alerts to `AUTONOMY_ALERT_CHANNEL_ID`, and waits for human signoff. Discord alert-channel commands: `approve signal <id>`, `reject signal <id>`, `signal <id>`, `signals`, `portfolio`, `positions`, `orders`, `market map`, `pause autonomy`, `resume autonomy`. Approvals create paper orders/fills/positions only; no live trade is placed.
+When `AUTONOMY_ENABLED=true`, the service watches the configured universe, builds a deterministic market mental map, generates scored signals, posts qualifying alerts to `AUTONOMY_ALERT_CHANNEL_ID`, and waits for human signoff. Discord alert-channel commands: `approve signal <id>`, `reject signal <id>`, `signal <id>`, `signals`, `portfolio`, `positions`, `orders`, `market map`, `pause autonomy`, `resume autonomy`, `daily report`, `weekly report`, `token capital`, `signal outcome <id>`, `mark signal <id> good|bad|unclear|too_noisy|useful|wrong`, `memories [role]`, and `tuning proposals`. Approvals create paper orders/fills/positions only; no live trade is placed. The persistent memory/evaluation knobs are shadow-safe: they evaluate and recommend, but never auto-apply strategy, risk, execution, or sizing changes. See [docs/autonomy-memory.md](docs/autonomy-memory.md).
 
 `/ready` reports autonomy degraded when enabled without an alert channel, when market data is stale, or when persistence is unavailable.
 
@@ -204,7 +234,7 @@ See [TESTING.md](TESTING.md).
 Current local validation:
 
 ```text
-59 passed
+68 passed
 ruff: all checks passed
 mypy: success
 alembic offline SQL: generated

@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import time
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, cast
+from uuid import uuid4
 
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Response
@@ -19,7 +20,12 @@ from hyperliquid_trading_agent.app.agent.model_gateway import ModelGateway
 from hyperliquid_trading_agent.app.agent.runner import AgentContext, TradingAgentRunner
 from hyperliquid_trading_agent.app.agent.tools import AgentTools
 from hyperliquid_trading_agent.app.autonomy.discord import DiscordAutonomyAlertSink
+from hyperliquid_trading_agent.app.autonomy.evaluation import SignalEvaluationService
+from hyperliquid_trading_agent.app.autonomy.memory import MemoryService
+from hyperliquid_trading_agent.app.autonomy.reports import AutonomyReportService
+from hyperliquid_trading_agent.app.autonomy.schemas import OperatorFeedback, TradeSignal
 from hyperliquid_trading_agent.app.autonomy.service import AutonomousTradingLoopService
+from hyperliquid_trading_agent.app.autonomy.tuning import TuningProposalService
 from hyperliquid_trading_agent.app.config import Settings, load_settings
 from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.db.session import create_engine, create_sessionmaker
@@ -56,6 +62,20 @@ class AutonomyActionRequest(BaseModel):
     reason: str = ""
 
 
+class AutonomyFeedbackRequest(BaseModel):
+    target_type: str = "signal"
+    target_id: str
+    rating: str
+    note: str = ""
+    actor_id: str | None = None
+    metadata: dict[str, Any] = {}
+
+
+class CandidatePromotionRequest(BaseModel):
+    human_review_confirmed: bool = False
+    reviewer: str = "api"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
@@ -70,8 +90,18 @@ async def lifespan(app: FastAPI):
     news = NewsService(settings=settings, repository=repository)
     tools = AgentTools(hyperliquid=hyperliquid, news=news, repository=repository)
     model_gateway = ModelGateway(settings=settings)
+    memory_service = MemoryService(settings=settings, repository=repository)
+    evaluation_service = SignalEvaluationService(settings=settings, repository=repository, memory_service=memory_service)
+    tuning_service = TuningProposalService(settings=settings, repository=repository, memory_service=memory_service)
+    report_service = AutonomyReportService(
+        settings=settings,
+        repository=repository,
+        evaluation_service=evaluation_service,
+        memory_service=memory_service,
+        tuning_service=tuning_service,
+    )
     high_stakes_context = HighStakesContextBuilder(tools=tools, settings=settings, sdk_info=sdk_info)
-    high_stakes_roles = HighStakesRoleRunner(model_gateway=model_gateway, settings=settings)
+    high_stakes_roles = HighStakesRoleRunner(model_gateway=model_gateway, settings=settings, memory_service=memory_service)
     ws_worker = HyperliquidWebSocketWorker(settings=settings)
     tracking_service = PositionTrackingService(settings=settings, repository=repository, ws_worker=ws_worker)
     autonomy_service = AutonomousTradingLoopService(
@@ -81,7 +111,12 @@ async def lifespan(app: FastAPI):
         news=news,
         ws_worker=ws_worker,
         model_gateway=model_gateway,
+        evaluation_service=evaluation_service,
+        memory_service=memory_service,
+        report_service=report_service,
+        tuning_service=tuning_service,
     )
+    report_service.portfolio_service = autonomy_service.portfolio
     high_stakes_graph = HighStakesDebateGraph(
         settings=settings,
         context_builder=high_stakes_context,
@@ -99,6 +134,7 @@ async def lifespan(app: FastAPI):
     bot = DiscordTradingBot(settings=settings, runner=runner, tracking_service=tracking_service, autonomy_service=autonomy_service)
     tracking_service.alert_sink = DiscordAlertSink(bot)
     autonomy_service.alert_sink = DiscordAutonomyAlertSink(bot)
+    report_service.alert_sink = autonomy_service.alert_sink
 
     app.state.engine = engine
     app.state.repository = repository
@@ -111,6 +147,10 @@ async def lifespan(app: FastAPI):
     app.state.ws_worker = ws_worker
     app.state.tracking_service = tracking_service
     app.state.autonomy_service = autonomy_service
+    app.state.evaluation_service = evaluation_service
+    app.state.memory_service = memory_service
+    app.state.report_service = report_service
+    app.state.tuning_service = tuning_service
 
     bot_task: asyncio.Task | None = None
     ws_task: asyncio.Task | None = None
@@ -190,6 +230,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ready_checks["autonomy"] = "degraded:market_data_stale"
             elif not last_market_data_at and last_iteration_at and now_ms - int(last_iteration_at) > 120_000:
                 ready_checks["autonomy"] = "degraded:no_market_data"
+            elif _autonomy_learning_degraded(autonomy_status, now_ms):
+                ready_checks["autonomy"] = "degraded:learning_loop"
             else:
                 ready_checks["autonomy"] = "ok"
         return {"status": "ready", "checks": ready_checks}
@@ -432,6 +474,203 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         events = sorted(app.state.autonomy_service.news_events.values(), key=lambda item: item.observed_at_ms, reverse=True)
         return {"items": [item.model_dump(mode="json") for item in events[:200]], "count": len(events)}
 
+    @app.get("/autonomy/evaluations/signals")
+    async def autonomy_signal_evaluations(status: str | None = None, symbol: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = await app.state.evaluation_service.list_evaluations(status=status, symbol=symbol, limit=200)
+        return {"items": [item.model_dump(mode="json") for item in items], "count": len(items)}
+
+    @app.get("/autonomy/evaluations/signals/{signal_id}")
+    async def autonomy_signal_evaluation(signal_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        item = await app.state.evaluation_service.get_by_signal_id(signal_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="signal evaluation not found")
+        return item.model_dump(mode="json")
+
+    @app.post("/autonomy/evaluations/run")
+    async def autonomy_evaluations_run(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        marks = await app.state.evaluation_service.mark_due(int(time.time() * 1000))
+        return {"marked": len(marks), "items": [item.model_dump(mode="json") for item in marks]}
+
+    @app.post("/autonomy/evaluations/backfill")
+    async def autonomy_evaluations_backfill(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        created = 0
+        for data in await app.state.repository.list_autonomy_trade_signals(limit=500):
+            signal = TradeSignal(**data)
+            evaluation = await app.state.evaluation_service.create_for_signal(signal)
+            if evaluation is not None:
+                created += 1
+        return {"created_or_existing": created}
+
+    @app.get("/autonomy/reports/daily")
+    async def autonomy_daily_reports(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = await app.state.report_service.list_reports("daily", limit=30)
+        return {"items": items, "count": len(items)}
+
+    @app.get("/autonomy/reports/daily/{report_date}")
+    async def autonomy_daily_report(report_date: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        item = await app.state.report_service.get_report("daily", report_date)
+        if item is None:
+            raise HTTPException(status_code=404, detail="daily report not found")
+        return item
+
+    @app.post("/autonomy/reports/daily/run")
+    async def autonomy_daily_report_run(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        report = await app.state.report_service.generate_daily(post=False)
+        return report.model_dump(mode="json")
+
+    @app.get("/autonomy/reports/weekly")
+    async def autonomy_weekly_reports(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = await app.state.report_service.list_reports("weekly", limit=30)
+        return {"items": items, "count": len(items)}
+
+    @app.get("/autonomy/reports/weekly/{week_key}")
+    async def autonomy_weekly_report(week_key: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        item = await app.state.report_service.get_report("weekly", week_key)
+        if item is None:
+            raise HTTPException(status_code=404, detail="weekly report not found")
+        return item
+
+    @app.post("/autonomy/reports/weekly/run")
+    async def autonomy_weekly_report_run(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        report = await app.state.report_service.generate_weekly(post=False)
+        return report.model_dump(mode="json")
+
+    @app.get("/autonomy/token-capital")
+    async def autonomy_token_capital(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        latest = getattr(app.state.report_service, "latest_token_capital", None)
+        if latest is None:
+            history = await app.state.report_service.token_capital_history(limit=1)
+            if history:
+                return history[0]
+            report = await app.state.report_service.generate_daily(post=False)
+            latest = report.token_capital
+        return latest.model_dump(mode="json")
+
+    @app.get("/autonomy/token-capital/history")
+    async def autonomy_token_capital_history(window: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = await app.state.report_service.token_capital_history(window=window, limit=100)
+        return {"items": items, "count": len(items)}
+
+    @app.get("/autonomy/memory/observations")
+    async def autonomy_memory_observations(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = await app.state.memory_service.list_observations(limit=200)
+        return {"items": items, "count": len(items)}
+
+    @app.get("/autonomy/memory/candidates")
+    async def autonomy_memory_candidates(status: str | None = None, role: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = await app.state.memory_service.list_candidates(status=status, role=role, limit=200)
+        return {"items": items, "count": len(items)}
+
+    @app.get("/autonomy/memory/shadow")
+    async def autonomy_memory_shadow(role: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = await app.state.memory_service.list_lessons(role=role, status="shadow", include_shadow=True, limit=200)
+        return {"items": items, "count": len(items)}
+
+    @app.get("/autonomy/memory/lessons")
+    async def autonomy_memory_lessons(role: str | None = None, status: str | None = "active", authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = await app.state.memory_service.list_lessons(role=role, status=status, include_shadow=False, limit=200)
+        return {"items": items, "count": len(items)}
+
+    @app.get("/autonomy/memory/lessons/{lesson_id}")
+    async def autonomy_memory_lesson(lesson_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        item = await app.state.memory_service.get_lesson(lesson_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="lesson not found")
+        return item
+
+    @app.post("/autonomy/memory/lessons/{lesson_id}/archive")
+    async def autonomy_memory_lesson_archive(lesson_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        await app.state.memory_service.archive_lesson(lesson_id)
+        return {"status": "archived", "lesson_id": lesson_id}
+
+    @app.post("/autonomy/memory/candidates/{candidate_id}/reject")
+    async def autonomy_memory_candidate_reject(candidate_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        await app.state.memory_service.reject_candidate(candidate_id)
+        return {"status": "rejected", "candidate_id": candidate_id}
+
+    @app.post("/autonomy/memory/candidates/{candidate_id}/promote-shadow")
+    async def autonomy_memory_candidate_promote_shadow(candidate_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        lesson = await app.state.memory_service.promote_candidate_to_shadow(candidate_id)
+        if lesson is None:
+            raise HTTPException(status_code=404, detail="candidate not found or cannot become role memory")
+        return lesson.model_dump(mode="json")
+
+    @app.post("/autonomy/memory/candidates/{candidate_id}/promote-active")
+    async def autonomy_memory_candidate_promote_active(candidate_id: str, request: CandidatePromotionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        try:
+            lesson = await app.state.memory_service.promote_candidate_to_active(candidate_id, human_review_confirmed=bool(request and request.human_review_confirmed))
+        except PermissionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        if lesson is None:
+            raise HTTPException(status_code=404, detail="candidate not found or cannot become active memory")
+        return lesson.model_dump(mode="json")
+
+    @app.post("/autonomy/feedback")
+    async def autonomy_feedback(request: AutonomyFeedbackRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        feedback = OperatorFeedback(id=f"fb_{uuid4().hex}", source="api", actor_id=request.actor_id, target_type=cast(Any, request.target_type), target_id=request.target_id, rating=cast(Any, request.rating), note=request.note, created_at_ms=int(time.time() * 1000), metadata=request.metadata)
+        candidate = await app.state.memory_service.record_feedback(feedback)
+        return {"feedback": feedback.model_dump(mode="json"), "candidate": candidate.model_dump(mode="json") if candidate else None}
+
+    @app.get("/autonomy/feedback")
+    async def autonomy_feedback_list(target_type: str | None = None, target_id: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = await app.state.repository.list_operator_feedback(target_type=target_type, target_id=target_id, limit=200)
+        return {"items": items, "count": len(items)}
+
+    @app.get("/autonomy/tuning-proposals")
+    async def autonomy_tuning_proposals(status: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = await app.state.tuning_service.list(status=status, limit=200)
+        return {"items": items, "count": len(items), "auto_apply_enabled": False}
+
+    @app.get("/autonomy/tuning-proposals/{proposal_id}")
+    async def autonomy_tuning_proposal(proposal_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        item = await app.state.tuning_service.get(proposal_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="tuning proposal not found")
+        return {**item, "auto_apply_enabled": False}
+
+    @app.post("/autonomy/tuning-proposals/{proposal_id}/mark-reviewed")
+    async def autonomy_tuning_proposal_reviewed(proposal_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        await app.state.tuning_service.mark_reviewed(proposal_id)
+        return {"status": "accepted_manually", "proposal_id": proposal_id, "auto_apply_enabled": False}
+
+    @app.post("/autonomy/tuning-proposals/{proposal_id}/reject")
+    async def autonomy_tuning_proposal_reject(proposal_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        await app.state.tuning_service.reject(proposal_id)
+        return {"status": "rejected", "proposal_id": proposal_id, "auto_apply_enabled": False}
+
+    @app.post("/autonomy/tuning-proposals/{proposal_id}/expire")
+    async def autonomy_tuning_proposal_expire(proposal_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        await app.state.tuning_service.expire(proposal_id)
+        return {"status": "expired", "proposal_id": proposal_id, "auto_apply_enabled": False}
+
     @app.get("/metrics")
     async def metrics(authorization: str | None = Header(default=None)):
         if settings.metrics_bearer_token:
@@ -441,6 +680,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     return app
+
+
+def _autonomy_learning_degraded(autonomy_status: dict[str, Any], now_ms: int) -> bool:
+    evaluation = autonomy_status.get("evaluation") or {}
+    reports = autonomy_status.get("reports") or {}
+    memory = autonomy_status.get("memory") or {}
+    open_evaluations = int(evaluation.get("open_evaluations") or 0)
+    last_mark_at = evaluation.get("last_mark_at_ms")
+    if open_evaluations > 0 and last_mark_at and now_ms - int(last_mark_at) > 2 * 60 * 60 * 1000:
+        return True
+    if int(evaluation.get("error_count") or 0) >= 5:
+        return True
+    if int(reports.get("error_count") or 0) >= 3:
+        return True
+    if int(memory.get("error_count") or 0) >= 5:
+        return True
+    return False
 
 
 def _autonomy_config_status(app: FastAPI) -> dict[str, Any]:
@@ -489,6 +745,50 @@ def _autonomy_config_status(app: FastAPI) -> dict[str, Any]:
             "min_score": settings.autonomy_model_insight_min_score,
             "max_calls_per_hour": settings.autonomy_model_max_calls_per_hour,
         },
+        "evaluation": {
+            "enabled": settings.autonomy_evaluation_enabled,
+            "effective_enabled": settings.autonomy_evaluation_effective_enabled,
+            "horizons": settings.autonomy_eval_horizon_list,
+            "max_open_signals": settings.autonomy_eval_max_open_signals,
+            "price_source": settings.autonomy_eval_price_source,
+        },
+        "memory": {
+            "enabled": settings.autonomy_memory_enabled,
+            "effective_enabled": settings.autonomy_memory_effective_enabled,
+            "role_max_active": settings.autonomy_memory_role_max_active,
+            "operator_max_active": settings.autonomy_memory_operator_max_active,
+            "ttl_days": {
+                "candidate": settings.autonomy_memory_candidate_ttl_days,
+                "shadow": settings.autonomy_memory_shadow_ttl_days,
+                "role": settings.autonomy_memory_role_ttl_days,
+                "process": settings.autonomy_memory_process_ttl_days,
+                "incident": settings.autonomy_memory_incident_ttl_days,
+            },
+            "promotion": {
+                "role_lesson_min_samples": settings.autonomy_role_lesson_min_samples,
+                "operator_lesson_min_samples": settings.autonomy_operator_lesson_min_samples,
+                "signal_lesson_min_samples": settings.autonomy_signal_lesson_min_samples,
+                "lesson_min_confidence": settings.autonomy_lesson_min_confidence,
+                "strategy_lesson_min_confidence": settings.autonomy_strategy_lesson_min_confidence,
+                "strategy_affecting_requires_human_review": True,
+            },
+        },
+        "reports": {
+            "enabled": settings.autonomy_reports_enabled,
+            "effective_enabled": settings.autonomy_reports_effective_enabled,
+            "daily_enabled": settings.autonomy_daily_report_enabled,
+            "daily_utc": settings.autonomy_daily_report_utc,
+            "weekly_enabled": settings.autonomy_weekly_report_enabled,
+            "weekly_day": settings.autonomy_weekly_report_day_normalized,
+            "weekly_utc": settings.autonomy_weekly_report_utc,
+        },
+        "tuning_proposals": {
+            "enabled": settings.autonomy_tuning_proposals_enabled,
+            "effective_enabled": settings.autonomy_tuning_proposals_effective_enabled,
+            "mode": "observe_and_recommend_only",
+            "ttl_days": settings.autonomy_tuning_proposal_ttl_days,
+            "auto_apply_enabled": False,
+        },
         "newswire": {
             "enabled": settings.newswire_enabled,
             "query_count": len(settings.newswire_query_terms),
@@ -500,6 +800,9 @@ def _autonomy_config_status(app: FastAPI) -> dict[str, Any]:
             "exchange_actions_enabled": settings.hyperliquid_exchange_enabled,
             "paper_only": True,
             "human_signoff_required": settings.autonomy_require_human_signoff,
+            "strategy_mutation_enabled": False,
+            "risk_limit_mutation_enabled": False,
+            "tuning_auto_apply_enabled": False,
         },
         "warnings": settings.autonomy_config_warnings(),
         "service": service_status,

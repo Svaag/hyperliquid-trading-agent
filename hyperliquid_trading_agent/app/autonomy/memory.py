@@ -1,0 +1,578 @@
+from __future__ import annotations
+
+import time
+from typing import Any
+from uuid import uuid4
+
+from hyperliquid_trading_agent.app.autonomy.schemas import (
+    CandidateLesson,
+    MemoryObservation,
+    OperatorFeedback,
+    OperatorOutputLessonMemory,
+    RoleLessonMemory,
+    SignalEvaluation,
+)
+from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.logging import get_logger
+from hyperliquid_trading_agent.app.metrics import (
+    CANDIDATE_LESSONS_CREATED,
+    MEMORY_OBSERVATIONS_CREATED,
+    OPERATOR_FEEDBACK_TOTAL,
+    ROLE_LESSONS_ACTIVE,
+    ROLE_LESSONS_ARCHIVED,
+)
+
+log = get_logger(__name__)
+
+ROLE_ORDER = ["analyst", "quant", "research", "risk", "treasury", "execution", "adversary", "judge"]
+
+
+class MemoryService:
+    """Evidence-gated persistent memory pipeline.
+
+    V1 favors fewer scoped memories over broad recall. Strategy/risk/execution/
+    capital-affecting lessons can be persisted as needs-human-review but are not
+    injected as active strategy mutation.
+    """
+
+    def __init__(self, *, settings: Settings, repository: Any = None):
+        self.settings = settings
+        self.repository = repository
+        self.observations: dict[str, MemoryObservation] = {}
+        self.candidates: dict[str, CandidateLesson] = {}
+        self.shadow_role_lessons: dict[str, RoleLessonMemory] = {}
+        self.role_lessons: dict[str, RoleLessonMemory] = {}
+        self.operator_lessons: dict[str, OperatorOutputLessonMemory] = {}
+        self.archived_lessons = 0
+        self.last_promotion_at_ms: int | None = None
+        self.last_error: str | None = None
+        self.error_count = 0
+
+    async def load(self) -> None:
+        if not self._repo_enabled():
+            return
+        try:
+            for item in await self.repository.list_candidate_lessons(status=None, limit=500):
+                self.candidates[item["id"]] = CandidateLesson(**item)
+            for item in await self.repository.list_role_lessons(status="active", limit=self.settings.autonomy_memory_role_max_active):
+                self.role_lessons[item["id"]] = RoleLessonMemory(**item)
+            for item in await self.repository.list_role_lessons(status="shadow", include_shadow=True, limit=500):
+                self.shadow_role_lessons[item["id"]] = RoleLessonMemory(**item)
+            for item in await self.repository.list_operator_output_lessons(status="active", limit=self.settings.autonomy_memory_operator_max_active):
+                self.operator_lessons[item["id"]] = OperatorOutputLessonMemory(**item)
+        except Exception as exc:  # pragma: no cover
+            self._record_error(exc)
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "enabled": self.settings.autonomy_memory_enabled,
+            "effective_enabled": self.settings.autonomy_memory_effective_enabled,
+            "observations": len(self.observations),
+            "candidate_lessons": len([item for item in self.candidates.values() if item.status == "candidate"]),
+            "shadow_lessons": len(self.shadow_role_lessons),
+            "active_role_lessons": len([item for item in self.role_lessons.values() if item.validation_status == "active"]),
+            "active_operator_lessons": len([item for item in self.operator_lessons.values() if item.validation_status == "active"]),
+            "archived_lessons": self.archived_lessons,
+            "last_promotion_at_ms": self.last_promotion_at_ms,
+            "error_count": self.error_count,
+            "last_error": self.last_error,
+        }
+
+    async def observe_signal_evaluation(self, evaluation: SignalEvaluation) -> list[CandidateLesson]:
+        if not self.settings.autonomy_memory_enabled:
+            return []
+        observation = _observation_from_evaluation(evaluation)
+        await self.record_observation(observation)
+        candidates: list[CandidateLesson] = []
+        for candidate in _candidates_from_evaluation(evaluation, observation, self.settings):
+            candidates.append(await self.upsert_candidate(candidate))
+        promoted = await self.promote_candidates()
+        return [*candidates, *promoted]
+
+    async def record_feedback(self, feedback: OperatorFeedback) -> CandidateLesson | None:
+        OPERATOR_FEEDBACK_TOTAL.labels(target_type=feedback.target_type, rating=feedback.rating).inc()
+        if self._repo_enabled():
+            await self.repository.record_operator_feedback(feedback.model_dump(mode="json"))
+            await self.repository.record_autonomy_event("operator_feedback_recorded", actor="autonomy_memory", payload={"target_type": feedback.target_type, "target_id": feedback.target_id, "rating": feedback.rating, "exchange_actions": []})
+        observation = MemoryObservation(
+            id=f"obs_{uuid4().hex}",
+            source_type="operator_feedback",
+            source_id=feedback.id,
+            observation=f"Operator marked {feedback.target_type} {feedback.target_id} as {feedback.rating}. {feedback.note}".strip(),
+            evidence=[feedback.model_dump(mode="json")],
+            severity="warning" if feedback.rating in {"bad", "wrong", "unclear", "too_noisy"} else "info",
+            created_at_ms=feedback.created_at_ms,
+            metadata={"exchange_actions": []},
+        )
+        await self.record_observation(observation)
+        if feedback.target_type in {"bot", "discord_message", "report", "signal"}:
+            candidate = CandidateLesson(
+                id=f"cand_{uuid4().hex}",
+                lesson_type="operator_output",
+                role=None,
+                scope={"target_type": feedback.target_type, "rating": feedback.rating},
+                claim=_operator_feedback_claim(feedback),
+                evidence=[feedback.model_dump(mode="json")],
+                source_observation_ids=[observation.id],
+                source_signal_ids=[feedback.target_id] if feedback.target_type == "signal" else [],
+                sample_size=1,
+                confidence=0.65 if feedback.rating in {"bad", "wrong", "good", "useful"} else 0.55,
+                expected_future_behavior_change=_operator_feedback_instruction(feedback),
+                status="candidate",
+                created_at_ms=feedback.created_at_ms,
+                expires_at_ms=feedback.created_at_ms + self.settings.autonomy_memory_candidate_ttl_days * 86_400_000,
+                metadata={"exchange_actions": []},
+            )
+            stored = await self.upsert_candidate(candidate)
+            await self.promote_candidates()
+            return stored
+        return None
+
+    async def record_observation(self, observation: MemoryObservation) -> None:
+        self.observations[observation.id] = observation
+        MEMORY_OBSERVATIONS_CREATED.labels(source_type=observation.source_type, severity=observation.severity).inc()
+        if self._repo_enabled():
+            await self.repository.record_memory_observation(observation.model_dump(mode="json"))
+            await self.repository.record_autonomy_event("memory_observation_created", actor="autonomy_memory", symbol=observation.symbol, payload={"observation_id": observation.id, "source_type": observation.source_type, "exchange_actions": []})
+
+    async def upsert_candidate(self, candidate: CandidateLesson) -> CandidateLesson:
+        existing = self._find_matching_candidate(candidate)
+        if existing is not None:
+            merged = existing.model_copy(
+                update={
+                    "sample_size": existing.sample_size + candidate.sample_size,
+                    "confidence": min(0.95, max(existing.confidence, candidate.confidence) + 0.03),
+                    "evidence": [*existing.evidence, *candidate.evidence][-20:],
+                    "source_observation_ids": _dedupe([*existing.source_observation_ids, *candidate.source_observation_ids]),
+                    "source_run_ids": _dedupe([*existing.source_run_ids, *candidate.source_run_ids]),
+                    "source_signal_ids": _dedupe([*existing.source_signal_ids, *candidate.source_signal_ids]),
+                    "expires_at_ms": max(existing.expires_at_ms, candidate.expires_at_ms),
+                }
+            )
+            self.candidates[merged.id] = merged
+            if self._repo_enabled():
+                await self.repository.upsert_candidate_lesson(merged.model_dump(mode="json"))
+            return merged
+        self.candidates[candidate.id] = candidate
+        CANDIDATE_LESSONS_CREATED.labels(lesson_type=candidate.lesson_type, role=candidate.role or "operator").inc()
+        if self._repo_enabled():
+            await self.repository.upsert_candidate_lesson(candidate.model_dump(mode="json"))
+            await self.repository.record_autonomy_event("candidate_lesson_created", actor="autonomy_memory", symbol=candidate.scope.get("symbol"), payload={"candidate_id": candidate.id, "lesson_type": candidate.lesson_type, "exchange_actions": []})
+        return candidate
+
+    async def promote_candidates(self, *, now_ms: int | None = None) -> list[CandidateLesson]:
+        now_ms = now_ms or _now_ms()
+        promoted: list[CandidateLesson] = []
+        for candidate in list(self.candidates.values()):
+            if candidate.status not in {"candidate", "shadow"}:
+                continue
+            if candidate.expires_at_ms <= now_ms:
+                expired = candidate.model_copy(update={"status": "expired"})
+                self.candidates[expired.id] = expired
+                if self._repo_enabled():
+                    await self.repository.set_candidate_lesson_status(expired.id, "expired")
+                continue
+            if _should_shadow(candidate):
+                shadow_lesson = self._role_lesson_from_candidate(candidate, status="shadow", now_ms=now_ms)
+                if shadow_lesson is not None and shadow_lesson.id not in self.shadow_role_lessons:
+                    self.shadow_role_lessons[shadow_lesson.id] = shadow_lesson
+                    await self._persist_shadow_lesson(shadow_lesson)
+                    candidate = candidate.model_copy(update={"status": "shadow"})
+                    self.candidates[candidate.id] = candidate
+                    if self._repo_enabled():
+                        await self.repository.set_candidate_lesson_status(candidate.id, "shadow")
+            if self._can_promote(candidate):
+                if candidate.lesson_type == "operator_output":
+                    operator_lesson = OperatorOutputLessonMemory(
+                        id=f"opmem_{uuid4().hex}",
+                        scope=candidate.scope,
+                        issue_or_pattern=candidate.claim,
+                        preferred_behavior=candidate.expected_future_behavior_change,
+                        bad_examples=[item for item in candidate.evidence if candidate.scope.get("rating") in {"bad", "wrong", "unclear", "too_noisy"}],
+                        good_examples=[item for item in candidate.evidence if candidate.scope.get("rating") in {"good", "useful"}],
+                        confidence=candidate.confidence,
+                        sample_size=candidate.sample_size,
+                        validation_status="active",
+                        created_at_ms=now_ms,
+                        expires_at_ms=now_ms + self.settings.autonomy_memory_process_ttl_days * 86_400_000,
+                        metadata={"source_candidate_id": candidate.id, "exchange_actions": []},
+                    )
+                    self.operator_lessons[operator_lesson.id] = operator_lesson
+                    await self._persist_operator_lesson(operator_lesson)
+                else:
+                    status = "needs_human_review" if _requires_human_review(candidate) else "active"
+                    role_lesson = self._role_lesson_from_candidate(candidate, status=status, now_ms=now_ms)
+                    if role_lesson is not None:
+                        self.role_lessons[role_lesson.id] = role_lesson
+                        ROLE_LESSONS_ACTIVE.labels(role=role_lesson.role).set(len([item for item in self.role_lessons.values() if item.role == role_lesson.role and item.validation_status == "active"]))
+                        await self._persist_role_lesson(role_lesson)
+                candidate = candidate.model_copy(update={"status": "promoted"})
+                self.candidates[candidate.id] = candidate
+                if self._repo_enabled():
+                    await self.repository.set_candidate_lesson_status(candidate.id, "promoted")
+                promoted.append(candidate)
+        if promoted:
+            self.last_promotion_at_ms = now_ms
+        return promoted
+
+    async def retrieve(
+        self,
+        *,
+        role: str | None = None,
+        symbol: str | None = None,
+        signal_type: str | None = None,
+        market_regime: str | None = None,
+        max_items: int = 8,
+    ) -> list[RoleLessonMemory]:
+        lessons = list(self.role_lessons.values())
+        if self._repo_enabled() and not lessons:
+            lessons = [RoleLessonMemory(**item) for item in await self.repository.list_role_lessons(role=role, status="active", limit=self.settings.autonomy_memory_role_max_active)]
+        scored: list[tuple[int, RoleLessonMemory]] = []
+        for lesson in lessons:
+            if lesson.validation_status != "active":
+                continue
+            if role and lesson.role != role:
+                continue
+            score = _scope_score(lesson.scope, symbol=symbol, signal_type=signal_type, market_regime=market_regime)
+            scored.append((score, lesson))
+        scored.sort(key=lambda item: (item[0], item[1].confidence, item[1].sample_size, item[1].created_at_ms), reverse=True)
+        return [item for _, item in scored[:max_items]]
+
+    async def operator_memory(self, max_items: int = 3) -> list[OperatorOutputLessonMemory]:
+        lessons = list(self.operator_lessons.values())
+        if self._repo_enabled() and not lessons:
+            lessons = [OperatorOutputLessonMemory(**item) for item in await self.repository.list_operator_output_lessons(status="active", limit=self.settings.autonomy_memory_operator_max_active)]
+        lessons = [item for item in lessons if item.validation_status == "active"]
+        lessons.sort(key=lambda item: (item.confidence, item.sample_size, item.created_at_ms), reverse=True)
+        return lessons[:max_items]
+
+    async def memory_block_for_role(self, role: str, *, symbol: str | None = None, signal_type: str | None = None, market_regime: str | None = None, max_items: int = 5) -> str:
+        lessons = await self.retrieve(role=role, symbol=symbol, signal_type=signal_type, market_regime=market_regime, max_items=max_items)
+        if not lessons:
+            return ""
+        lines = ["Relevant validated role memories:"]
+        for lesson in lessons:
+            scope = ",".join(f"{key}={value}" for key, value in lesson.scope.items() if value)
+            lines.append(f"- [{lesson.role}:{scope or 'general'}] {lesson.instruction} confidence={lesson.confidence:.2f} sample={lesson.sample_size} expires_at_ms={lesson.expires_at_ms}")
+        return "\n".join(lines)[:1500]
+
+    async def archive_expired(self, *, now_ms: int | None = None) -> int:
+        now_ms = now_ms or _now_ms()
+        archived = 0
+        for lesson in list(self.role_lessons.values()):
+            if lesson.validation_status == "active" and lesson.expires_at_ms <= now_ms:
+                updated = lesson.model_copy(update={"validation_status": "expired"})
+                self.role_lessons[lesson.id] = updated
+                await self._persist_role_lesson(updated)
+                ROLE_LESSONS_ARCHIVED.inc()
+                archived += 1
+        for operator_lesson in list(self.operator_lessons.values()):
+            if operator_lesson.validation_status == "active" and operator_lesson.expires_at_ms <= now_ms:
+                updated_operator = operator_lesson.model_copy(update={"validation_status": "expired"})
+                self.operator_lessons[operator_lesson.id] = updated_operator
+                await self._persist_operator_lesson(updated_operator)
+                archived += 1
+        self.archived_lessons += archived
+        return archived
+
+    async def list_observations(self, limit: int = 100) -> list[dict[str, Any]]:
+        if self._repo_enabled():
+            return await self.repository.list_memory_observations(limit=limit)
+        return [item.model_dump(mode="json") for item in sorted(self.observations.values(), key=lambda item: item.created_at_ms, reverse=True)[:limit]]
+
+    async def list_candidates(self, status: str | None = None, role: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self._repo_enabled():
+            return await self.repository.list_candidate_lessons(status=status, role=role, limit=limit)
+        items = list(self.candidates.values())
+        if status:
+            items = [item for item in items if item.status == status]
+        if role:
+            items = [item for item in items if item.role == role]
+        return [item.model_dump(mode="json") for item in sorted(items, key=lambda item: item.created_at_ms, reverse=True)[:limit]]
+
+    async def list_lessons(self, role: str | None = None, status: str | None = "active", include_shadow: bool = False, limit: int = 100) -> list[dict[str, Any]]:
+        if self._repo_enabled():
+            return await self.repository.list_role_lessons(role=role, status=status, include_shadow=include_shadow, limit=limit)
+        source = self.shadow_role_lessons if include_shadow else self.role_lessons
+        items = list(source.values())
+        if role:
+            items = [item for item in items if item.role == role]
+        if status:
+            items = [item for item in items if item.validation_status == status]
+        return [item.model_dump(mode="json") for item in sorted(items, key=lambda item: item.created_at_ms, reverse=True)[:limit]]
+
+    async def get_lesson(self, lesson_id: str, include_shadow: bool = True) -> dict[str, Any] | None:
+        if lesson_id in self.role_lessons:
+            return self.role_lessons[lesson_id].model_dump(mode="json")
+        if include_shadow and lesson_id in self.shadow_role_lessons:
+            return self.shadow_role_lessons[lesson_id].model_dump(mode="json")
+        if self._repo_enabled():
+            return await self.repository.get_role_lesson(lesson_id, include_shadow=include_shadow)
+        return None
+
+    async def reject_candidate(self, candidate_id: str) -> None:
+        candidate = self.candidates.get(candidate_id)
+        if candidate is not None:
+            self.candidates[candidate_id] = candidate.model_copy(update={"status": "rejected"})
+        if self._repo_enabled():
+            await self.repository.set_candidate_lesson_status(candidate_id, "rejected")
+
+    async def promote_candidate_to_shadow(self, candidate_id: str) -> RoleLessonMemory | None:
+        candidate = self.candidates.get(candidate_id)
+        if candidate is None and self._repo_enabled():
+            data = await self.repository.get_candidate_lesson(candidate_id)
+            candidate = CandidateLesson(**data) if data else None
+        if candidate is None:
+            return None
+        lesson = self._role_lesson_from_candidate(candidate, status="shadow", now_ms=_now_ms())
+        if lesson is None:
+            return None
+        self.shadow_role_lessons[lesson.id] = lesson
+        await self._persist_shadow_lesson(lesson)
+        if self._repo_enabled():
+            await self.repository.set_candidate_lesson_status(candidate_id, "shadow")
+        return lesson
+
+    async def promote_candidate_to_active(self, candidate_id: str, *, human_review_confirmed: bool = False) -> RoleLessonMemory | None:
+        candidate = self.candidates.get(candidate_id)
+        if candidate is None and self._repo_enabled():
+            data = await self.repository.get_candidate_lesson(candidate_id)
+            candidate = CandidateLesson(**data) if data else None
+        if candidate is None:
+            return None
+        if _requires_human_review(candidate) and not human_review_confirmed:
+            raise PermissionError("human_review_confirmed required for strategy/risk/execution/capital-affecting memory")
+        status = "active" if not _requires_human_review(candidate) else "needs_human_review"
+        lesson = self._role_lesson_from_candidate(candidate, status=status, now_ms=_now_ms())
+        if lesson is None:
+            return None
+        self.role_lessons[lesson.id] = lesson
+        await self._persist_role_lesson(lesson)
+        if self._repo_enabled():
+            await self.repository.set_candidate_lesson_status(candidate_id, "promoted")
+        return lesson
+
+    async def archive_lesson(self, lesson_id: str) -> None:
+        lesson = self.role_lessons.get(lesson_id)
+        if lesson is not None:
+            self.role_lessons[lesson_id] = lesson.model_copy(update={"validation_status": "archived"})
+        if self._repo_enabled():
+            await self.repository.archive_role_lesson(lesson_id)
+        self.archived_lessons += 1
+
+    def _find_matching_candidate(self, candidate: CandidateLesson) -> CandidateLesson | None:
+        for existing in self.candidates.values():
+            if existing.status not in {"candidate", "shadow"}:
+                continue
+            if existing.lesson_type == candidate.lesson_type and existing.role == candidate.role and existing.claim == candidate.claim and existing.scope == candidate.scope:
+                return existing
+        return None
+
+    def _can_promote(self, candidate: CandidateLesson) -> bool:
+        if candidate.lesson_type == "operator_output":
+            return candidate.sample_size >= self.settings.autonomy_operator_lesson_min_samples and candidate.confidence >= self.settings.autonomy_lesson_min_confidence
+        if candidate.lesson_type == "signal_quality" or _requires_human_review(candidate):
+            return candidate.sample_size >= self.settings.autonomy_signal_lesson_min_samples and candidate.confidence >= self.settings.autonomy_strategy_lesson_min_confidence
+        return candidate.sample_size >= self.settings.autonomy_role_lesson_min_samples and candidate.confidence >= self.settings.autonomy_lesson_min_confidence
+
+    def _role_lesson_from_candidate(self, candidate: CandidateLesson, *, status: str, now_ms: int) -> RoleLessonMemory | None:
+        role = candidate.role or _default_role_for_lesson(candidate.lesson_type)
+        if role not in ROLE_ORDER:
+            role = "judge"
+        ttl_days = self.settings.autonomy_memory_incident_ttl_days if candidate.lesson_type == "incident_warning" else self.settings.autonomy_memory_role_ttl_days
+        return RoleLessonMemory(
+            id=f"mem_{uuid4().hex}",
+            role=role,  # type: ignore[arg-type]
+            lesson_type=candidate.lesson_type,
+            scope=candidate.scope,
+            claim=candidate.claim,
+            instruction=candidate.expected_future_behavior_change or candidate.claim,
+            evidence=candidate.evidence,
+            source_candidate_id=candidate.id,
+            source_run_ids=candidate.source_run_ids,
+            source_signal_ids=candidate.source_signal_ids,
+            confidence=candidate.confidence,
+            sample_size=candidate.sample_size,
+            counterexamples=candidate.counterexamples,
+            validation_status=status,  # type: ignore[arg-type]
+            strategy_affecting=candidate.strategy_affecting,
+            risk_affecting=candidate.risk_affecting,
+            execution_affecting=candidate.execution_affecting,
+            capital_allocation_affecting=candidate.capital_allocation_affecting,
+            created_at_ms=now_ms,
+            activated_at_ms=now_ms if status == "active" else None,
+            expires_at_ms=now_ms + ttl_days * 86_400_000,
+            metadata={"source": "evidence_gated_memory_pipeline", "exchange_actions": []},
+        )
+
+    async def _persist_shadow_lesson(self, lesson: RoleLessonMemory) -> None:
+        if self._repo_enabled():
+            await self.repository.upsert_shadow_role_lesson(lesson.model_dump(mode="json"))
+            await self.repository.record_autonomy_event("shadow_lesson_created", actor="autonomy_memory", symbol=lesson.scope.get("symbol"), payload={"lesson_id": lesson.id, "role": lesson.role, "exchange_actions": []})
+
+    async def _persist_role_lesson(self, lesson: RoleLessonMemory) -> None:
+        if self._repo_enabled():
+            await self.repository.upsert_role_lesson(lesson.model_dump(mode="json"))
+            await self.repository.record_autonomy_event("role_lesson_promoted", actor="autonomy_memory", symbol=lesson.scope.get("symbol"), payload={"lesson_id": lesson.id, "role": lesson.role, "validation_status": lesson.validation_status, "exchange_actions": []})
+
+    async def _persist_operator_lesson(self, lesson: OperatorOutputLessonMemory) -> None:
+        if self._repo_enabled():
+            await self.repository.upsert_operator_output_lesson(lesson.model_dump(mode="json"))
+            await self.repository.record_autonomy_event("operator_output_lesson_promoted", actor="autonomy_memory", payload={"lesson_id": lesson.id, "exchange_actions": []})
+
+    def _repo_enabled(self) -> bool:
+        return self.repository is not None and getattr(self.repository, "enabled", False)
+
+    def _record_error(self, exc: Exception) -> None:
+        self.error_count += 1
+        self.last_error = type(exc).__name__
+        log.warning("memory_service_error", error=type(exc).__name__)
+
+
+def _observation_from_evaluation(evaluation: SignalEvaluation) -> MemoryObservation:
+    outcome = evaluation.terminal_outcome
+    r_text = "n/a" if evaluation.realized_or_marked_r is None else f"{evaluation.realized_or_marked_r:.2f}R"
+    return MemoryObservation(
+        id=f"obs_{uuid4().hex}",
+        source_type="signal_evaluation",
+        source_id=evaluation.id,
+        symbol=evaluation.symbol,
+        signal_type=evaluation.signal_type,
+        market_regime=evaluation.market_regime,
+        observation=f"{evaluation.symbol} {evaluation.side} {evaluation.signal_type} completed as {outcome} with marked result {r_text}; MFE={evaluation.max_favorable_r}, MAE={evaluation.max_adverse_r}.",
+        evidence=[evaluation.model_dump(mode="json", exclude={"marks"})],
+        severity="warning" if outcome == "stop_hit" else "info",
+        created_at_ms=_now_ms(),
+        metadata={"exchange_actions": []},
+    )
+
+
+def _candidates_from_evaluation(evaluation: SignalEvaluation, observation: MemoryObservation, settings: Settings) -> list[CandidateLesson]:
+    candidates: list[CandidateLesson] = []
+    now_ms = _now_ms()
+    base: dict[str, Any] = {
+        "scope": {"symbol": evaluation.symbol, "signal_type": evaluation.signal_type, "market_regime": evaluation.market_regime},
+        "evidence": observation.evidence,
+        "source_observation_ids": [observation.id],
+        "source_signal_ids": [evaluation.signal_id],
+        "sample_size": 1,
+        "created_at_ms": now_ms,
+        "expires_at_ms": now_ms + settings.autonomy_memory_candidate_ttl_days * 86_400_000,
+        "metadata": {"exchange_actions": []},
+    }
+    if evaluation.terminal_outcome == "stop_hit":
+        candidates.append(
+            CandidateLesson(
+                id=f"cand_{uuid4().hex}",
+                lesson_type="risk_discipline",
+                role="risk",
+                claim=f"{evaluation.symbol} {evaluation.signal_type} signals are hitting stops before thesis completion in this scope.",
+                confidence=0.62,
+                expected_future_behavior_change="Check stop distance versus recent volatility/noise before supporting similar setups; escalate weak invalidation to Judge.",
+                risk_affecting=True,
+                **base,
+            )
+        )
+    if evaluation.terminal_outcome == "tp_hit" or (evaluation.max_favorable_r or 0) >= 1.5:
+        candidates.append(
+            CandidateLesson(
+                id=f"cand_{uuid4().hex}",
+                lesson_type="role_behavior",
+                role="analyst",
+                claim=f"{evaluation.symbol} {evaluation.signal_type} produced favorable excursion in this regime.",
+                confidence=0.60,
+                expected_future_behavior_change="When similar scoped evidence repeats, preserve the thesis structure and clearly state why-now, entry, invalidation, and expected path.",
+                **base,
+            )
+        )
+    if evaluation.rejected and (evaluation.opportunity_cost_r or 0) >= 1:
+        candidates.append(
+            CandidateLesson(
+                id=f"cand_{uuid4().hex}",
+                lesson_type="signal_quality",
+                role="judge",
+                claim=f"Rejected {evaluation.symbol} {evaluation.signal_type} signals in this scope can have material opportunity cost.",
+                confidence=0.58,
+                expected_future_behavior_change="Review rejection reasons against actual MFE before tightening similar filters; emit only as a tuning proposal after higher sample size.",
+                strategy_affecting=True,
+                **base,
+            )
+        )
+    if evaluation.stop <= 0 or evaluation.entry == evaluation.stop:
+        candidates.append(
+            CandidateLesson(
+                id=f"cand_{uuid4().hex}",
+                lesson_type="incident_warning",
+                role="risk",
+                claim="A signal evaluation had invalid stop geometry.",
+                confidence=0.90,
+                expected_future_behavior_change="Hard-veto signals with missing or zero-distance stops; do not report R-multiple without valid stop geometry.",
+                risk_affecting=True,
+                **base,
+            )
+        )
+    return candidates
+
+
+def _operator_feedback_claim(feedback: OperatorFeedback) -> str:
+    if feedback.rating in {"good", "useful"}:
+        return "Operator found this output/action format useful."
+    if feedback.rating == "too_noisy":
+        return "Operator flagged output as too noisy."
+    if feedback.rating == "unclear":
+        return "Operator flagged output as unclear."
+    return "Operator flagged output as low quality or wrong."
+
+
+def _operator_feedback_instruction(feedback: OperatorFeedback) -> str:
+    note = f" Specific note: {feedback.note}" if feedback.note else ""
+    if feedback.rating in {"good", "useful"}:
+        return f"Reuse the concise structure that made this output actionable.{note}"
+    if feedback.rating == "too_noisy":
+        return f"Reduce repeated boilerplate and lead with actionable deltas.{note}"
+    if feedback.rating == "unclear":
+        return f"Use clearer labels, exact IDs, risk context, and next commands.{note}"
+    return f"Avoid repeating the flagged pattern; include evidence and distinguish fact from inference.{note}"
+
+
+def _requires_human_review(candidate: CandidateLesson) -> bool:
+    return candidate.strategy_affecting or candidate.risk_affecting or candidate.execution_affecting or candidate.capital_allocation_affecting
+
+
+def _should_shadow(candidate: CandidateLesson) -> bool:
+    return candidate.confidence >= 0.50 and candidate.status == "candidate"
+
+
+def _default_role_for_lesson(lesson_type: str) -> str:
+    return {
+        "signal_quality": "quant",
+        "risk_discipline": "risk",
+        "operator_output": "judge",
+        "data_quality": "research",
+        "incident_warning": "adversary",
+    }.get(lesson_type, "analyst")
+
+
+def _scope_score(scope: dict[str, Any], *, symbol: str | None, signal_type: str | None, market_regime: str | None) -> int:
+    score = 0
+    if symbol and str(scope.get("symbol") or "").upper() == symbol.upper():
+        score += 4
+    if signal_type and scope.get("signal_type") == signal_type:
+        score += 3
+    if market_regime and scope.get("market_regime") == market_regime:
+        score += 2
+    return score
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)

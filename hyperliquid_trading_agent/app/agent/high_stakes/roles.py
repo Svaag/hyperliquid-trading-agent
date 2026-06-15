@@ -17,6 +17,7 @@ from hyperliquid_trading_agent.app.agent.high_stakes.schemas import (
     TradeSetupDraft,
 )
 from hyperliquid_trading_agent.app.agent.model_gateway import ModelGateway
+from hyperliquid_trading_agent.app.autonomy.role_contracts import role_contract_block
 from hyperliquid_trading_agent.app.config import Settings
 
 
@@ -31,21 +32,22 @@ class RoleCallResult:
 
 
 class HighStakesRoleRunner:
-    def __init__(self, model_gateway: ModelGateway, settings: Settings):
+    def __init__(self, model_gateway: ModelGateway, settings: Settings, memory_service: Any | None = None):
         self.model_gateway = model_gateway
         self.settings = settings
+        self.memory_service = memory_service
 
     async def draft_setup(self, state: dict[str, Any]) -> RoleCallResult:
         started = time.perf_counter()
         try:
             response = await self._complete_structured_with_timeout(
                 role_user_prompt("analyst", self.settings.high_stakes_prompt_style),
-                role_system_prompt("analyst", self.settings.high_stakes_prompt_style),
+                self._system_prompt("analyst"),
                 TradeSetupDraft,
                 model_chain=self.settings.role_model_chain("analyst"),
                 temperature=0.15,
                 max_tokens=1400,
-                context={"state": compact_context(_state_for_model(state))},
+                context={"state": compact_context(await self._state_for_role_model("analyst", state))},
                 timeout_seconds=self._role_timeout_seconds(state),
             )
             return RoleCallResult(response.parsed, response.raw_content, response.model, response.provider, _elapsed_ms(started))
@@ -63,12 +65,12 @@ class HighStakesRoleRunner:
         try:
             response = await self._complete_structured_with_timeout(
                 role_user_prompt(role, self.settings.high_stakes_prompt_style),
-                role_system_prompt(role, self.settings.high_stakes_prompt_style),
+                self._system_prompt(role),
                 RoleOpinion,
                 model_chain=self.settings.role_model_chain(role),
                 temperature=0.1,
                 max_tokens=1400,
-                context={"state": compact_context(_state_for_model(state))},
+                context={"state": compact_context(await self._state_for_role_model(role, state))},
                 timeout_seconds=self._role_timeout_seconds(state),
             )
             parsed = response.parsed
@@ -86,12 +88,12 @@ class HighStakesRoleRunner:
         try:
             response = await self._complete_structured_with_timeout(
                 role_user_prompt("judge", self.settings.high_stakes_prompt_style),
-                role_system_prompt("judge", self.settings.high_stakes_prompt_style),
+                self._system_prompt("judge"),
                 JudgeDecision,
                 model_chain=self.settings.role_model_chain("judge"),
                 temperature=0.05,
                 max_tokens=1600,
-                context={"state": compact_context(_state_for_model(state))},
+                context={"state": compact_context(await self._state_for_role_model("judge", state))},
                 timeout_seconds=self._role_timeout_seconds(state),
             )
             decision = response.parsed
@@ -101,6 +103,37 @@ class HighStakesRoleRunner:
         except Exception as exc:
             decision = fallback_judge(state, reason=_error_reason(exc))
             return RoleCallResult(decision, decision.model_dump_json(), None, None, _elapsed_ms(started), status="fallback")
+
+    def _system_prompt(self, role: str) -> str:
+        contract = role_contract_block(role)
+        base = role_system_prompt(role, self.settings.high_stakes_prompt_style)
+        return f"{base}\n\n{contract}" if contract else base
+
+    async def _state_for_role_model(self, role: str, state: dict[str, Any]) -> dict[str, Any]:
+        data = _state_for_model(state)
+        data["role_contract"] = role_contract_block(role)
+        data["persistent_memory"] = await self._memory_block(role, state)
+        data["memory_policy"] = "Persistent memories are advisory context only. Do not auto-change strategy, sizing, risk limits, thresholds, cooldowns, or execution behavior from memory."
+        return data
+
+    async def _memory_block(self, role: str, state: dict[str, Any]) -> str:
+        if self.memory_service is None:
+            return ""
+        block = getattr(self.memory_service, "memory_block_for_role", None)
+        if not callable(block):
+            return ""
+        route = state.get("route")
+        coins = getattr(route, "coins", []) or []
+        symbol = coins[0] if coins else None
+        context = state.get("context")
+        features = getattr(context, "features", {}) if context else {}
+        parsed = features.get("parsed_setup", {}) if isinstance(features, dict) else {}
+        signal_type = parsed.get("signal_type") if isinstance(parsed, dict) else None
+        market_regime = features.get("risk_regime") if isinstance(features, dict) else None
+        try:
+            return await block(role, symbol=symbol, signal_type=signal_type, market_regime=market_regime, max_items=5)
+        except Exception:
+            return ""
 
     async def _complete_structured_with_timeout(self, *args: Any, **kwargs: Any):
         # Free/dev models can hang or return malformed JSON. Keep each role on a

@@ -22,6 +22,14 @@ VolatilityRegime = Literal["low", "normal", "high", "unknown"]
 RiskRegime = Literal["risk_on", "risk_off", "mixed", "unknown"]
 SignalStatus = Literal["candidate", "posted", "approved", "rejected", "expired", "paper_ordered", "cancelled"]
 SignalSide = Literal["long", "short"]
+SignalEvaluationStatus = Literal["open", "complete", "partial", "expired_no_data", "error"]
+SignalTerminalOutcome = Literal["tp_hit", "stop_hit", "expired_positive", "expired_negative", "expired_flat", "insufficient_data", "open"]
+SignalEvaluationMarkStatus = Literal["pending", "marked", "missed_no_price", "error"]
+EvaluationHorizon = Literal["5m", "15m", "1h", "4h", "24h", "72h", "expiry"]
+RoleName = Literal["analyst", "quant", "research", "risk", "treasury", "execution", "adversary", "judge"]
+LessonType = Literal["role_behavior", "signal_quality", "risk_discipline", "operator_output", "data_quality", "incident_warning"]
+LessonValidationStatus = Literal["active", "needs_human_review", "shadow", "archived", "expired", "rejected"]
+TuningProposalStatus = Literal["draft", "proposed", "accepted_manually", "rejected", "expired", "superseded"]
 Sentiment = Literal["bullish", "bearish", "mixed", "unknown"]
 Freshness = Literal["breaking", "fresh", "stale"]
 OrderStatus = Literal["new", "filled", "cancelled", "rejected"]
@@ -262,8 +270,35 @@ class PortfolioSnapshot(BaseModel):
 
 
 class AutonomyCommand(BaseModel):
-    action: Literal["approve", "reject", "signal", "signals", "portfolio", "positions", "orders", "market_map", "pause", "resume"]
+    action: Literal[
+        "approve",
+        "reject",
+        "signal",
+        "signals",
+        "portfolio",
+        "positions",
+        "orders",
+        "market_map",
+        "pause",
+        "resume",
+        "daily_report",
+        "weekly_report",
+        "token_capital",
+        "signal_outcome",
+        "feedback_signal",
+        "feedback_bot",
+        "memories",
+        "memory",
+        "tuning_proposals",
+        "tuning_proposal",
+        "apply_tuning_proposal",
+    ]
     signal_id: str | None = None
+    lesson_id: str | None = None
+    proposal_id: str | None = None
+    role: str | None = None
+    rating: str | None = None
+    note: str = ""
 
 
 class AutonomyServiceStatus(BaseModel):
@@ -279,3 +314,215 @@ class AutonomyServiceStatus(BaseModel):
     last_iteration_at_ms: int | None = None
     last_error: str | None = None
     paper_portfolio_id: str | None = None
+
+
+class SignalEvaluationMark(BaseModel):
+    id: str
+    evaluation_id: str
+    signal_id: str
+    symbol: str
+    horizon: str
+    due_at_ms: int
+    marked_at_ms: int | None = None
+    price: float | None = None
+    direction_adjusted_return_bps: float | None = None
+    r_multiple: float | None = None
+    mfe_bps_until_mark: float | None = None
+    mae_bps_until_mark: float | None = None
+    mfe_r_until_mark: float | None = None
+    mae_r_until_mark: float | None = None
+    stop_hit_before_mark: bool = False
+    take_profit_hit_before_mark: bool = False
+    status: SignalEvaluationMarkStatus = "pending"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SignalEvaluation(BaseModel):
+    id: str
+    signal_id: str
+    symbol: str
+    side: SignalSide
+    signal_type: str
+    status: SignalEvaluationStatus = "open"
+    created_at_ms: int
+    completed_at_ms: int | None = None
+    entry: float
+    stop: float
+    take_profit: float | None = None
+    signal_score: float
+    signal_confidence: float
+    signal_status_at_eval_start: str
+    first_price: float | None = None
+    latest_price: float | None = None
+    latest_price_at_ms: int | None = None
+    max_favorable_price: float | None = None
+    max_adverse_price: float | None = None
+    max_favorable_bps: float | None = None
+    max_adverse_bps: float | None = None
+    max_favorable_r: float | None = None
+    max_adverse_r: float | None = None
+    stop_hit: bool = False
+    stop_hit_at_ms: int | None = None
+    take_profit_hit: bool = False
+    take_profit_hit_at_ms: int | None = None
+    terminal_outcome: SignalTerminalOutcome = "open"
+    realized_or_marked_r: float | None = None
+    opportunity_cost_r: float | None = None
+    approved: bool = False
+    rejected: bool = False
+    paper_ordered: bool = False
+    paper_position_id: str | None = None
+    feature_snapshot: dict[str, Any] = Field(default_factory=dict)
+    evidence_snapshot: list[dict[str, Any]] = Field(default_factory=list)
+    market_regime: str = "unknown"
+    error: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    marks: list[SignalEvaluationMark] = Field(default_factory=list)
+
+
+class MemoryObservation(BaseModel):
+    id: str
+    source_type: Literal["signal_evaluation", "daily_report", "weekly_report", "operator_feedback", "role_output", "schema_validation", "incident"]
+    source_id: str
+    role: str | None = None
+    symbol: str | None = None
+    signal_type: str | None = None
+    market_regime: str | None = None
+    observation: str
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    severity: Literal["info", "warning", "critical"] = "info"
+    created_at_ms: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CandidateLesson(BaseModel):
+    id: str
+    lesson_type: LessonType
+    role: str | None = None
+    scope: dict[str, Any] = Field(default_factory=dict)
+    claim: str
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    source_observation_ids: list[str] = Field(default_factory=list)
+    source_run_ids: list[str] = Field(default_factory=list)
+    source_signal_ids: list[str] = Field(default_factory=list)
+    sample_size: int = 0
+    counterexamples: list[dict[str, Any]] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    expected_future_behavior_change: str = ""
+    strategy_affecting: bool = False
+    risk_affecting: bool = False
+    execution_affecting: bool = False
+    capital_allocation_affecting: bool = False
+    status: Literal["candidate", "shadow", "promoted", "rejected", "expired"] = "candidate"
+    created_at_ms: int
+    expires_at_ms: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RoleLessonMemory(BaseModel):
+    id: str
+    role: RoleName
+    lesson_type: str
+    scope: dict[str, Any] = Field(default_factory=dict)
+    claim: str
+    instruction: str
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    source_candidate_id: str | None = None
+    source_run_ids: list[str] = Field(default_factory=list)
+    source_signal_ids: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    sample_size: int = 0
+    counterexamples: list[dict[str, Any]] = Field(default_factory=list)
+    validation_status: LessonValidationStatus = "active"
+    strategy_affecting: bool = False
+    risk_affecting: bool = False
+    execution_affecting: bool = False
+    capital_allocation_affecting: bool = False
+    created_at_ms: int
+    activated_at_ms: int | None = None
+    expires_at_ms: int
+    last_revalidated_at_ms: int | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorOutputLessonMemory(BaseModel):
+    id: str
+    scope: dict[str, Any] = Field(default_factory=dict)
+    issue_or_pattern: str
+    preferred_behavior: str
+    bad_examples: list[dict[str, Any]] = Field(default_factory=list)
+    good_examples: list[dict[str, Any]] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    sample_size: int = 0
+    validation_status: LessonValidationStatus = "active"
+    created_at_ms: int
+    expires_at_ms: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorFeedback(BaseModel):
+    id: str
+    source: Literal["discord", "api"] = "api"
+    actor_id: str | None = None
+    target_type: Literal["signal", "report", "lesson", "discord_message", "tuning_proposal", "bot"]
+    target_id: str
+    rating: Literal["good", "bad", "unclear", "too_noisy", "useful", "wrong"]
+    note: str = ""
+    created_at_ms: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TuningProposal(BaseModel):
+    id: str
+    proposal_type: Literal["threshold_change", "weight_change", "cooldown_change", "risk_rule_change", "universe_change", "messaging_change", "data_quality_gate", "role_prompt_change"]
+    status: TuningProposalStatus = "draft"
+    title: str
+    summary: str
+    affected_scope: dict[str, Any] = Field(default_factory=dict)
+    current_behavior: dict[str, Any] = Field(default_factory=dict)
+    proposed_diff: dict[str, Any] = Field(default_factory=dict)
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    source_lesson_ids: list[str] = Field(default_factory=list)
+    source_signal_ids: list[str] = Field(default_factory=list)
+    expected_impact: str
+    risk_assessment: str
+    blast_radius: Literal["low", "medium", "high"] = "low"
+    rollback_plan: str
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    sample_size: int = 0
+    created_at_ms: int
+    expires_at_ms: int
+    evaluation_window: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TokenCapitalSnapshot(BaseModel):
+    id: str
+    timestamp_ms: int
+    window: Literal["daily", "weekly", "rolling_30d"] = "daily"
+    total_score: float = Field(ge=0.0, le=100.0)
+    risk_adjusted_performance_score: float = Field(ge=0.0, le=100.0)
+    signal_quality_score: float = Field(ge=0.0, le=100.0)
+    memory_compounding_score: float = Field(ge=0.0, le=100.0)
+    risk_discipline_score: float = Field(ge=0.0, le=100.0)
+    operator_communication_score: float = Field(ge=0.0, le=100.0)
+    reliability_score: float = Field(ge=0.0, le=100.0)
+    hard_gate_penalties: list[dict[str, Any]] = Field(default_factory=list)
+    component_details: dict[str, Any] = Field(default_factory=dict)
+    created_from_report_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AutonomyReport(BaseModel):
+    id: str
+    report_type: Literal["daily", "weekly"]
+    key: str
+    period_start_ms: int
+    period_end_ms: int
+    generated_at_ms: int
+    token_capital: TokenCapitalSnapshot
+    summary: str
+    report: dict[str, Any] = Field(default_factory=dict)
+    discord_channel_id: str | None = None
+    discord_message_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)

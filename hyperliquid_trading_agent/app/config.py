@@ -26,6 +26,9 @@ DEFAULT_RSS_FEEDS = (
     ",https://cointelegraph.com/rss"
     ",https://www.federalreserve.gov/feeds/press_all.xml"
 )
+DEFAULT_AUTONOMY_EVAL_HORIZONS = "15m,1h,4h,24h,expiry"
+AUTONOMY_ALLOWED_EVAL_HORIZONS = {"5m", "15m", "1h", "4h", "24h", "72h", "expiry"}
+AUTONOMY_WEEKDAYS = {"MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"}
 
 
 class Settings(BaseSettings):
@@ -124,6 +127,33 @@ class Settings(BaseSettings):
     autonomy_model_insights_enabled: bool = True
     autonomy_model_insight_min_score: float = 80.0
     autonomy_model_max_calls_per_hour: int = 12
+
+    autonomy_evaluation_enabled: bool = True
+    autonomy_memory_enabled: bool = True
+    autonomy_reports_enabled: bool = True
+    autonomy_eval_horizons: str = DEFAULT_AUTONOMY_EVAL_HORIZONS
+    autonomy_eval_max_open_signals: int = 500
+    autonomy_eval_price_source: Literal["allMids"] = "allMids"
+    autonomy_daily_report_enabled: bool = True
+    autonomy_daily_report_utc: str = "00:05"
+    autonomy_weekly_report_enabled: bool = True
+    autonomy_weekly_report_day: str = "MON"
+    autonomy_weekly_report_utc: str = "00:30"
+    autonomy_memory_role_max_active: int = 200
+    autonomy_memory_operator_max_active: int = 100
+    autonomy_memory_candidate_ttl_days: int = 30
+    autonomy_memory_shadow_ttl_days: int = 60
+    autonomy_memory_role_ttl_days: int = 30
+    autonomy_memory_process_ttl_days: int = 90
+    autonomy_memory_incident_ttl_days: int = 14
+    autonomy_role_lesson_min_samples: int = 5
+    autonomy_operator_lesson_min_samples: int = 3
+    autonomy_signal_lesson_min_samples: int = 20
+    autonomy_lesson_min_confidence: float = 0.70
+    autonomy_strategy_lesson_min_confidence: float = 0.75
+    autonomy_tuning_proposals_enabled: bool = True
+    autonomy_tuning_proposal_ttl_days: int = 14
+
     newswire_enabled: bool = True
     newswire_queries: str = "BTC,ETH,HYPE,Hyperliquid,Fed,CPI,FOMC,crypto liquidation"
     x_watchlist_user_ids: str = ""
@@ -222,6 +252,30 @@ class Settings(BaseSettings):
         return _csv_ints(self.autonomy_admin_role_ids)
 
     @property
+    def autonomy_eval_horizon_list(self) -> list[str]:
+        return [item.lower() for item in _csv(self.autonomy_eval_horizons)]
+
+    @property
+    def autonomy_weekly_report_day_normalized(self) -> str:
+        return self.autonomy_weekly_report_day.strip().upper()
+
+    @property
+    def autonomy_evaluation_effective_enabled(self) -> bool:
+        return self.autonomy_enabled and self.autonomy_evaluation_enabled
+
+    @property
+    def autonomy_memory_effective_enabled(self) -> bool:
+        return self.autonomy_enabled and self.autonomy_memory_enabled
+
+    @property
+    def autonomy_reports_effective_enabled(self) -> bool:
+        return self.autonomy_enabled and self.autonomy_reports_enabled
+
+    @property
+    def autonomy_tuning_proposals_effective_enabled(self) -> bool:
+        return self.autonomy_enabled and self.autonomy_tuning_proposals_enabled
+
+    @property
     def newswire_query_terms(self) -> list[str]:
         return _csv(self.newswire_queries)
 
@@ -239,6 +293,38 @@ class Settings(BaseSettings):
             warnings.append("AUTONOMY_MAX_HOT_L2_ASSETS exceeds AUTONOMY_MAX_TRACKED_ASSETS")
         if not self.autonomy_core_symbols:
             warnings.append("AUTONOMY_CORE_UNIVERSE is empty")
+        if self.autonomy_evaluation_enabled:
+            invalid_horizons = [item for item in self.autonomy_eval_horizon_list if item not in AUTONOMY_ALLOWED_EVAL_HORIZONS]
+            if not self.autonomy_eval_horizon_list:
+                warnings.append("AUTONOMY_EVAL_HORIZONS is empty")
+            if invalid_horizons:
+                warnings.append(f"AUTONOMY_EVAL_HORIZONS contains unsupported horizons: {','.join(invalid_horizons)}")
+            if self.autonomy_eval_max_open_signals <= 0:
+                warnings.append("AUTONOMY_EVAL_MAX_OPEN_SIGNALS must be positive")
+        if self.autonomy_reports_enabled:
+            if self.autonomy_daily_report_enabled and not _valid_hhmm(self.autonomy_daily_report_utc):
+                warnings.append("AUTONOMY_DAILY_REPORT_UTC must be HH:MM")
+            if self.autonomy_weekly_report_enabled:
+                if self.autonomy_weekly_report_day_normalized not in AUTONOMY_WEEKDAYS:
+                    warnings.append("AUTONOMY_WEEKLY_REPORT_DAY must be one of MON,TUE,WED,THU,FRI,SAT,SUN")
+                if not _valid_hhmm(self.autonomy_weekly_report_utc):
+                    warnings.append("AUTONOMY_WEEKLY_REPORT_UTC must be HH:MM")
+        if self.autonomy_memory_enabled:
+            ttl_values = {
+                "AUTONOMY_MEMORY_CANDIDATE_TTL_DAYS": self.autonomy_memory_candidate_ttl_days,
+                "AUTONOMY_MEMORY_SHADOW_TTL_DAYS": self.autonomy_memory_shadow_ttl_days,
+                "AUTONOMY_MEMORY_ROLE_TTL_DAYS": self.autonomy_memory_role_ttl_days,
+                "AUTONOMY_MEMORY_PROCESS_TTL_DAYS": self.autonomy_memory_process_ttl_days,
+                "AUTONOMY_MEMORY_INCIDENT_TTL_DAYS": self.autonomy_memory_incident_ttl_days,
+                "AUTONOMY_TUNING_PROPOSAL_TTL_DAYS": self.autonomy_tuning_proposal_ttl_days,
+            }
+            for name, value in ttl_values.items():
+                if value <= 0:
+                    warnings.append(f"{name} must be positive")
+            if self.autonomy_lesson_min_confidence < 0 or self.autonomy_lesson_min_confidence > 1:
+                warnings.append("AUTONOMY_LESSON_MIN_CONFIDENCE must be between 0 and 1")
+            if self.autonomy_strategy_lesson_min_confidence < 0 or self.autonomy_strategy_lesson_min_confidence > 1:
+                warnings.append("AUTONOMY_STRATEGY_LESSON_MIN_CONFIDENCE must be between 0 and 1")
         return warnings
 
     def role_model_chain(self, role: str) -> list[str]:
@@ -327,6 +413,13 @@ def _csv_ints(value: str) -> set[int]:
         except ValueError:
             continue
     return result
+
+
+def _valid_hhmm(value: str) -> bool:
+    hour, sep, minute = value.strip().partition(":")
+    if sep != ":" or not hour.isdigit() or not minute.isdigit():
+        return False
+    return 0 <= int(hour) <= 23 and 0 <= int(minute) <= 59
 
 
 def _alias_map(value: str) -> dict[str, list[str]]:
