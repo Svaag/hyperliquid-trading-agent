@@ -8,7 +8,13 @@ from hyperliquid_trading_agent.app.autonomy.levels import infer_liquidation_clus
 from hyperliquid_trading_agent.app.autonomy.market_map import MarketMapReducer
 from hyperliquid_trading_agent.app.autonomy.orderflow import compute_orderflow_state
 from hyperliquid_trading_agent.app.autonomy.portfolio import PaperPortfolioService
-from hyperliquid_trading_agent.app.autonomy.schemas import MarketAsset, MarketLevel, NewsEvent, TradeSignal
+from hyperliquid_trading_agent.app.autonomy.schemas import (
+    MarketAsset,
+    MarketLevel,
+    NewsEvent,
+    SignalEvidence,
+    TradeSignal,
+)
 from hyperliquid_trading_agent.app.autonomy.signals import SignalEngine, risk_vetoes
 from hyperliquid_trading_agent.app.autonomy.universe import MarketUniverseResolver
 from hyperliquid_trading_agent.app.config import Settings
@@ -227,6 +233,59 @@ def test_discord_autonomy_command_parser_and_alert_format():
     content = format_signal_alert(signal)
     assert "approve signal sig_abc" in content
     assert "No live trade will be placed" in content
+
+
+def test_parse_autonomy_command_bare_approve_via_reply():
+    from types import SimpleNamespace
+    referenced = SimpleNamespace(content="🚨 AI Trading Signal — SOL LONG ... `approve signal sig_demo_xyz`")
+    cmd = parse_autonomy_command("approve", referenced_message=referenced)
+    assert cmd is not None
+    assert cmd.action == "approve"
+    assert cmd.signal_id == "sig_demo_xyz"
+
+    cmd2 = parse_autonomy_command("reject", referenced_message=referenced)
+    assert cmd2 is not None
+    assert cmd2.action == "reject"
+    assert cmd2.signal_id == "sig_demo_xyz"
+
+    # bare "approve" without a reply should NOT trigger an autonomy command
+    assert parse_autonomy_command("approve") is None
+    assert parse_autonomy_command("approve", referenced_message=SimpleNamespace(content="hello there")) is None
+
+
+def test_format_signal_alert_renders_funding_as_percentage():
+    signal = TradeSignal(
+        id="sig_funding",
+        symbol="ETH",
+        side="long",
+        signal_type="funding_oi_squeeze",
+        score=78,
+        confidence=0.82,
+        created_at_ms=1,
+        expires_at_ms=60 * 60 * 1000,
+        entry=3500,
+        stop=3450,
+        take_profit=3650,
+        invalidation="below 3450",
+        thesis="funding flip",
+        risk_plan={"rr": 2, "exchange_actions": []},
+        evidence=[
+            SignalEvidence(category="funding_oi", label="funding/OI", value=1.25e-05, source="funding", kind="funding_hourly"),
+            SignalEvidence(category="funding_oi", label="funding/OI", value=-2.5e-05, source="funding", kind="funding_hourly"),
+            SignalEvidence(category="orderflow", label="depth/imbalance/spread", value=12.3, source="orderflow", kind="number"),
+            SignalEvidence(category="risk_reward", label="reward:risk", value=2.0, source="risk", kind="ratio"),
+        ],
+    )
+    content = format_signal_alert(signal)
+    # funding value 1.25e-05 should render as +0.0013%/hr (4 decimals)
+    assert "0.0013%/hr" in content or "0.0012%/hr" in content
+    # negative funding should keep a minus sign
+    assert "-0.0025%/hr" in content
+    # ratio kind uses "x" suffix
+    assert "2.00x" in content
+    # raw evidence label still present
+    assert "funding/OI" in content
+
 
 
 def test_autonomy_api_requires_auth_outside_dev_and_no_execution_guardrail():

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Protocol
+from typing import Any, Protocol
 
 from hyperliquid_trading_agent.app.autonomy.schemas import (
     AutonomyCommand,
@@ -11,6 +11,55 @@ from hyperliquid_trading_agent.app.autonomy.schemas import (
     PortfolioSnapshot,
     TradeSignal,
 )
+
+_SIGNAL_ID_RE = re.compile(r"\b(sig_[a-zA-Z0-9_]+)\b")
+
+
+def _infer_signal_id_from_message(message: Any) -> str | None:
+    """Extract a signal id from a referenced message's content.
+
+    Looks for ``sig_xxx`` patterns in the referenced message text. The
+    signal alert format includes both ``approve signal <id>`` and
+    ``approve flip <id>`` so any of those patterns are accepted.
+    """
+    if message is None:
+        return None
+    content = getattr(message, "content", None)
+    if not content:
+        return None
+    matches = _SIGNAL_ID_RE.findall(content)
+    if matches:
+        return matches[0]
+    return None
+
+
+def _format_evidence_value(value: Any, kind: str) -> str:
+    if value is None or value == "":
+        return "n/a"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, (int, float)):
+        return str(value)
+    if kind == "pct":
+        sign = "+" if value > 0 else ""
+        return f"{sign}{value:.4f}%"
+    if kind == "bps":
+        sign = "+" if value > 0 else ""
+        return f"{sign}{value:.2f} bps"
+    if kind == "ratio":
+        return f"{value:.2f}x"
+    if kind == "funding_hourly":
+        pct_hr = value * 100
+        pct_day = pct_hr * 24
+        sign = "+" if value > 0 else ""
+        return f"{sign}{pct_hr:.4f}%/hr (~{pct_day:+.3f}%/day)"
+    if kind == "number":
+        if abs(value) >= 1:
+            return f"{value:.2f}"
+        return f"{value:.4g}"
+    return str(value)
 
 
 class AutonomyAlertSink(Protocol):
@@ -25,12 +74,20 @@ class DiscordAutonomyAlertSink:
         return await self.bot.send_channel_message(channel_id, content)
 
 
-def parse_autonomy_command(prompt: str) -> AutonomyCommand | None:
+def parse_autonomy_command(prompt: str, referenced_message: Any = None) -> AutonomyCommand | None:
     normalized = " ".join(prompt.strip().split())
     lowered = normalized.lower()
     match = re.match(r"^(approve|reject)\s+signal\s+([a-zA-Z0-9_:-]+)$", lowered)
     if match:
         return AutonomyCommand(action=match.group(1), signal_id=match.group(2))  # type: ignore[arg-type]
+    if lowered in {"approve", "approve.", "approve!", "lgtm", "yes"} and referenced_message is not None:
+        inferred = _infer_signal_id_from_message(referenced_message)
+        if inferred:
+            return AutonomyCommand(action="approve", signal_id=inferred)
+    if lowered in {"reject", "reject.", "reject!", "no", "pass", "skip"} and referenced_message is not None:
+        inferred = _infer_signal_id_from_message(referenced_message)
+        if inferred:
+            return AutonomyCommand(action="reject", signal_id=inferred)
     match = re.match(r"^signal\s+([a-zA-Z0-9_:-]+)$", lowered)
     if match:
         return AutonomyCommand(action="signal", signal_id=match.group(1))
@@ -93,7 +150,7 @@ def format_signal_alert(signal: TradeSignal) -> str:
     rr = signal.risk_plan.get("rr")
     rr_text = f"{rr:.2f}" if isinstance(rr, (int, float)) else "n/a"
     tp = f"{signal.take_profit:.6g}" if signal.take_profit else "n/a"
-    evidence_lines = [f"- {item.category}: {item.label} ({item.value})" for item in signal.evidence[:6]]
+    evidence_lines = [f"- {item.category}: {item.label} ({_format_evidence_value(item.value, item.kind)})" for item in signal.evidence[:6]]
     if signal.model_insight:
         summary = str(signal.model_insight.get("summary") or signal.model_insight.get("status") or "attached")
         evidence_lines.append(f"- model insight: {summary[:180]}")

@@ -75,7 +75,7 @@ class DiscordTradingBot:
             log.warning("discord_autonomy_channel_unresolved", channel_id=channel_id)
             return None
         sent = await channel.send(content)
-        log.info("discord_autonomy_message_sent", channel_id=channel_id, message_id=_maybe_str(getattr(sent, "id", None)), preview=content[:80])
+        log.info("discord_autonomy_message_sent", channel_id=channel_id, message_id=_maybe_str(getattr(sent, "id", None)), preview=content[:200])
         return _maybe_str(getattr(sent, "id", None))
 
     def is_authorized(self, context: DiscordContext, role_ids: set[int] | None = None) -> bool:
@@ -103,7 +103,8 @@ class DiscordTradingBot:
             thread_continuation = _is_bot_thread(getattr(message, "channel", None), self.client.user)
             prompt = _message_prompt_without_mentions(message.content)
             channel_id = _authorized_channel_id(message)
-            autonomy_command = parse_autonomy_command(prompt) if prompt else None
+            referenced_message = await _resolve_referenced_message(message)
+            autonomy_command = parse_autonomy_command(prompt, referenced_message=referenced_message) if (prompt or referenced_message is not None) else None
             autonomy_alert_channel = bool(self.settings.autonomy_alert_channel_id and str(channel_id) == str(self.settings.autonomy_alert_channel_id))
             if not mentioned and not thread_continuation and not (autonomy_command is not None and autonomy_alert_channel):
                 return
@@ -272,6 +273,34 @@ def _is_thread_channel(channel) -> bool:
     if channel_type in {"public_thread", "private_thread", "news_thread"}:
         return True
     return getattr(channel, "owner_id", None) is not None and getattr(channel, "parent", None) is not None
+
+
+async def _resolve_referenced_message(message) -> Any:
+    """Resolve a referenced (replied-to) message so the parser can infer context.
+
+    In discord.py v2, ``Message.reference`` may already be a fully-resolved
+    ``Message`` instance, or a ``MessageReference`` with a ``resolved``
+    attribute that needs to be fetched. Returns ``None`` if not a reply or if
+    the reference cannot be resolved.
+    """
+    ref = getattr(message, "reference", None)
+    if ref is None:
+        return None
+    resolved = getattr(ref, "resolved", None)
+    if resolved is not None:
+        return resolved
+    message_id = getattr(ref, "message_id", None)
+    channel = getattr(message, "channel", None)
+    if message_id is None or channel is None:
+        return None
+    fetch = getattr(channel, "fetch_message", None)
+    if fetch is None:
+        return None
+    try:
+        return await fetch(message_id)
+    except Exception as exc:  # pragma: no cover - Discord permission/runtime behavior
+        log.warning("discord_reference_resolve_failed", error=type(exc).__name__)
+        return None
 
 
 def _is_bot_thread(channel, bot_user) -> bool:

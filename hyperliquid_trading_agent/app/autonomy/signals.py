@@ -152,7 +152,7 @@ def score_components(state: AssetMarketState, market_map: GlobalMarketMap, side:
         if abs(state.funding_hourly) > 0.0008:
             funding_score -= 4
     funding_score = max(0.0, min(15.0, funding_score))
-    evidence.append(SignalEvidence(category="funding_oi", label="funding/OI", value=state.funding_hourly, weight=funding_score, source="funding"))
+    evidence.append(SignalEvidence(category="funding_oi", label="funding/OI", value=state.funding_hourly, weight=funding_score, source="funding", kind="funding_hourly"))
 
     news_score = 0.0
     if state.news_state is not None:

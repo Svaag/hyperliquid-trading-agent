@@ -151,6 +151,7 @@ class SignalEvidence(BaseModel):
     value: str | float | int | bool | None = None
     weight: float = 0.0
     source: Literal["market_structure", "orderflow", "funding", "news", "risk", "execution", "model"] = "market_structure"
+    kind: Literal["number", "pct", "bps", "ratio", "funding_hourly", "text"] = "number"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
