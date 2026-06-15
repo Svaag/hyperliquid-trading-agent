@@ -18,6 +18,8 @@ from hyperliquid_trading_agent.app.agent.high_stakes.schemas import TradeProposa
 from hyperliquid_trading_agent.app.agent.model_gateway import ModelGateway
 from hyperliquid_trading_agent.app.agent.runner import AgentContext, TradingAgentRunner
 from hyperliquid_trading_agent.app.agent.tools import AgentTools
+from hyperliquid_trading_agent.app.autonomy.discord import DiscordAutonomyAlertSink
+from hyperliquid_trading_agent.app.autonomy.service import AutonomousTradingLoopService
 from hyperliquid_trading_agent.app.config import Settings, load_settings
 from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.db.session import create_engine, create_sessionmaker
@@ -49,6 +51,11 @@ class AskResponse(BaseModel):
     high_stakes: bool = False
 
 
+class AutonomyActionRequest(BaseModel):
+    actor: str = "api"
+    reason: str = ""
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
@@ -67,6 +74,14 @@ async def lifespan(app: FastAPI):
     high_stakes_roles = HighStakesRoleRunner(model_gateway=model_gateway, settings=settings)
     ws_worker = HyperliquidWebSocketWorker(settings=settings)
     tracking_service = PositionTrackingService(settings=settings, repository=repository, ws_worker=ws_worker)
+    autonomy_service = AutonomousTradingLoopService(
+        settings=settings,
+        repository=repository,
+        hyperliquid=hyperliquid,
+        news=news,
+        ws_worker=ws_worker,
+        model_gateway=model_gateway,
+    )
     high_stakes_graph = HighStakesDebateGraph(
         settings=settings,
         context_builder=high_stakes_context,
@@ -81,8 +96,9 @@ async def lifespan(app: FastAPI):
         settings=settings,
         high_stakes_graph=high_stakes_graph,
     )
-    bot = DiscordTradingBot(settings=settings, runner=runner, tracking_service=tracking_service)
+    bot = DiscordTradingBot(settings=settings, runner=runner, tracking_service=tracking_service, autonomy_service=autonomy_service)
     tracking_service.alert_sink = DiscordAlertSink(bot)
+    autonomy_service.alert_sink = DiscordAutonomyAlertSink(bot)
 
     app.state.engine = engine
     app.state.repository = repository
@@ -94,16 +110,21 @@ async def lifespan(app: FastAPI):
     app.state.discord_bot = bot
     app.state.ws_worker = ws_worker
     app.state.tracking_service = tracking_service
+    app.state.autonomy_service = autonomy_service
 
     bot_task: asyncio.Task | None = None
     ws_task: asyncio.Task | None = None
     tracking_task: asyncio.Task | None = None
-    if settings.hyperliquid_ws_enabled or settings.position_tracking_enabled:
+    autonomy_task: asyncio.Task | None = None
+    if settings.hyperliquid_ws_enabled or settings.position_tracking_enabled or settings.autonomy_enabled:
         ws_task = asyncio.create_task(ws_worker.start(), name="hyperliquid-ws")
         log.info("hyperliquid_ws_task_started")
     if settings.position_tracking_enabled:
         tracking_task = asyncio.create_task(tracking_service.start(), name="position-tracking")
         log.info("position_tracking_task_started")
+    if settings.autonomy_enabled:
+        autonomy_task = asyncio.create_task(autonomy_service.start(), name="autonomy-service")
+        log.info("autonomy_service_task_started")
     if settings.discord_bot_token:
         bot_task = asyncio.create_task(bot.start(), name="discord-bot")
         log.info("discord_bot_task_started")
@@ -114,13 +135,14 @@ async def lifespan(app: FastAPI):
     finally:
         UP.set(0)
         await bot.stop()
+        await autonomy_service.stop()
         await tracking_service.stop()
         await ws_worker.stop()
         if sdk_info is not None:
             await sdk_info.close()
         await hyperliquid.close()
         await engine.dispose()
-        for task in [bot_task, tracking_task, ws_task]:
+        for task in [bot_task, autonomy_task, tracking_task, ws_task]:
             if task is not None:
                 task.cancel()
                 try:
@@ -155,7 +177,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ready_checks["position_tracking"] = "degraded:websocket_stale" if stale else "ok"
         if settings.autonomy_enabled:
             autonomy_warnings = settings.autonomy_config_warnings()
-            ready_checks["autonomy"] = "degraded:config" if autonomy_warnings else "ok"
+            autonomy_service = getattr(app.state, "autonomy_service", None)
+            autonomy_status = autonomy_service.status() if autonomy_service is not None else {}
+            last_market_data_at = autonomy_status.get("last_market_data_at_ms")
+            last_iteration_at = autonomy_status.get("last_iteration_at_ms")
+            now_ms = int(time.time() * 1000)
+            if autonomy_warnings:
+                ready_checks["autonomy"] = "degraded:config"
+            elif not app.state.repository.enabled:
+                ready_checks["autonomy"] = "degraded:persistence_disabled"
+            elif last_market_data_at and now_ms - int(last_market_data_at) > 120_000:
+                ready_checks["autonomy"] = "degraded:market_data_stale"
+            elif not last_market_data_at and last_iteration_at and now_ms - int(last_iteration_at) > 120_000:
+                ready_checks["autonomy"] = "degraded:no_market_data"
+            else:
+                ready_checks["autonomy"] = "ok"
         return {"status": "ready", "checks": ready_checks}
 
     @app.get("/health/config")
@@ -276,6 +312,125 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/tracking/positions/{tracker_id}/stop")
     async def stop_tracking_position(tracker_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         return await _set_tracker_status(app, settings, tracker_id, "stopped", authorization)
+
+    @app.get("/autonomy/status")
+    async def autonomy_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        return app.state.autonomy_service.status()
+
+    @app.post("/autonomy/pause")
+    async def pause_autonomy(request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        await app.state.autonomy_service.pause(actor=(request.actor if request else "api"))
+        return app.state.autonomy_service.status()
+
+    @app.post("/autonomy/resume")
+    async def resume_autonomy(request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        await app.state.autonomy_service.resume(actor=(request.actor if request else "api"))
+        return app.state.autonomy_service.status()
+
+    @app.get("/autonomy/universe")
+    async def autonomy_universe(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        service = app.state.autonomy_service
+        return {"items": [asset.model_dump(mode="json") for asset in service.universe], "count": len(service.universe), "resolver": service.universe_resolver.status()}
+
+    @app.get("/autonomy/market-map")
+    async def autonomy_market_map(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        return app.state.autonomy_service.reducer.snapshot().model_dump(mode="json")
+
+    @app.get("/autonomy/market-map/{symbol}")
+    async def autonomy_market_map_symbol(symbol: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        state = app.state.autonomy_service.reducer.snapshot().assets.get(symbol.upper())
+        if state is None:
+            raise HTTPException(status_code=404, detail="symbol not found")
+        return state.model_dump(mode="json")
+
+    @app.get("/autonomy/signals")
+    async def autonomy_signals(status: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = [item.model_dump(mode="json") for item in app.state.autonomy_service.list_signals(status=status)]
+        return {"items": items, "count": len(items)}
+
+    @app.get("/autonomy/signals/{signal_id}")
+    async def autonomy_signal(signal_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        signal = await app.state.autonomy_service._get_signal(signal_id)
+        if signal is None:
+            raise HTTPException(status_code=404, detail="signal not found")
+        return signal.model_dump(mode="json")
+
+    @app.post("/autonomy/signals/{signal_id}/approve")
+    async def approve_autonomy_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        try:
+            return await app.state.autonomy_service.approve_signal(signal_id, actor=(request.actor if request else "api"))
+        except KeyError:
+            raise HTTPException(status_code=404, detail="signal not found") from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @app.post("/autonomy/signals/{signal_id}/reject")
+    async def reject_autonomy_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        try:
+            signal = await app.state.autonomy_service.reject_signal(signal_id, actor=(request.actor if request else "api"), reason=(request.reason if request else "api"))
+        except KeyError:
+            raise HTTPException(status_code=404, detail="signal not found") from None
+        return signal.model_dump(mode="json")
+
+    @app.post("/autonomy/signals/{signal_id}/expire")
+    async def expire_autonomy_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        try:
+            signal = await app.state.autonomy_service.expire_signal(signal_id, actor=(request.actor if request else "api"))
+        except KeyError:
+            raise HTTPException(status_code=404, detail="signal not found") from None
+        return signal.model_dump(mode="json")
+
+    @app.get("/autonomy/portfolio")
+    async def autonomy_portfolio(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        service = app.state.autonomy_service
+        return {
+            "portfolio": service.portfolio.portfolio.model_dump(mode="json") if service.portfolio.portfolio else None,
+            "latest_snapshot": service.portfolio.latest_snapshot().model_dump(mode="json") if service.portfolio.latest_snapshot() else None,
+        }
+
+    @app.get("/autonomy/portfolio/snapshots")
+    async def autonomy_portfolio_snapshots(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = [item.model_dump(mode="json") for item in app.state.autonomy_service.portfolio.snapshots[-200:]]
+        return {"items": items, "count": len(items)}
+
+    @app.get("/autonomy/positions")
+    async def autonomy_positions(status: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        positions = list(app.state.autonomy_service.portfolio.positions.values())
+        if status:
+            positions = [item for item in positions if item.status == status]
+        return {"items": [item.model_dump(mode="json") for item in positions], "count": len(positions)}
+
+    @app.get("/autonomy/orders")
+    async def autonomy_orders(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        orders = list(app.state.autonomy_service.portfolio.orders.values())
+        return {"items": [item.model_dump(mode="json") for item in orders], "count": len(orders)}
+
+    @app.get("/autonomy/fills")
+    async def autonomy_fills(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        fills = list(app.state.autonomy_service.portfolio.fills.values())
+        return {"items": [item.model_dump(mode="json") for item in fills], "count": len(fills)}
+
+    @app.get("/autonomy/news")
+    async def autonomy_news(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        events = sorted(app.state.autonomy_service.news_events.values(), key=lambda item: item.observed_at_ms, reverse=True)
+        return {"items": [item.model_dump(mode="json") for item in events[:200]], "count": len(events)}
 
     @app.get("/metrics")
     async def metrics(authorization: str | None = Header(default=None)):

@@ -302,6 +302,44 @@ Data persists in the `postgres_data` Docker volume. To destroy all state:
 docker compose down -v
 ```
 
+## Autonomous loop rollout
+
+Autonomy is disabled by default. To run paper/signoff mode locally or on a VM:
+
+```env
+AUTONOMY_ENABLED=true
+AUTONOMY_MODE=paper_signoff
+AUTONOMY_ALERT_CHANNEL_ID=<discord-ai-bot-alerts-channel-id>
+AUTONOMY_REQUIRE_HUMAN_SIGNOFF=true
+AUTONOMY_CORE_UNIVERSE=BTC,ETH,HYPE
+AUTONOMY_UNIVERSE_TOP_N_PERPS=5
+AUTONOMY_MAX_SIGNALS_PER_DAY=3
+```
+
+Validate:
+
+```bash
+curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8080/autonomy/status
+curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8080/autonomy/market-map
+curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8080/autonomy/portfolio
+```
+
+Discord `#ai-bot-alerts` commands:
+
+```text
+approve signal <id>
+reject signal <id>
+signals
+portfolio
+positions
+orders
+market map
+pause autonomy
+resume autonomy
+```
+
+All approvals are paper-only. `HYPERLIQUID_EXCHANGE_ENABLED=true` remains rejected by config validation.
+
 ## Completion checklist
 
 - [ ] Fresh Hyrule Cloud VM provisioned and reachable by SSH.
@@ -317,3 +355,6 @@ docker compose down -v
 - [ ] Paper trade simulation works and persists.
 - [ ] Off-topic refusal works.
 - [ ] Metrics access is protected or internal-only.
+- [ ] If autonomy is enabled, `AUTONOMY_ALERT_CHANNEL_ID` points to `#ai-bot-alerts`.
+- [ ] `/autonomy/status` shows `mode=paper_signoff` and no live execution path.
+- [ ] A Discord signal approval creates a paper order/fill/position only.

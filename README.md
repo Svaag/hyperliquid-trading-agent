@@ -20,6 +20,9 @@ design.
   - `GET /tracking/positions/{tracker_id}`
   - `GET /tracking/positions/{tracker_id}/events`
   - `POST /tracking/positions/{tracker_id}/pause|resume|stop`
+  - `GET /autonomy/status|universe|market-map|signals|portfolio|positions|orders|fills|news`
+  - `POST /autonomy/pause|resume`
+  - `POST /autonomy/signals/{signal_id}/approve|reject|expire`
   - `GET /metrics`
 - Discord mention bot with guild/channel/role allowlists and threaded answers.
 - Risk-routed high-stakes multi-agent debate engine for paper/manual trade proposals only, with institutional role rubrics, endpoint coverage, and optional official SDK `Info` data.
@@ -33,8 +36,8 @@ design.
 - Official docs grounding through GitBook markdown/`ask=` support plus static safety notes.
 - RSS news, optional Tavily/SerpAPI/NewsAPI/Perplexity search, optional X recent search.
 - Semantic tool gathering for market snapshots, funding, candles, account public state, fills, docs, news, and paper trades.
-- PostgreSQL persistence for audit events, tool calls, conversations, cache, news, paper trades, debate runs, role outputs, state snapshots, and trade proposals.
-- Alembic initial migration.
+- PostgreSQL persistence for audit events, tool calls, conversations, cache, news, paper trades, debate runs, role outputs, state snapshots, trade proposals, autonomous market state, signals, paper orders/fills/positions, and portfolio snapshots.
+- Alembic migrations through `0004_autonomous_loop`.
 - Dockerfile and Docker Compose with Postgres.
 
 ## Quick start
@@ -132,7 +135,7 @@ POSITION_TRACKING_ALERT_RETRY_COUNT=3
 
 When enabled, high-stakes position reviews with coin/side/entry/stop auto-arm low-overhead WebSocket level alerts. Discord users can say `tracking status`, `tracking events`, `pause tracking`, `resume tracking`, `stop tracking`, or `track until 24h/7d` inside the bot-created thread.
 
-Autonomous loop scaffold (disabled by default; paper + human signoff only):
+Autonomous loop (disabled by default; paper + human signoff only):
 
 ```env
 AUTONOMY_ENABLED=false
@@ -152,7 +155,9 @@ NEWSWIRE_ENABLED=true
 NEWSWIRE_QUERIES=BTC,ETH,HYPE,Hyperliquid,Fed,CPI,FOMC,crypto liquidation
 ```
 
-Step 1 exposes configuration and `/health/config` visibility only. The autonomous service starts in a later step. If `AUTONOMY_ENABLED=true`, configure `AUTONOMY_ALERT_CHANNEL_ID` for `#ai-bot-alerts`; otherwise `/ready` reports autonomy as degraded config.
+When `AUTONOMY_ENABLED=true`, the service watches the configured universe, builds a deterministic market mental map, generates scored signals, posts qualifying alerts to `AUTONOMY_ALERT_CHANNEL_ID`, and waits for human signoff. Discord alert-channel commands: `approve signal <id>`, `reject signal <id>`, `signal <id>`, `signals`, `portfolio`, `positions`, `orders`, `market map`, `pause autonomy`, `resume autonomy`. Approvals create paper orders/fills/positions only; no live trade is placed.
+
+`/ready` reports autonomy degraded when enabled without an alert channel, when market data is stale, or when persistence is unavailable.
 
 `HYPERLIQUID_EXCHANGE_ENABLED=true` is rejected by config validation in this MVP.
 
@@ -186,6 +191,8 @@ Important docs-backed rules embedded in the agent:
 - No mainnet trading in the MVP.
 - High-stakes debate produces manual/paper proposals only; `exchange_actions` is intentionally empty.
 - Live tracking only emits alerts/events; it does not place orders and keeps `exchange_actions=[]` for future autonomous-trading hooks.
+- Autonomous V1 is paper-signoff only: every signal requires human approval, and approval creates simulated paper orders/fills/positions only.
+- Inferred stop/liquidation clusters are labeled inferred; only configured public-account liquidation prices are direct.
 - Local paper simulation only.
 - Direct trade coaching is allowed, but every answer should include risk,
   assumptions, invalidation, and caveats.
@@ -197,7 +204,7 @@ See [TESTING.md](TESTING.md).
 Current local validation:
 
 ```text
-22 passed
+59 passed
 ruff: all checks passed
 mypy: success
 alembic offline SQL: generated

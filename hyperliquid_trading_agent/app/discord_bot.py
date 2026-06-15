@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from hyperliquid_trading_agent.app.agent.runner import AgentContext, TradingAgentRunner
+from hyperliquid_trading_agent.app.autonomy.discord import parse_autonomy_command
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.metrics import DISCORD_MESSAGES
@@ -31,10 +32,17 @@ class DiscordContext:
 class DiscordTradingBot:
     """Mention-driven Discord support desk bot."""
 
-    def __init__(self, settings: Settings, runner: TradingAgentRunner | None = None, tracking_service: PositionTrackingService | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        runner: TradingAgentRunner | None = None,
+        tracking_service: PositionTrackingService | None = None,
+        autonomy_service: Any | None = None,
+    ):
         self.settings = settings
         self.runner = runner
         self.tracking_service = tracking_service
+        self.autonomy_service = autonomy_service
         self.client = None
         if discord is not None:
             intents = discord.Intents.default()
@@ -52,6 +60,21 @@ class DiscordTradingBot:
     async def stop(self) -> None:
         if self.client is not None and not self.client.is_closed():
             await self.client.close()
+
+    async def send_channel_message(self, channel_id: str, content: str) -> str | None:
+        if self.client is None or not channel_id:
+            return None
+        channel = self.client.get_channel(int(channel_id)) if str(channel_id).isdigit() else None
+        if channel is None and callable(getattr(self.client, "fetch_channel", None)):
+            try:
+                channel = await self.client.fetch_channel(int(channel_id))
+            except Exception as exc:  # pragma: no cover - Discord runtime behavior
+                log.warning("discord_autonomy_channel_fetch_failed", channel_id=channel_id, error=type(exc).__name__)
+                return None
+        if channel is None or not callable(getattr(channel, "send", None)):
+            return None
+        sent = await channel.send(content)
+        return _maybe_str(getattr(sent, "id", None))
 
     def is_authorized(self, context: DiscordContext, role_ids: set[int] | None = None) -> bool:
         if self.settings.allowed_guild_ids and context.guild_id not in self.settings.allowed_guild_ids:
@@ -76,30 +99,42 @@ class DiscordTradingBot:
                 return
             mentioned = self.client.user in message.mentions
             thread_continuation = _is_bot_thread(getattr(message, "channel", None), self.client.user)
-            if not mentioned and not thread_continuation:
+            prompt = _message_prompt_without_mentions(message.content)
+            channel_id = _authorized_channel_id(message)
+            autonomy_command = parse_autonomy_command(prompt) if prompt else None
+            autonomy_alert_channel = bool(self.settings.autonomy_alert_channel_id and str(channel_id) == str(self.settings.autonomy_alert_channel_id))
+            if not mentioned and not thread_continuation and not (autonomy_command is not None and autonomy_alert_channel):
                 return
             role_ids = {int(getattr(role, "id", 0)) for role in getattr(message.author, "roles", [])}
-            channel_id = _authorized_channel_id(message)
             context = DiscordContext(
                 guild_id=getattr(getattr(message, "guild", None), "id", None),
                 channel_id=channel_id,
                 author_id=getattr(getattr(message, "author", None), "id", None),
             )
-            if not self.is_authorized(context, role_ids=role_ids):
+            if not self.is_authorized(context, role_ids=role_ids) and not (autonomy_command is not None and autonomy_alert_channel):
                 DISCORD_MESSAGES.labels(result="unauthorized").inc()
                 await message.reply("Not authorized for this bot/channel.", mention_author=False)
                 return
-            if self.runner is None:
-                DISCORD_MESSAGES.labels(result="no_runner").inc()
-                await message.reply("Trading agent runtime is not ready yet.", mention_author=False)
-                return
-            prompt = _message_prompt_without_mentions(message.content)
             if not prompt:
                 await message.reply("Mention me with a trading, Hyperliquid, market, macro, or news question.", mention_author=False)
                 return
             tracking_command = parse_tracking_command(prompt)
             try:
                 async with message.channel.typing():
+                    if autonomy_command is not None and self.autonomy_service is not None and autonomy_alert_channel:
+                        content = await self.autonomy_service.handle_discord_command(
+                            autonomy_command,
+                            user_id=_maybe_str(getattr(message.author, "id", None)),
+                            role_ids=role_ids,
+                        )
+                        for chunk in _chunk(content, self.settings.discord_max_response_chars):
+                            await message.reply(chunk, mention_author=False)
+                        DISCORD_MESSAGES.labels(result="autonomy_command").inc()
+                        return
+                    if self.runner is None:
+                        DISCORD_MESSAGES.labels(result="no_runner").inc()
+                        await message.reply("Trading agent runtime is not ready yet.", mention_author=False)
+                        return
                     thread = await _ensure_thread(message, prompt)
                     thread_id = _maybe_str(getattr(thread, "id", None))
                     if tracking_command is not None and self.tracking_service is not None:

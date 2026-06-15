@@ -28,7 +28,9 @@ class XApiClient:
                 params={
                     "query": query,
                     "max_results": max(10, min(max_results, 100)),
-                    "tweet.fields": "created_at,public_metrics,author_id",
+                    "expansions": "author_id",
+                    "tweet.fields": "created_at,public_metrics,author_id,entities",
+                    "user.fields": "verified,public_metrics,username",
                 },
             )
             response.raise_for_status()

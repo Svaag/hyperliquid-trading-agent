@@ -160,6 +160,27 @@ class HyperliquidClient:
             payload["dex"] = dex
         return await self.post_info(payload, cache_ttl_seconds=self.settings.cache_ttl_market_seconds)
 
+    async def market_universe(self, dex: str = "") -> list[dict[str, Any]]:
+        data = await self.meta_and_asset_ctxs(dex=dex)
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            universe = data[0].get("universe", [])
+            return [item for item in universe if isinstance(item, dict)] if isinstance(universe, list) else []
+        return []
+
+    async def active_asset_contexts(self, dex: str = "") -> dict[str, dict[str, Any]]:
+        data = await self.meta_and_asset_ctxs(dex=dex)
+        if not (isinstance(data, list) and len(data) >= 2 and isinstance(data[0], dict) and isinstance(data[1], list)):
+            return {}
+        universe = data[0].get("universe", []) if isinstance(data[0].get("universe"), list) else []
+        contexts = data[1]
+        out: dict[str, dict[str, Any]] = {}
+        for raw, ctx in zip(universe, contexts, strict=False):
+            if isinstance(raw, dict) and isinstance(ctx, dict):
+                symbol = str(ctx.get("coin") or raw.get("name") or "").upper()
+                if symbol:
+                    out[symbol] = ctx
+        return out
+
     async def perp_dexs(self) -> Any:
         return await self.post_info({"type": "perpDexs"}, cache_ttl_seconds=300)
 
@@ -289,6 +310,46 @@ class HyperliquidClient:
 
     async def referral_state(self, address: str) -> Any:
         return await self.post_info({"type": "referral", "user": address.lower()}, cache_ttl_seconds=300)
+
+    async def public_liquidation_levels(self, addresses: list[str], dex: str = "") -> list[dict[str, Any]]:
+        """Return directly observable liquidation prices from configured public accounts.
+
+        This reads public clearinghouse state only. Hidden stops and broad heatmaps
+        remain inferred elsewhere and must be labeled as such.
+        """
+
+        levels: list[dict[str, Any]] = []
+        for address in addresses:
+            state = await self.user_state(address, dex=dex)
+            positions = state.get("assetPositions", []) if isinstance(state, dict) else []
+            for item in positions:
+                if not isinstance(item, dict) or not isinstance(item.get("position"), dict):
+                    continue
+                position = item["position"]
+                liquidation_px = _optional_float(position.get("liquidationPx"))
+                if liquidation_px is None or liquidation_px <= 0:
+                    continue
+                size = _optional_float(position.get("szi")) or 0.0
+                levels.append(
+                    {
+                        "symbol": str(position.get("coin") or "").upper(),
+                        "price": liquidation_px,
+                        "side_at_risk": "longs" if size > 0 else "shorts" if size < 0 else "unknown",
+                        "notional_usd_known": _optional_float(position.get("positionValue")),
+                        "source": "public_account",
+                        "confidence": "direct",
+                        "account": address.lower(),
+                        "metadata": {"position": position},
+                    }
+                )
+        return levels
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _request_weight(request_type: str) -> int:
