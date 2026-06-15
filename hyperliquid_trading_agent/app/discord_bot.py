@@ -72,8 +72,10 @@ class DiscordTradingBot:
                 log.warning("discord_autonomy_channel_fetch_failed", channel_id=channel_id, error=type(exc).__name__)
                 return None
         if channel is None or not callable(getattr(channel, "send", None)):
+            log.warning("discord_autonomy_channel_unresolved", channel_id=channel_id)
             return None
         sent = await channel.send(content)
+        log.info("discord_autonomy_message_sent", channel_id=channel_id, message_id=_maybe_str(getattr(sent, "id", None)), preview=content[:80])
         return _maybe_str(getattr(sent, "id", None))
 
     def is_authorized(self, context: DiscordContext, role_ids: set[int] | None = None) -> bool:

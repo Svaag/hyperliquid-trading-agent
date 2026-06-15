@@ -471,6 +471,64 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="signal not found") from None
         return signal.model_dump(mode="json")
 
+    @app.post("/admin/debug/seed-flip-demo")
+    async def seed_flip_demo(request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        service: AutonomousTradingLoopService = app.state.autonomy_service
+        now_ms = int(time.time() * 1000)
+        future_ms = now_ms + 3600 * 1000
+        actor = (request.actor if request and request.actor else "admin_demo")
+        # 1) open a real SOL short paper position
+        short_sig = TradeSignal(
+            id=f"sig_demo_short_{uuid4().hex[:8]}",
+            symbol="SOL",
+            side="short",
+            signal_type="trend_continuation",
+            score=70,
+            confidence=0.7,
+            created_at_ms=now_ms,
+            expires_at_ms=future_ms,
+            entry=100.0,
+            stop=105.0,
+            take_profit=90.0,
+            invalidation="above 105",
+            thesis="demo short",
+            risk_plan={"rr": 2, "exchange_actions": []},
+        )
+        service.signals[short_sig.id] = short_sig
+        await service.approve_signal(short_sig.id, actor=actor)
+        # 2) create opposing long signal + post the alert
+        long_sig = TradeSignal(
+            id=f"sig_demo_long_{uuid4().hex[:8]}",
+            symbol="SOL",
+            side="long",
+            signal_type="trend_continuation",
+            score=77,
+            confidence=0.86,
+            created_at_ms=now_ms,
+            expires_at_ms=future_ms,
+            entry=101.0,
+            stop=100.0,
+            take_profit=103.0,
+            invalidation="below 100",
+            thesis="demo long - opposing",
+            risk_plan={"rr": 2, "exchange_actions": []},
+        )
+        service.signals[long_sig.id] = long_sig
+        from hyperliquid_trading_agent.app.autonomy.discord import format_signal_alert
+        if service.alert_sink is not None and settings.autonomy_alert_channel_id:
+            await service.alert_sink.send(settings.autonomy_alert_channel_id, format_signal_alert(long_sig))
+        # 3) approve the long -> triggers flip request + Discord flip alert
+        result = await service.approve_signal(long_sig.id, actor=actor)
+        return {
+            "short_signal_id": short_sig.id,
+            "long_signal_id": long_sig.id,
+            "flip_required": result.get("flip_required"),
+            "signal_status": result["signal"]["status"],
+            "closed_position_id": (result.get("closed_position") or {}).get("id"),
+            "diagnostics": result.get("diagnostics"),
+        }
+
     @app.get("/autonomy/portfolio")
     async def autonomy_portfolio(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
