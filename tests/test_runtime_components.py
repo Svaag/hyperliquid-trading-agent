@@ -86,6 +86,7 @@ def test_autonomy_settings_defaults_and_alias_parsing():
     settings = Settings(
         discord_admin_user_ids="1",
         autonomy_admin_user_ids="2,bad",
+        autonomy_enabled=False,
         autonomy_admin_role_ids="9",
         autonomy_hip3_index_aliases="SP500:SPX|SPY,NASDAQ100:NDX|QQQ",
     )

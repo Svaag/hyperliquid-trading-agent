@@ -30,15 +30,15 @@ def parse_tracking_command(text: str) -> TrackingCommand | None:
     ttl = _ttl_hours(cleaned)
     if ttl is not None:
         return TrackingCommand(action="set_ttl", coin=_coin(cleaned), tracker_id=_tracker_id(cleaned), ttl_hours=ttl)
-    if any(phrase in lowered for phrase in ["tracking status", "track status", "are you tracking", "what are you tracking"]):
+    if any(phrase in lowered for phrase in ["tracking status", "track status", "tracker status", "are you tracking", "what are you tracking"]):
         return TrackingCommand(action="status", coin=_coin(cleaned), tracker_id=_tracker_id(cleaned))
-    if any(phrase in lowered for phrase in ["tracking events", "track events", "level alerts"]):
+    if any(phrase in lowered for phrase in ["tracking events", "track events", "tracker events", "level alerts"]):
         return TrackingCommand(action="events", coin=_coin(cleaned), tracker_id=_tracker_id(cleaned))
-    if any(phrase in lowered for phrase in ["stop tracking", "cancel tracking", "disable tracking"]):
+    if any(phrase in lowered for phrase in ["stop tracking", "stop tracker", "stop trackers", "cancel tracking", "cancel tracker", "disable tracking", "disable tracker"]):
         return TrackingCommand(action="stop", coin=_coin(cleaned), tracker_id=_tracker_id(cleaned))
-    if any(phrase in lowered for phrase in ["pause tracking", "suspend tracking"]):
+    if any(phrase in lowered for phrase in ["pause tracking", "pause tracker", "pause trackers", "suspend tracking", "suspend tracker"]):
         return TrackingCommand(action="pause", coin=_coin(cleaned), tracker_id=_tracker_id(cleaned))
-    if any(phrase in lowered for phrase in ["resume tracking", "restart tracking", "enable tracking"]):
+    if any(phrase in lowered for phrase in ["resume tracking", "resume tracker", "resume trackers", "restart tracking", "restart tracker", "enable tracking", "enable tracker"]):
         return TrackingCommand(action="resume", coin=_coin(cleaned), tracker_id=_tracker_id(cleaned))
     return None
 
@@ -46,7 +46,7 @@ def parse_tracking_command(text: str) -> TrackingCommand | None:
 def _coin(text: str) -> str | None:
     for match in _COIN_RE.finditer(text):
         token = match.group(0).upper()
-        if token not in {"TRACK", "TRACKING", "STATUS", "STOP", "PAUSE", "RESUME", "EVENTS", "UNTIL"}:
+        if token not in {"TRACK", "TRACKING", "TRACKER", "TRACKERS", "STATUS", "STOP", "CANCEL", "DISABLE", "PAUSE", "SUSPEND", "RESUME", "RESTART", "ENABLE", "EVENTS", "LEVEL", "ALERT", "ALERTS", "UNTIL"}:
             return token
     return None
 

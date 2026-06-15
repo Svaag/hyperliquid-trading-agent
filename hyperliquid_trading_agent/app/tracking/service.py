@@ -148,6 +148,9 @@ class PositionTrackingService:
                 await self.repository.set_position_tracker_status(plan.id, "expired", reason="tracking ttl elapsed")
                 await self.repository.record_tracking_event(plan.id, "tracker_expired", plan.coin, payload={"expires_at_ms": plan.expires_at_ms})
                 continue
+            for level in plan.levels:
+                if level.hit_count > 0 and not level.armed and not _level_allows_rearm(level):
+                    await self.repository.update_tracked_level_state(level.id, armed=False, hit_count=level.hit_count)
             loaded[plan.id] = plan
         async with self._lock:
             self._trackers = loaded
@@ -385,13 +388,17 @@ def evaluate_level(level: TrackedLevelSpec, previous_price: float | None, curren
         if level.direction == "cross_up" and previous_price < level.price <= current_price:
             return CrossingResult(hit=True)
         return CrossingResult()
-    if not level.terminal and _rearm_condition(level, current_price):
+    if not level.terminal and _level_allows_rearm(level) and _rearm_condition(level, current_price):
         return CrossingResult(rearmed=True)
     return CrossingResult()
 
 
 def _beyond_level(level: TrackedLevelSpec, current_price: float) -> bool:
     return current_price <= level.price if level.direction == "cross_down" else current_price >= level.price
+
+
+def _level_allows_rearm(level: TrackedLevelSpec) -> bool:
+    return level.metadata.get("allow_rearm") is True
 
 
 def _rearm_condition(level: TrackedLevelSpec, current_price: float) -> bool:
@@ -443,6 +450,11 @@ def _plan_from_repository_row(row: dict[str, Any]) -> PositionTrackingPlan | Non
 
 
 def _level_from_repository_row(row: dict[str, Any]) -> TrackedLevelSpec:
+    hit_count = int(row.get("hit_count") or 0)
+    metadata = row.get("metadata") or {}
+    armed = bool(row.get("armed"))
+    if hit_count > 0 and metadata.get("allow_rearm") is not True:
+        armed = False
     return TrackedLevelSpec(
         id=str(row.get("id")),
         kind=cast(LevelKind, row.get("kind")),
@@ -451,10 +463,10 @@ def _level_from_repository_row(row: dict[str, Any]) -> TrackedLevelSpec:
         direction=cast(CrossDirection, row.get("direction")),
         terminal=bool(row.get("terminal")),
         severity=row.get("severity") or "warning",
-        armed=bool(row.get("armed")),
-        hit_count=int(row.get("hit_count") or 0),
+        armed=armed,
+        hit_count=hit_count,
         rearm_band_bps=float(row.get("rearm_band_bps") or 10.0),
-        metadata=row.get("metadata") or {},
+        metadata=metadata,
     )
 
 

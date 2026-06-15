@@ -11,10 +11,14 @@ from hyperliquid_trading_agent.app.tracking.service import evaluate_level
 
 def test_tracking_command_parser_understands_thread_controls():
     assert parse_tracking_command("tracking status").action == "status"  # type: ignore[union-attr]
+    assert parse_tracking_command("tracker status").action == "status"  # type: ignore[union-attr]
     stop = parse_tracking_command("stop tracking VVV")
     assert stop is not None
     assert stop.action == "stop"
     assert stop.coin == "VVV"
+    stop_alias = parse_tracking_command("stop tracker")
+    assert stop_alias is not None
+    assert stop_alias.action == "stop"
     ttl = parse_tracking_command("track until 7d")
     assert ttl is not None
     assert ttl.action == "set_ttl"
@@ -82,7 +86,7 @@ def test_tracking_level_dedup_keeps_hard_stop_over_nearby_derived_level():
     assert [level.kind for level in near_stop] == ["hard_stop"]
 
 
-def test_crossing_engine_hits_and_rearms_with_hysteresis():
+def test_crossing_engine_levels_are_one_shot_by_default_with_opt_in_rearm():
     features = {"market": {"VVV": {"mid": 16.25}}, "candles": {"VVV": {"recent_support": 15.63}}}
     plan = derive_position_tracking_plan(coin="VVV", side="long", entry=16.4, stop=15.5, features=features, now_ms=1)
     assert plan is not None
@@ -92,7 +96,9 @@ def test_crossing_engine_hits_and_rearms_with_hysteresis():
     assert evaluate_level(technical, 15.7, 15.62).hit is True
     disarmed = reclaim.model_copy(update={"armed": False, "hit_count": 1})
     assert evaluate_level(disarmed, 16.5, 16.39).rearmed is False
-    assert evaluate_level(disarmed, 16.5, 16.38).rearmed is True
+    assert evaluate_level(disarmed, 16.5, 16.38).rearmed is False
+    opt_in_rearm = disarmed.model_copy(update={"metadata": {"allow_rearm": True}})
+    assert evaluate_level(opt_in_rearm, 16.5, 16.38).rearmed is True
 
 
 def test_crossing_engine_detects_initial_terminal_breach_only():
