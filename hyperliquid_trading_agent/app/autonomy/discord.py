@@ -58,6 +58,12 @@ def parse_autonomy_command(prompt: str) -> AutonomyCommand | None:
     match = re.match(r"^apply\s+tuning\s+proposal\s+([a-zA-Z0-9_:-]+)$", lowered)
     if match:
         return AutonomyCommand(action="apply_tuning_proposal", proposal_id=match.group(1))
+    match = re.match(r"^(approve|confirm)\s+flip\s+([a-zA-Z0-9_:-]+)$", lowered)
+    if match:
+        return AutonomyCommand(action="approve_flip", signal_id=match.group(2))
+    match = re.match(r"^cancel\s+flip\s+([a-zA-Z0-9_:-]+)$", lowered)
+    if match:
+        return AutonomyCommand(action="reject", signal_id=match.group(1), note="flip_cancelled")
     if lowered in {"daily report", "report daily", "autonomy daily report"}:
         return AutonomyCommand(action="daily_report")
     if lowered in {"weekly report", "report weekly", "autonomy weekly report"}:
@@ -91,8 +97,10 @@ def format_signal_alert(signal: TradeSignal) -> str:
     if signal.model_insight:
         summary = str(signal.model_insight.get("summary") or signal.model_insight.get("status") or "attached")
         evidence_lines.append(f"- model insight: {summary[:180]}")
-    return (
-        f"🚨 **AI Trading Signal — {signal.symbol} {signal.side.upper()}**\n\n"
+    header = f"🚨 **AI Trading Signal — {signal.symbol} {signal.side.upper()}**"
+    if signal.status == "flip_requested":
+        header = f"🔁 **AI Trading Signal — {signal.symbol} {signal.side.upper()} (flip requested)**"
+    body = (
         f"Score: **{signal.score:.0f}/100** | Confidence: **{signal.confidence:.2f}** | Expires: **{_minutes_until_expiry(signal)}m**\n"
         f"Entry: `{signal.entry:.6g}`\n"
         f"Stop: `{signal.stop:.6g}`\n"
@@ -106,10 +114,48 @@ def format_signal_alert(signal: TradeSignal) -> str:
         f"`reject signal {signal.id}`\n\n"
         f"No live trade will be placed. Approval creates a paper trade only."
     )
+    if signal.status == "flip_requested":
+        body += (
+            "\n\n**Opposing position will be closed first.** Confirm with:\n"
+            f"`approve flip {signal.id}`"
+        )
+    return f"{header}\n\n{body}"
 
 
 def format_signal_detail(signal: TradeSignal) -> str:
     return format_signal_alert(signal) + f"\n\nStatus: `{signal.status}` | ID: `{signal.id}`"
+
+
+def format_flip_request(signal: TradeSignal, *, opposing_position: dict | None, diagnostics: dict | None) -> str:
+    opp = opposing_position or {}
+    diag = diagnostics or {}
+    opp_id = str(opp.get("id") or diag.get("opposing_position_id") or "-")[:8]
+    opp_qty = opp.get("quantity", diag.get("opposing_position_quantity"))
+    opp_px = opp.get("avg_entry_px") or opp.get("mark_px")
+    rr = signal.risk_plan.get("rr")
+    rr_text = f"{rr:.2f}" if isinstance(rr, (int, float)) else "n/a"
+    tp = f"{signal.take_profit:.6g}" if signal.take_profit else "n/a"
+    lines = [
+        f"🔁 **Flip requested — {signal.symbol} {signal.side.upper()}** (opposite of open position)",
+        f"Opposing paper position `{opp_id}` will be **closed at market** before opening the new side.",
+        f"New entry: `{signal.entry:.6g}` | Stop: `{signal.stop:.6g}` | TP: `{tp}` | RR: `{rr_text}`",
+    ]
+    if opp_qty is not None and opp_px is not None:
+        lines.append(f"Closing: qty `{float(opp_qty):.6g}` from avg entry `{float(opp_px):.6g}`.")
+    if diag:
+        lines.append(
+            "Risk context: equity `"
+            f"${diag.get('equity_usd', 0):,.2f}` | single-name cap "
+            f"`{diag.get('max_single_name_exposure_pct', 0)}%` (${diag.get('max_single_name_exposure_usd', 0):,.2f}) | "
+            f"current {signal.symbol} exposure `${diag.get('current_symbol_exposure_usd', 0):,.2f}`."
+        )
+    lines.append("")
+    lines.append("**Human signoff required to open the new side:**")
+    lines.append(f"`approve flip {signal.id}`")
+    lines.append(f"`reject signal {signal.id}` (also cancels the flip)")
+    lines.append("")
+    lines.append("No live trade will be placed. The opposing paper position will be closed first; the new side opens only on your approval.")
+    return "\n".join(lines)
 
 
 def format_signal_evaluation(evaluation: dict | None) -> str:

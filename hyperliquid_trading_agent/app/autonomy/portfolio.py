@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 from uuid import uuid4
 
 from hyperliquid_trading_agent.app.autonomy.performance import (
@@ -215,6 +216,43 @@ class PaperPortfolioService:
 
     def open_positions(self) -> list[PaperPosition]:
         return [item for item in self.positions.values() if item.status == "open"]
+
+    def find_opposing_position(self, symbol: str, side: str) -> PaperPosition | None:
+        opposite = "short" if side == "long" else "long"
+        for item in self.open_positions():
+            if item.symbol == symbol and item.side == opposite:
+                return item
+        return None
+
+    def sizing_diagnostics(self, signal: TradeSignal, fill_px: float) -> dict[str, Any]:
+        portfolio = self.portfolio
+        latest = self.latest_snapshot()
+        equity = latest.equity_usd if latest is not None else (portfolio.cash_usd if portfolio else 0.0)
+        risk_pct = self.settings.autonomy_paper_risk_pct_per_trade
+        max_single_pct = self.settings.autonomy_paper_max_single_name_exposure_pct
+        max_gross = self.settings.autonomy_paper_max_gross_leverage
+        risk_usd = equity * risk_pct / 100
+        stop_distance = abs(fill_px - signal.stop)
+        current_symbol_exposure = sum(
+            exposure_usd(item) for item in self.open_positions() if item.symbol == signal.symbol
+        )
+        current_gross = sum(exposure_usd(item) for item in self.open_positions())
+        opposing = self.find_opposing_position(signal.symbol, signal.side)
+        return {
+            "equity_usd": round(equity, 2),
+            "risk_pct": risk_pct,
+            "risk_usd": round(risk_usd, 2),
+            "stop_distance": round(stop_distance, 8),
+            "max_single_name_exposure_pct": max_single_pct,
+            "max_single_name_exposure_usd": round(equity * max_single_pct / 100, 2),
+            "current_symbol_exposure_usd": round(current_symbol_exposure, 2),
+            "max_gross_leverage": max_gross,
+            "max_gross_exposure_usd": round(equity * max_gross, 2),
+            "current_gross_exposure_usd": round(current_gross, 2),
+            "opposing_position_id": opposing.id if opposing else None,
+            "opposing_position_side": opposing.side if opposing else None,
+            "opposing_position_quantity": opposing.quantity if opposing else None,
+        }
 
     def _sized_quantity(self, signal: TradeSignal, fill_px: float) -> float:
         portfolio = self.portfolio

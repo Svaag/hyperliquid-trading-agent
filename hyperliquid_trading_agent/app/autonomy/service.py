@@ -9,6 +9,7 @@ from uuid import uuid4
 from hyperliquid_trading_agent.app.agent.model_gateway import ModelGateway
 from hyperliquid_trading_agent.app.autonomy.discord import (
     AutonomyAlertSink,
+    format_flip_request,
     format_market_map,
     format_memories,
     format_orders,
@@ -176,8 +177,10 @@ class AutonomousTradingLoopService:
         signal = await self._get_signal(signal_id)
         if signal is None:
             raise KeyError("signal not found")
-        if signal.status not in {"candidate", "posted"}:
+        if signal.status not in {"candidate", "posted", "flip_requested"}:
             raise RiskControlError(f"signal status {signal.status} cannot be approved")
+        if signal.status == "flip_requested":
+            return await self._approve_flip(signal, actor, mid=mid)
         now = _now_ms()
         if signal.expires_at_ms <= now:
             signal = signal.model_copy(update={"status": "expired"})
@@ -186,7 +189,14 @@ class AutonomousTradingLoopService:
             raise RiskControlError("signal is expired")
         state = self.reducer.snapshot().assets.get(signal.symbol)
         ref_px = mid or (state.mid if state is not None else None) or signal.entry
-        order, fill, position = await self.portfolio.approve_signal(signal, actor, mid=ref_px, timestamp_ms=now)
+        await self._persist_signal(signal)
+        try:
+            order, fill, position = await self.portfolio.approve_signal(signal, actor, mid=ref_px, timestamp_ms=now)
+        except RiskControlError as exc:
+            flip = await self._maybe_request_flip(signal, actor, reason=str(exc), ref_px=ref_px)
+            if flip is not None:
+                return flip
+            raise
         updated = signal.model_copy(update={"status": "paper_ordered"})
         self.signals[updated.id] = updated
         AUTONOMY_SIGNALS_APPROVED.inc()
@@ -202,6 +212,107 @@ class AutonomousTradingLoopService:
             payload={"signal_id": signal.id, "order_id": order.id, "fill_id": fill.id, "position_id": position.id, "exchange_actions": []},
         )
         return {"signal": updated.model_dump(mode="json"), "order": order.model_dump(mode="json"), "fill": fill.model_dump(mode="json"), "position": position.model_dump(mode="json")}
+
+    async def _maybe_request_flip(self, signal: TradeSignal, actor: str, *, reason: str, ref_px: float) -> dict[str, Any] | None:
+        """If the only reason a new position can't be sized is an opposing open
+        position exhausting the single-name exposure cap, close the opposing
+        position and mark the signal as ``flip_requested`` so the operator can
+        approve the new side in a second step.
+
+        Returns the result dict when a flip was requested, otherwise ``None``.
+        """
+        opposing = self.portfolio.find_opposing_position(signal.symbol, signal.side)
+        if opposing is None:
+            return None
+        diagnostics = self.portfolio.sizing_diagnostics(signal, ref_px)
+        if not diagnostics.get("opposing_position_id"):
+            return None
+        now = _now_ms()
+        close_price = ref_px
+        closed = await self.portfolio.close_position(
+            opposing.id, close_price, reason="flip_requested", timestamp_ms=now
+        )
+        updated = signal.model_copy(
+            update={
+                "status": "flip_requested",
+                "metadata": {**(signal.metadata or {}), "flip_from_position_id": closed.id},
+            }
+        )
+        self.signals[updated.id] = updated
+        await self._persist_signal(updated)
+        if self.evaluation_service is not None:
+            await self.evaluation_service.update_signal_status(updated)
+        await self._record_event(
+            "signal_flip_requested",
+            actor=actor,
+            symbol=signal.symbol,
+            payload={
+                "signal_id": signal.id,
+                "closed_position_id": closed.id,
+                "closed_realized_pnl_usd": closed.realized_pnl_usd,
+                "reason": reason,
+                "diagnostics": diagnostics,
+                "exchange_actions": [],
+            },
+        )
+        if self.alert_sink is not None and self.settings.autonomy_alert_channel_id:
+            try:
+                await self.alert_sink.send(
+                    self.settings.autonomy_alert_channel_id,
+                    format_flip_request(
+                        updated,
+                        opposing_position=closed.model_dump(mode="json"),
+                        diagnostics=diagnostics,
+                    ),
+                )
+            except Exception as exc:  # pragma: no cover - alert sink is best effort
+                log.warning("flip_alert_failed", error=type(exc).__name__)
+        return {
+            "signal": updated.model_dump(mode="json"),
+            "closed_position": closed.model_dump(mode="json"),
+            "diagnostics": diagnostics,
+            "flip_required": True,
+            "reason": reason,
+        }
+
+    async def _approve_flip(self, signal: TradeSignal, actor: str, *, mid: float | None) -> dict[str, Any]:
+        now = _now_ms()
+        if signal.expires_at_ms <= now:
+            updated = signal.model_copy(update={"status": "expired"})
+            self.signals[updated.id] = updated
+            await self._persist_signal(updated)
+            raise RiskControlError("flip request expired")
+        state = self.reducer.snapshot().assets.get(signal.symbol)
+        ref_px = mid or (state.mid if state is not None else None) or signal.entry
+        await self._persist_signal(signal)
+        order, fill, position = await self.portfolio.approve_signal(signal, actor, mid=ref_px, timestamp_ms=now)
+        updated = signal.model_copy(update={"status": "paper_ordered"})
+        self.signals[updated.id] = updated
+        AUTONOMY_SIGNALS_APPROVED.inc()
+        AUTONOMY_PAPER_ORDERS.labels(status="filled").inc()
+        AUTONOMY_PAPER_FILLS.labels(symbol=fill.symbol).inc()
+        await self._persist_signal(updated, approved_by=actor)
+        if self.evaluation_service is not None:
+            await self.evaluation_service.update_signal_status(updated, paper_position_id=position.id)
+        await self._record_event(
+            "signal_flip_approved_paper_ordered",
+            actor=actor,
+            symbol=signal.symbol,
+            payload={
+                "signal_id": signal.id,
+                "order_id": order.id,
+                "fill_id": fill.id,
+                "position_id": position.id,
+                "exchange_actions": [],
+            },
+        )
+        return {
+            "signal": updated.model_dump(mode="json"),
+            "order": order.model_dump(mode="json"),
+            "fill": fill.model_dump(mode="json"),
+            "position": position.model_dump(mode="json"),
+            "flip_required": False,
+        }
 
     async def reject_signal(self, signal_id: str, actor: str, reason: str = "") -> TradeSignal:
         signal = await self._get_signal(signal_id)
@@ -229,15 +340,31 @@ class AutonomousTradingLoopService:
         return updated
 
     async def handle_discord_command(self, command: AutonomyCommand, *, user_id: str | None, role_ids: set[int]) -> str:
-        mutating = command.action in {"approve", "reject", "pause", "resume"}
+        mutating = command.action in {"approve", "reject", "pause", "resume", "approve_flip"}
         if mutating and not self._is_admin(user_id, role_ids):
             return "Not authorized for autonomy signoff/admin commands."
         try:
             if command.action == "approve" and command.signal_id:
                 result = await self.approve_signal(command.signal_id, actor=user_id or "discord")
+                if result.get("flip_required"):
+                    closed = result.get("closed_position") or {}
+                    diag = result.get("diagnostics") or {}
+                    return (
+                        f"Flip requested for `{command.signal_id}`. Closed opposing position `{closed.get('id', '-')[:8]}` "
+                        f"with realized PnL `${float(closed.get('realized_pnl_usd', 0)):,.2f}`. "
+                        f"Single-name exposure was `{diag.get('current_symbol_exposure_usd', 0):,.2f}` vs cap "
+                        f"`{diag.get('max_single_name_exposure_pct', 0)}%` (${diag.get('max_single_name_exposure_usd', 0):,.2f}). "
+                        f"Confirm the new side with `approve flip {command.signal_id}` or `reject signal {command.signal_id}`. "
+                        f"No live trade was placed."
+                    )
                 order = result["order"]
                 position = result["position"]
                 return f"Approved `{command.signal_id}`. Paper order `{order['id'][:8]}` filled; position `{position['id'][:8]}` opened. No live trade was placed."
+            if command.action == "approve_flip" and command.signal_id:
+                result = await self.approve_signal(command.signal_id, actor=user_id or "discord")
+                order = result["order"]
+                position = result["position"]
+                return f"Flip approved for `{command.signal_id}`. Paper order `{order['id'][:8]}` filled; position `{position['id'][:8]}` opened in the new side. No live trade was placed."
             if command.action == "reject" and command.signal_id:
                 await self.reject_signal(command.signal_id, actor=user_id or "discord", reason="discord_reject")
                 return f"Rejected `{command.signal_id}`. No paper order was created."
@@ -297,8 +424,15 @@ class AutonomousTradingLoopService:
                 return format_tuning_proposal(item)
             if command.action == "apply_tuning_proposal":
                 return "Tuning proposals are observe-and-recommend only in this phase. Apply manually after review. No runtime strategy settings were changed."
+        except RiskControlError as exc:
+            return (
+                f"Autonomy command blocked by risk control: {exc}. "
+                f"Single-name exposure cap "
+                f"`{self.settings.autonomy_paper_max_single_name_exposure_pct}%` and gross leverage cap "
+                f"`{self.settings.autonomy_paper_max_gross_leverage}x`. No live trade was placed."
+            )
         except Exception as exc:
-            return f"Autonomy command failed: {type(exc).__name__}. No live trade was placed."
+            return f"Autonomy command failed: {type(exc).__name__}: {exc}. No live trade was placed."
         return "Unknown autonomy command."
 
     def list_signals(self, status: str | None = None) -> list[TradeSignal]:

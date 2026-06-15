@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from hyperliquid_trading_agent.app.autonomy.discord import format_signal_alert, parse_autonomy_command
@@ -140,7 +141,69 @@ def test_paper_portfolio_approval_fill_fees_and_stop_close():
     assert service.latest_snapshot().metrics["sharpe"] is None  # type: ignore[union-attr]
 
 
+def test_flip_request_closes_opposing_position_and_marks_signal():
+    settings = Settings(
+        autonomy_paper_initial_equity_usd=10_000,
+        autonomy_paper_risk_pct_per_trade=4,
+        autonomy_paper_max_single_name_exposure_pct=5,
+    )
+    portfolio = PaperPortfolioService(settings)
+
+    short_signal = TradeSignal(
+        id="sig_short",
+        symbol="SOL",
+        side="short",
+        signal_type="trend_continuation",
+        score=70,
+        confidence=0.7,
+        created_at_ms=1,
+        expires_at_ms=10_000_000,
+        entry=100.0,
+        stop=105.0,
+        take_profit=90.0,
+        invalidation="above 105",
+        thesis="short",
+        risk_plan={"rr": 2, "exchange_actions": []},
+    )
+    import anyio
+    anyio.run(portfolio.approve_signal, short_signal, "user1", 100.0, 1)
+    assert any(p.symbol == "SOL" and p.side == "short" and p.status == "open" for p in portfolio.open_positions())
+
+    long_signal = TradeSignal(
+        id="sig_long",
+        symbol="SOL",
+        side="long",
+        signal_type="trend_continuation",
+        score=77,
+        confidence=0.86,
+        created_at_ms=2,
+        expires_at_ms=10_000_000,
+        entry=101.0,
+        stop=100.0,
+        take_profit=103.0,
+        invalidation="below 100",
+        thesis="long",
+        risk_plan={"rr": 2, "exchange_actions": []},
+    )
+    with pytest.raises(Exception) as excinfo:
+        anyio.run(portfolio.approve_signal, long_signal, "user1", 101.0, 2)
+    assert "zero quantity" in str(excinfo.value).lower()
+    opposing = portfolio.find_opposing_position("SOL", "long")
+    assert opposing is not None
+    diag = portfolio.sizing_diagnostics(long_signal, 101.0)
+    assert diag["opposing_position_side"] == "short"
+    assert diag["current_symbol_exposure_usd"] > diag["max_single_name_exposure_usd"]
+
+
 def test_discord_autonomy_command_parser_and_alert_format():
+    flip_command = parse_autonomy_command("approve flip sig_abc")
+    assert flip_command is not None
+    assert flip_command.action == "approve_flip"
+    assert flip_command.signal_id == "sig_abc"
+    cancel_command = parse_autonomy_command("cancel flip sig_abc")
+    assert cancel_command is not None
+    assert cancel_command.action == "reject"
+    assert cancel_command.signal_id == "sig_abc"
     command = parse_autonomy_command("approve signal sig_abc")
     assert command is not None
     assert command.action == "approve"

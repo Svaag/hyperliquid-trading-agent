@@ -20,7 +20,7 @@ LevelSource = Literal["candles", "l2", "public_account", "inferred"]
 Trend = Literal["up", "down", "range", "unknown"]
 VolatilityRegime = Literal["low", "normal", "high", "unknown"]
 RiskRegime = Literal["risk_on", "risk_off", "mixed", "unknown"]
-SignalStatus = Literal["candidate", "posted", "approved", "rejected", "expired", "paper_ordered", "cancelled"]
+SignalStatus = Literal["candidate", "posted", "approved", "rejected", "expired", "paper_ordered", "cancelled", "flip_requested"]
 SignalSide = Literal["long", "short"]
 SignalEvaluationStatus = Literal["open", "complete", "partial", "expired_no_data", "error"]
 SignalTerminalOutcome = Literal["tp_hit", "stop_hit", "expired_positive", "expired_negative", "expired_flat", "insufficient_data", "open"]
@@ -185,6 +185,7 @@ class TradeSignal(BaseModel):
     model_insight: dict[str, Any] | None = None
     discord_channel_id: str | None = None
     discord_message_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class PaperPortfolio(BaseModel):
@@ -292,6 +293,7 @@ class AutonomyCommand(BaseModel):
         "tuning_proposals",
         "tuning_proposal",
         "apply_tuning_proposal",
+        "approve_flip",
     ]
     signal_id: str | None = None
     lesson_id: str | None = None
