@@ -112,6 +112,11 @@ class FakeTrackingService:
         return "tracker-1"
 
 
+class TimeoutCompiledGraph:
+    async def ainvoke(self, initial):
+        raise TimeoutError()
+
+
 class FakeAsyncSDKInfo:
     async def all_mids(self, dex=""):
         return {"BTC": "100"}
@@ -421,6 +426,39 @@ async def test_runner_routes_high_stakes_ask_path():
     assert response.decision_run_id == "run-1"
     assert response.proposal_id == "proposal-1"
     assert response.content == "high stakes answer"
+
+
+@pytest.mark.asyncio
+async def test_high_stakes_timeout_returns_deterministic_position_review():
+    settings = Settings(high_stakes_debate_enabled=True, high_stakes_timeout_seconds=90)
+    graph = HighStakesDebateGraph(
+        settings=settings,
+        context_builder=HighStakesContextBuilder(HighStakesFakeTools(), settings),
+        role_runner=object(),  # type: ignore[arg-type]
+        tracking_service=FakeTrackingService(),  # type: ignore[arg-type]
+    )
+    graph._compiled = TimeoutCompiledGraph()  # type: ignore[method-assign]
+
+    response = await graph.run(
+        TradeProposalRequest(
+            prompt="I entered VVV two days ago at 16.40 with 5x leverage and I have a stop loss at 15.50 - is there enough evidence to hold or should I take profit at current levels?"
+        ),
+        agent_context={"source": "discord", "discord_thread_id": "thread-1"},
+    )
+
+    assert "VVV position review" in response.content
+    assert "High-stakes debate timed out" not in response.content
+    assert "**Levels to watch:**" in response.content
+    assert "**Team participation:**" in response.content
+    assert "Fallback/timeouts" in response.content
+
+
+def test_role_timeout_budget_keeps_position_reviews_inside_graph_budget():
+    settings = Settings(high_stakes_timeout_seconds=240, high_stakes_max_rounds=3)
+    runner = HighStakesRoleRunner(model_gateway=object(), settings=settings)  # type: ignore[arg-type]
+    route = route_high_stakes("I entered VVV at 16.40 with stop loss at 15.50 - hold or take profit?")
+
+    assert runner._role_timeout_seconds({"route": route}) < 20
 
 
 @pytest.mark.asyncio

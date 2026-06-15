@@ -46,6 +46,7 @@ class HighStakesRoleRunner:
                 temperature=0.15,
                 max_tokens=1400,
                 context={"state": compact_context(_state_for_model(state))},
+                timeout_seconds=self._role_timeout_seconds(state),
             )
             return RoleCallResult(response.parsed, response.raw_content, response.model, response.provider, _elapsed_ms(started))
         except Exception as exc:
@@ -68,6 +69,7 @@ class HighStakesRoleRunner:
                 temperature=0.1,
                 max_tokens=1400,
                 context={"state": compact_context(_state_for_model(state))},
+                timeout_seconds=self._role_timeout_seconds(state),
             )
             parsed = response.parsed
             if isinstance(parsed, RoleOpinion):
@@ -90,6 +92,7 @@ class HighStakesRoleRunner:
                 temperature=0.05,
                 max_tokens=1600,
                 context={"state": compact_context(_state_for_model(state))},
+                timeout_seconds=self._role_timeout_seconds(state),
             )
             decision = response.parsed
             if isinstance(decision, JudgeDecision):
@@ -103,8 +106,21 @@ class HighStakesRoleRunner:
         # Free/dev models can hang or return malformed JSON. Keep each role on a
         # short leash and let deterministic fallbacks complete the debate rather
         # than timing out the entire graph with an unusable final answer.
-        timeout_seconds = min(45.0, max(12.0, self.settings.high_stakes_timeout_seconds / 6))
+        timeout_seconds = float(kwargs.pop("timeout_seconds", self._default_role_timeout_seconds()))
         return await asyncio.wait_for(self.model_gateway.complete_structured(*args, **kwargs), timeout=timeout_seconds)
+
+    def _role_timeout_seconds(self, state: dict[str, Any]) -> float:
+        route = state.get("route")
+        selected = set(getattr(route, "selected_roles", []) or [])
+        review_roles = {"quant", "research", "risk", "treasury", "execution", "adversary"}
+        calls_per_round = 1 + len(selected & review_roles) + 1  # proposer + selected reviewers + judge
+        rounds = max(1, int(getattr(self.settings, "high_stakes_max_rounds", 1) or 1))
+        reserve_seconds = min(45.0, max(20.0, self.settings.high_stakes_timeout_seconds * 0.15))
+        budget = max(30.0, self.settings.high_stakes_timeout_seconds - reserve_seconds)
+        return min(30.0, max(8.0, budget / max(1, calls_per_round * rounds)))
+
+    def _default_role_timeout_seconds(self) -> float:
+        return min(30.0, max(8.0, self.settings.high_stakes_timeout_seconds / 8))
 
 
 def fallback_draft(state: dict[str, Any], reason: str = "") -> TradeSetupDraft:

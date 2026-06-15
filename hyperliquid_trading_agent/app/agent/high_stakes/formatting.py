@@ -103,6 +103,10 @@ def _meaningful_text(text: str) -> bool:
         "no execution-readiness checklist",
         "fresh price, funding, liquidity",
         "deterministic fallback adversary review",
+        "model fallback",
+        "model_fallback",
+        "deterministic_debate_fallback",
+        "deterministic_context_unavailable",
     )
     return not any(marker in lowered for marker in empty_markers)
 
@@ -125,7 +129,7 @@ def _format_compact_position_review(proposal: TradeProposal, judge: JudgeDecisio
     if rationale:
         lines.extend(f"- {item}" for item in rationale[:5])
     else:
-        lines.append("- Live market data was gathered, but no clean edge was produced by the review.")
+        lines.append(f"- Parsed setup: {proposal.coin} {proposal.side or 'position'} from {proposal.entry:g} with hard stop {proposal.stop:g}; no model-backed edge survived this pass.")
 
     tracking_levels = summarize_tracking_plan(proposal.tracking_plan)
     if tracking_levels:
@@ -245,5 +249,5 @@ def _extract_float(text: str, key: str) -> float | None:
 
 
 def _public_warnings(warnings: list[str]) -> list[str]:
-    hidden_terms = ("model_fallback", "judge_model_fallback", "TimeoutError", "deterministic")
-    return [warning for warning in warnings if not any(term in warning for term in hidden_terms)]
+    hidden_terms = ("model_fallback", "judge_model_fallback", "timeouterror", "deterministic")
+    return [warning for warning in warnings if not any(term in warning.lower() for term in hidden_terms)]

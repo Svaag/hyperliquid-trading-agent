@@ -9,7 +9,13 @@ from langgraph.graph import END, START, StateGraph
 from hyperliquid_trading_agent.app.agent.high_stakes.context import HighStakesContextBuilder
 from hyperliquid_trading_agent.app.agent.high_stakes.formatting import format_trade_proposal
 from hyperliquid_trading_agent.app.agent.high_stakes.json_io import model_to_jsonable
-from hyperliquid_trading_agent.app.agent.high_stakes.roles import HighStakesRoleRunner, RoleCallResult
+from hyperliquid_trading_agent.app.agent.high_stakes.roles import (
+    HighStakesRoleRunner,
+    RoleCallResult,
+    fallback_draft,
+    fallback_judge,
+    fallback_opinion,
+)
 from hyperliquid_trading_agent.app.agent.high_stakes.routing import route_high_stakes
 from hyperliquid_trading_agent.app.agent.high_stakes.schemas import (
     DataCoverage,
@@ -106,15 +112,70 @@ class HighStakesDebateGraph:
                 warnings=list(state.get("warnings", [])) + proposal.warnings,
             )
         except TimeoutError:
-            proposal = _error_proposal("High-stakes debate timed out before convergence", status="manual_review_required")
-            DECISION_RUNS.labels(status=proposal.status).inc()
-            DECISION_LATENCY.labels(status=proposal.status).observe(time.perf_counter() - started)
-            return TradeProposalResponse(status=proposal.status, content=format_trade_proposal(proposal), proposal=proposal.model_dump(mode="json"), warnings=proposal.warnings)
+            return await self._deterministic_failure_response(request, agent_context, started, reason="timeout")
         except Exception as exc:
-            proposal = _error_proposal(f"High-stakes debate failed: {type(exc).__name__}")
-            DECISION_RUNS.labels(status=proposal.status).inc()
-            DECISION_LATENCY.labels(status=proposal.status).observe(time.perf_counter() - started)
-            return TradeProposalResponse(status=proposal.status, content=format_trade_proposal(proposal), proposal=proposal.model_dump(mode="json"), warnings=proposal.warnings)
+            return await self._deterministic_failure_response(request, agent_context, started, reason=type(exc).__name__)
+
+    async def _deterministic_failure_response(
+        self,
+        request: TradeProposalRequest,
+        agent_context: dict[str, Any] | None,
+        started: float,
+        *,
+        reason: str,
+    ) -> TradeProposalResponse:
+        route = route_high_stakes(
+            request.prompt,
+            forced=request.force_debate,
+            activation_policy=self.settings.high_stakes_activation_policy,
+            max_coins=self.settings.high_stakes_max_coins,
+        )
+        warnings = [f"deterministic_debate_fallback:{reason}"]
+        context: MarketContextBundle | None = None
+        try:
+            context_timeout = min(25.0, max(8.0, self.settings.high_stakes_timeout_seconds * 0.10))
+            context = await asyncio.wait_for(self.context_builder.gather(request, route), timeout=context_timeout)
+            warnings.extend(context.warnings)
+        except Exception as exc:
+            warnings.append(f"deterministic_context_unavailable:{type(exc).__name__}")
+
+        state: HighStakesGraphState = {
+            "request": request,
+            "agent_context": agent_context or {},
+            "prompt": redact_text(request.prompt),
+            "route": route,
+            "round": 0,
+            "data_escalation_count": 0,
+            "data_requests": [],
+            "data_coverage": context.data_coverage if context else DataCoverage(),
+            "role_outputs": [],
+            "warnings": warnings,
+            "errors": [reason],
+            "started_at": started,
+        }
+        if context is not None:
+            state["context"] = context
+
+        draft = _merge_deterministic_setup(fallback_draft(dict(state), reason=reason), state)
+        state["draft"] = draft
+        role_outputs = _fallback_role_outputs(route, state, reason)
+        state["role_outputs"] = role_outputs
+        judge = fallback_judge(dict(state), reason=reason).model_copy(update={"call_status": "fallback", "data_coverage": state["data_coverage"]})
+        state["judge_decision"] = judge
+        proposal = self._apply_final_policy(state, _build_proposal(state))
+        proposal = await self._auto_arm_tracking(state, proposal, proposal_id=None)
+
+        DECISION_RUNS.labels(status=proposal.status).inc()
+        DECISION_LATENCY.labels(status=proposal.status).observe(time.perf_counter() - started)
+        return TradeProposalResponse(
+            status=proposal.status,
+            content=format_trade_proposal(proposal, judge),
+            proposal=proposal.model_dump(mode="json"),
+            judge_decision=judge.model_dump(mode="json"),
+            rounds=0,
+            role_count=len(role_outputs) + 1,
+            warnings=proposal.warnings,
+        )
 
     def _build_graph(self) -> Any:
         graph: StateGraph = StateGraph(HighStakesGraphState)
@@ -393,6 +454,31 @@ def _replace_round_role(outputs: list[RoleOpinion], opinion: RoleOpinion, round_
     kept = [item for item in outputs if not (item.role == opinion.role and getattr(item, "round_index", round_index) == round_index)]
     kept.append(opinion)
     return kept
+
+
+def _fallback_role_outputs(route: HighStakesRoute, state: HighStakesGraphState, reason: str) -> list[RoleOpinion]:
+    selected = set(route.selected_roles or [])
+    ordered = ["analyst", "quant", "research", "risk", "treasury", "execution", "adversary"]
+    outputs: list[RoleOpinion] = []
+    for role in ordered:
+        if role != "analyst" and role not in selected:
+            continue
+        opinion = fallback_opinion(role, dict(state), reason=reason).model_copy(update={"call_status": "fallback"})
+        if role == "analyst":
+            draft = state.get("draft")
+            opinion = opinion.model_copy(
+                update={
+                    "summary": "",
+                    "key_points": [
+                        f"coin={getattr(draft, 'coin', None)}",
+                        f"side={getattr(draft, 'side', None)}",
+                        f"entry={getattr(draft, 'entry', None)}",
+                        f"stop={getattr(draft, 'stop', None)}",
+                    ],
+                }
+            )
+        outputs.append(opinion)
+    return outputs
 
 
 def _merge_deterministic_setup(draft: TradeSetupDraft, state: HighStakesGraphState) -> TradeSetupDraft:
