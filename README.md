@@ -132,6 +132,28 @@ POSITION_TRACKING_ALERT_RETRY_COUNT=3
 
 When enabled, high-stakes position reviews with coin/side/entry/stop auto-arm low-overhead WebSocket level alerts. Discord users can say `tracking status`, `tracking events`, `pause tracking`, `resume tracking`, `stop tracking`, or `track until 24h/7d` inside the bot-created thread.
 
+Autonomous loop scaffold (disabled by default; paper + human signoff only):
+
+```env
+AUTONOMY_ENABLED=false
+AUTONOMY_MODE=paper_signoff
+AUTONOMY_ALERT_CHANNEL_ID=
+AUTONOMY_REQUIRE_HUMAN_SIGNOFF=true
+AUTONOMY_CORE_UNIVERSE=BTC,ETH,HYPE
+AUTONOMY_UNIVERSE_TOP_N_PERPS=20
+AUTONOMY_MAX_TRACKED_ASSETS=40
+AUTONOMY_MAX_HOT_L2_ASSETS=5
+AUTONOMY_MAX_SIGNALS_PER_DAY=10
+AUTONOMY_MIN_SIGNAL_SCORE=75
+AUTONOMY_PAPER_INITIAL_EQUITY_USD=100000
+AUTONOMY_PAPER_RISK_PCT_PER_TRADE=0.25
+AUTONOMY_MODEL_INSIGHTS_ENABLED=true
+NEWSWIRE_ENABLED=true
+NEWSWIRE_QUERIES=BTC,ETH,HYPE,Hyperliquid,Fed,CPI,FOMC,crypto liquidation
+```
+
+Step 1 exposes configuration and `/health/config` visibility only. The autonomous service starts in a later step. If `AUTONOMY_ENABLED=true`, configure `AUTONOMY_ALERT_CHANNEL_ID` for `#ai-bot-alerts`; otherwise `/ready` reports autonomy as degraded config.
+
 `HYPERLIQUID_EXCHANGE_ENABLED=true` is rejected by config validation in this MVP.
 
 ## Hyperliquid ground truth

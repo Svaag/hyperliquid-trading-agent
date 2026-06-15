@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from fastapi.testclient import TestClient
 
 from hyperliquid_trading_agent.app.agent.guardrails import classify_request
 from hyperliquid_trading_agent.app.agent.model_gateway import ModelGateway
@@ -17,6 +18,7 @@ from hyperliquid_trading_agent.app.discord_bot import (
 )
 from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
 from hyperliquid_trading_agent.app.hyperliquid.ws_worker import HyperliquidWebSocketWorker, SubscriptionSpec
+from hyperliquid_trading_agent.app.main import create_app
 from hyperliquid_trading_agent.app.paper.schemas import PaperTradeRequest
 from hyperliquid_trading_agent.app.paper.simulator import PaperTradeSimulator
 
@@ -78,6 +80,45 @@ class FakeChoice:
 class FakeCompletion:
     def __init__(self, content):
         self.choices = [FakeChoice(content)]
+
+
+def test_autonomy_settings_defaults_and_alias_parsing():
+    settings = Settings(
+        discord_admin_user_ids="1",
+        autonomy_admin_user_ids="2,bad",
+        autonomy_admin_role_ids="9",
+        autonomy_hip3_index_aliases="SP500:SPX|SPY,NASDAQ100:NDX|QQQ",
+    )
+
+    assert settings.autonomy_enabled is False
+    assert settings.autonomy_mode == "paper_signoff"
+    assert settings.autonomy_core_symbols == ["BTC", "ETH", "HYPE"]
+    assert settings.autonomy_index_aliases["SP500"] == ["SP500", "SPX", "SPY"]
+    assert settings.autonomy_index_aliases["NASDAQ100"] == ["NASDAQ100", "NDX", "QQQ"]
+    assert settings.autonomy_admin_users == {1, 2}
+    assert settings.autonomy_admin_roles == {9}
+    assert settings.newswire_query_terms[:3] == ["BTC", "ETH", "HYPE"]
+
+
+def test_autonomy_config_warnings_when_enabled_without_alert_channel():
+    settings = Settings(autonomy_enabled=True, autonomy_alert_channel_id="")
+
+    assert "AUTONOMY_ALERT_CHANNEL_ID" in settings.autonomy_config_warnings()[0]
+
+
+def test_health_config_exposes_autonomy_without_starting_service():
+    app = create_app(Settings(environment="test", position_tracking_enabled=False, autonomy_enabled=True, autonomy_alert_channel_id="123", autonomy_core_universe="BTC,HYPE"))
+    with TestClient(app) as client:
+        response = client.get("/health/config")
+
+    assert response.status_code == 200
+    autonomy = response.json()["autonomy"]
+    assert autonomy["enabled"] is True
+    assert autonomy["mode"] == "paper_signoff"
+    assert autonomy["alert_channel_id_configured"] is True
+    assert autonomy["universe"]["core_symbols"] == ["BTC", "HYPE"]
+    assert autonomy["safety"]["live_execution_enabled"] is False
+    assert autonomy["warnings"] == []
 
 
 def test_debate_model_contract_reports_role_diversity():

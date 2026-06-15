@@ -153,6 +153,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             last_message_at = ws_status.get("last_message_at_ms")
             stale = tracking_status.get("active_count", 0) > 0 and (not last_message_at or int(time.time() * 1000) - int(last_message_at) > 120_000)
             ready_checks["position_tracking"] = "degraded:websocket_stale" if stale else "ok"
+        if settings.autonomy_enabled:
+            autonomy_warnings = settings.autonomy_config_warnings()
+            ready_checks["autonomy"] = "degraded:config" if autonomy_warnings else "ok"
         return {"status": "ready", "checks": ready_checks}
 
     @app.get("/health/config")
@@ -166,6 +169,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "hyperliquid_ws_enabled": settings.hyperliquid_ws_enabled,
             "models": [{"model": item.model, "provider": item.provider, "missing": item.missing_reason} for item in attempts],
             "position_tracking": _tracking_config_status(app),
+            "autonomy": _autonomy_config_status(app),
             "high_stakes": {
                 "enabled": settings.high_stakes_debate_enabled,
                 "activation_policy": settings.high_stakes_activation_policy,
@@ -282,6 +286,69 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     return app
+
+
+def _autonomy_config_status(app: FastAPI) -> dict[str, Any]:
+    settings: Settings = app.state.settings
+    service = getattr(app.state, "autonomy_service", None)
+    service_status = service.status() if service is not None and callable(getattr(service, "status", None)) else {}
+    return {
+        "enabled": settings.autonomy_enabled,
+        "mode": settings.autonomy_mode,
+        "alert_channel_id_configured": settings.autonomy_alert_channel_configured,
+        "require_human_signoff": settings.autonomy_require_human_signoff,
+        "admin_user_count": len(settings.autonomy_admin_users),
+        "admin_role_count": len(settings.autonomy_admin_roles),
+        "universe": {
+            "core_symbols": settings.autonomy_core_symbols,
+            "top_n_perps": settings.autonomy_universe_top_n_perps,
+            "max_tracked_assets": settings.autonomy_max_tracked_assets,
+            "max_hot_l2_assets": settings.autonomy_max_hot_l2_assets,
+            "hip3_dex_count": len(settings.autonomy_hip3_dex_names),
+            "index_aliases": settings.autonomy_index_aliases,
+        },
+        "intervals_seconds": {
+            "loop": settings.autonomy_loop_interval_seconds,
+            "deep_scan": settings.autonomy_deep_scan_interval_seconds,
+            "l2_refresh": settings.autonomy_l2_refresh_seconds,
+            "candle_refresh": settings.autonomy_candle_refresh_seconds,
+            "news_refresh": settings.autonomy_news_refresh_seconds,
+            "portfolio_snapshot": settings.autonomy_portfolio_snapshot_seconds,
+        },
+        "signals": {
+            "max_per_day": settings.autonomy_max_signals_per_day,
+            "ttl_minutes": settings.autonomy_signal_ttl_minutes,
+            "min_score": settings.autonomy_min_signal_score,
+        },
+        "paper": {
+            "initial_equity_usd": settings.autonomy_paper_initial_equity_usd,
+            "risk_pct_per_trade": settings.autonomy_paper_risk_pct_per_trade,
+            "max_gross_leverage": settings.autonomy_paper_max_gross_leverage,
+            "max_single_name_exposure_pct": settings.autonomy_paper_max_single_name_exposure_pct,
+            "taker_fee_bps": settings.autonomy_paper_taker_fee_bps,
+            "maker_fee_bps": settings.autonomy_paper_maker_fee_bps,
+            "default_slippage_bps": settings.autonomy_paper_default_slippage_bps,
+        },
+        "model_insights": {
+            "enabled": settings.autonomy_model_insights_enabled,
+            "min_score": settings.autonomy_model_insight_min_score,
+            "max_calls_per_hour": settings.autonomy_model_max_calls_per_hour,
+        },
+        "newswire": {
+            "enabled": settings.newswire_enabled,
+            "query_count": len(settings.newswire_query_terms),
+            "x_watchlist_count": len(settings.x_watchlist_users),
+            "x_min_public_metric_score": settings.x_min_public_metric_score,
+        },
+        "safety": {
+            "live_execution_enabled": False,
+            "exchange_actions_enabled": settings.hyperliquid_exchange_enabled,
+            "paper_only": True,
+            "human_signoff_required": settings.autonomy_require_human_signoff,
+        },
+        "warnings": settings.autonomy_config_warnings(),
+        "service": service_status,
+    }
 
 
 def _tracking_config_status(app: FastAPI) -> dict[str, Any]:

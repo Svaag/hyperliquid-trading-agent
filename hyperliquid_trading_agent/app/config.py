@@ -93,6 +93,42 @@ class Settings(BaseSettings):
     high_stakes_smart_money_addresses: str = ""
     agent_api_bearer_token: str = ""
 
+    autonomy_enabled: bool = False
+    autonomy_mode: Literal["paper_signoff"] = "paper_signoff"
+    autonomy_alert_channel_id: str = ""
+    autonomy_require_human_signoff: bool = True
+    autonomy_admin_user_ids: str = ""
+    autonomy_admin_role_ids: str = ""
+    autonomy_core_universe: str = "BTC,ETH,HYPE"
+    autonomy_universe_top_n_perps: int = 20
+    autonomy_hip3_dexs: str = ""
+    autonomy_hip3_index_aliases: str = "SP500:SPX|SP500|SPY,NASDAQ100:NDX|NASDAQ|QQQ,NIKKEI225:NIKKEI|NKY,KOSPI:KOSPI"
+    autonomy_loop_interval_seconds: int = 5
+    autonomy_deep_scan_interval_seconds: int = 60
+    autonomy_l2_refresh_seconds: int = 15
+    autonomy_candle_refresh_seconds: int = 60
+    autonomy_news_refresh_seconds: int = 60
+    autonomy_portfolio_snapshot_seconds: int = 60
+    autonomy_max_tracked_assets: int = 40
+    autonomy_max_hot_l2_assets: int = 5
+    autonomy_max_signals_per_day: int = 10
+    autonomy_signal_ttl_minutes: int = 30
+    autonomy_min_signal_score: float = 75.0
+    autonomy_paper_initial_equity_usd: float = 100_000.0
+    autonomy_paper_risk_pct_per_trade: float = 0.25
+    autonomy_paper_max_gross_leverage: float = 3.0
+    autonomy_paper_max_single_name_exposure_pct: float = 20.0
+    autonomy_paper_taker_fee_bps: float = 4.5
+    autonomy_paper_maker_fee_bps: float = 1.5
+    autonomy_paper_default_slippage_bps: float = 2.0
+    autonomy_model_insights_enabled: bool = True
+    autonomy_model_insight_min_score: float = 80.0
+    autonomy_model_max_calls_per_hour: int = 12
+    newswire_enabled: bool = True
+    newswire_queries: str = "BTC,ETH,HYPE,Hyperliquid,Fed,CPI,FOMC,crypto liquidation"
+    x_watchlist_user_ids: str = ""
+    x_min_public_metric_score: int = 0
+
     debate_analyst_model_chain: str = DEFAULT_DEBATE_ROLE_MODEL_CHAINS["analyst"]
     debate_quant_model_chain: str = DEFAULT_DEBATE_ROLE_MODEL_CHAINS["quant"]
     debate_research_model_chain: str = DEFAULT_DEBATE_ROLE_MODEL_CHAINS["research"]
@@ -160,6 +196,50 @@ class Settings(BaseSettings):
     @property
     def smart_money_addresses(self) -> list[str]:
         return [address.lower() for address in _csv(self.high_stakes_smart_money_addresses)]
+
+    @property
+    def autonomy_core_symbols(self) -> list[str]:
+        return [symbol.upper() for symbol in _csv(self.autonomy_core_universe)]
+
+    @property
+    def autonomy_hip3_dex_names(self) -> list[str]:
+        return _csv(self.autonomy_hip3_dexs)
+
+    @property
+    def autonomy_index_aliases(self) -> dict[str, list[str]]:
+        return _alias_map(self.autonomy_hip3_index_aliases)
+
+    @property
+    def autonomy_alert_channel_configured(self) -> bool:
+        return bool(str(self.autonomy_alert_channel_id).strip())
+
+    @property
+    def autonomy_admin_users(self) -> set[int]:
+        return self.admin_user_ids | _csv_ints(self.autonomy_admin_user_ids)
+
+    @property
+    def autonomy_admin_roles(self) -> set[int]:
+        return _csv_ints(self.autonomy_admin_role_ids)
+
+    @property
+    def newswire_query_terms(self) -> list[str]:
+        return _csv(self.newswire_queries)
+
+    @property
+    def x_watchlist_users(self) -> list[str]:
+        return _csv(self.x_watchlist_user_ids)
+
+    def autonomy_config_warnings(self) -> list[str]:
+        warnings: list[str] = []
+        if self.autonomy_enabled and not self.autonomy_alert_channel_configured:
+            warnings.append("AUTONOMY_ALERT_CHANNEL_ID is required to post signals to #ai-bot-alerts")
+        if self.autonomy_enabled and not self.autonomy_require_human_signoff:
+            warnings.append("AUTONOMY_REQUIRE_HUMAN_SIGNOFF=false is unsafe for V1 paper-signoff mode")
+        if self.autonomy_max_hot_l2_assets > self.autonomy_max_tracked_assets:
+            warnings.append("AUTONOMY_MAX_HOT_L2_ASSETS exceeds AUTONOMY_MAX_TRACKED_ASSETS")
+        if not self.autonomy_core_symbols:
+            warnings.append("AUTONOMY_CORE_UNIVERSE is empty")
+        return warnings
 
     def role_model_chain(self, role: str) -> list[str]:
         role_key = _canonical_role(role)
@@ -247,6 +327,26 @@ def _csv_ints(value: str) -> set[int]:
         except ValueError:
             continue
     return result
+
+
+def _alias_map(value: str) -> dict[str, list[str]]:
+    aliases: dict[str, list[str]] = {}
+    for item in _csv(value):
+        name, sep, raw_aliases = item.partition(":")
+        canonical = name.strip().upper()
+        if not canonical:
+            continue
+        parts = [canonical]
+        if sep:
+            parts.extend(part.strip().upper() for part in raw_aliases.split("|") if part.strip())
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for part in parts:
+            if part and part not in seen:
+                seen.add(part)
+                deduped.append(part)
+        aliases[canonical] = deduped
+    return aliases
 
 
 @lru_cache(maxsize=1)
