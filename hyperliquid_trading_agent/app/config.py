@@ -503,7 +503,7 @@ class Settings(BaseSettings):
             "shared_primary_models": shared_primary,
             "judge_primary_model": primary.get("judge"),
             "warnings": warnings,
-            "production_guidance": "Nex-N2-Pro is the dev frontier primary; keep the decision spine (analyst/adversary/judge) and quant/risk on distinct primaries. In production set DEBATE_JUDGE_MODEL_CHAIN to the strongest available frontier/main model.",
+            "production_guidance": "Keep the decision spine (analyst/adversary/judge) on three distinct frontier models and quant/risk on distinct primaries. The judge should be the strongest available model (Claude Opus 4.8); openrouter/fusion is a viable ensemble-judge alternative.",
         }
 
 
