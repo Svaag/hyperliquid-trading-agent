@@ -36,6 +36,11 @@ from hyperliquid_trading_agent.app.hyperliquid.ws_worker import HyperliquidWebSo
 from hyperliquid_trading_agent.app.logging import configure_logging, get_logger
 from hyperliquid_trading_agent.app.metrics import SERVICE_INFO, UP
 from hyperliquid_trading_agent.app.news.service import NewsService
+from hyperliquid_trading_agent.app.newswire.consumers.agent_feed import AgentNewsConsumer
+from hyperliquid_trading_agent.app.newswire.consumers.discord_news import DiscordNewsPublisher
+from hyperliquid_trading_agent.app.newswire.enrich import Enricher
+from hyperliquid_trading_agent.app.newswire.gateway import register_newswire_routes
+from hyperliquid_trading_agent.app.newswire.service import NewswireService
 from hyperliquid_trading_agent.app.tracking.alerts import DiscordAlertSink
 from hyperliquid_trading_agent.app.tracking.service import PositionTrackingService
 
@@ -136,6 +141,11 @@ async def lifespan(app: FastAPI):
     autonomy_service.alert_sink = DiscordAutonomyAlertSink(bot)
     report_service.alert_sink = autonomy_service.alert_sink
 
+    newswire_service = NewswireService(settings=settings, repository=repository)
+    newswire_enricher = Enricher(settings=settings, model_gateway=model_gateway)
+    newswire_discord = DiscordNewsPublisher(settings=settings, bus=newswire_service.bus, alert_sink=DiscordAutonomyAlertSink(bot), enricher=newswire_enricher)
+    newswire_agent_consumer = AgentNewsConsumer(settings=settings, bus=newswire_service.bus, autonomy_service=autonomy_service, repository=repository)
+
     app.state.engine = engine
     app.state.repository = repository
     app.state.hyperliquid = hyperliquid
@@ -151,6 +161,7 @@ async def lifespan(app: FastAPI):
     app.state.memory_service = memory_service
     app.state.report_service = report_service
     app.state.tuning_service = tuning_service
+    app.state.newswire_service = newswire_service
 
     bot_task: asyncio.Task | None = None
     ws_task: asyncio.Task | None = None
@@ -170,11 +181,21 @@ async def lifespan(app: FastAPI):
         log.info("discord_bot_task_started")
     else:
         log.info("discord_bot_disabled", reason="DISCORD_BOT_TOKEN-not-set")
+    if settings.newswire_enabled:
+        # Subscribe consumers before adapters start so no early events are missed.
+        await newswire_discord.start()
+        await newswire_agent_consumer.start()
+        await newswire_service.start()
+        log.info("newswire_started")
     try:
         yield
     finally:
         UP.set(0)
         await bot.stop()
+        if settings.newswire_enabled:
+            await newswire_service.stop()
+            await newswire_discord.stop()
+            await newswire_agent_consumer.stop()
         await autonomy_service.stop()
         await tracking_service.stop()
         await ws_worker.stop()
@@ -276,6 +297,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "newsapi": bool(settings.newsapi_api_key),
                 "perplexity": bool(settings.perplexity_api_key),
                 "x": bool(settings.x_bearer_token),
+            },
+            "newswire": {
+                "enabled": settings.newswire_enabled,
+                "news_channel_configured": settings.newswire_news_channel_configured,
+                "rss_feed_count": len(settings.newswire_rss_feed_urls),
+                "alpaca_news_enabled": settings.alpaca_news_enabled,
+                "trading_economics_enabled": settings.trading_economics_enabled,
+                "x_curated_enabled": settings.x_newswire_enabled,
+                "symbols_universe": settings.newswire_symbols_universe,
+                "llm_enrich_enabled": settings.newswire_llm_enrich_enabled,
+                "thresholds": {
+                    "news_min_importance": settings.newswire_news_min_importance,
+                    "breaking_min_importance": settings.newswire_breaking_min_importance,
+                    "agent_min_importance": settings.newswire_agent_min_importance,
+                },
+                "warnings": settings.newswire_config_warnings(),
+                "service": app.state.newswire_service.status() if getattr(app.state, "newswire_service", None) is not None else {},
             },
         }
 
@@ -679,6 +717,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=401, detail="metrics token required")
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
+    register_newswire_routes(app)
     return app
 
 

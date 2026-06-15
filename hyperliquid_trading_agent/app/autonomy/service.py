@@ -336,7 +336,9 @@ class AutonomousTradingLoopService:
         if ts - self._last_deep_scan_ms >= self.settings.autonomy_deep_scan_interval_seconds * 1000:
             await self._deep_market_scan(ts)
             self._last_deep_scan_ms = ts
-        if ts - self._last_news_ms >= self.settings.autonomy_news_refresh_seconds * 1000:
+        if not self.settings.newswire_enabled and ts - self._last_news_ms >= self.settings.autonomy_news_refresh_seconds * 1000:
+            # When the free-standing Newswire is enabled, AgentNewsConsumer push-feeds the
+            # reducer instead; this in-loop poll is the fallback when it is disabled.
             events = await self.newswire.poll([asset.symbol for asset in self.universe])
             self.reducer.apply_news(events, timestamp_ms=ts)
             for event in events:

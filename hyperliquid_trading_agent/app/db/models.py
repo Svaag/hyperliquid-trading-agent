@@ -323,6 +323,42 @@ class AutonomyNewsEvent(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class NewswireEventRow(TimestampMixin, Base):
+    __tablename__ = "newswire_events"
+    __table_args__ = (
+        Index("ix_newswire_events_received_at_ms", "received_at_ms"),
+        Index("ix_newswire_events_source", "source"),
+        Index("ix_newswire_events_event_type", "event_type"),
+        Index("ix_newswire_events_asset_class", "asset_class"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    transport: Mapped[str] = mapped_column(String(16), nullable=False)
+    received_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    published_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    updated_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    action: Mapped[str] = mapped_column(String(16), nullable=False, default="created")
+    headline: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, default="")
+    url: Mapped[str | None] = mapped_column(Text)
+    author: Mapped[str | None] = mapped_column(String(128))
+    symbols_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    asset_class: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False, default="headline")
+    urgency: Mapped[str] = mapped_column(String(16), nullable=False, default="normal")
+    importance_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    sentiment: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")
+    freshness: Mapped[str] = mapped_column(String(16), nullable=False, default="fresh")
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    source_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    tradability_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    enrichment_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class TradeSignalRecord(TimestampMixin, Base):
     __tablename__ = "trade_signals"
     __table_args__ = (

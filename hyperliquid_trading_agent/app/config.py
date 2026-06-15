@@ -26,6 +26,15 @@ DEFAULT_RSS_FEEDS = (
     ",https://cointelegraph.com/rss"
     ",https://www.federalreserve.gov/feeds/press_all.xml"
 )
+# Newswire reliability layer: filings, halts, press releases, macro, crypto. All keyless.
+# GlobeNewswire / Business Wire / ECB feeds are easy to add via NEWSWIRE_RSS_FEEDS.
+DEFAULT_NEWSWIRE_RSS_FEEDS = (
+    "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&count=40&output=atom"
+    ",http://www.nasdaqtrader.com/rss.aspx?feed=tradehalts"
+    ",https://www.federalreserve.gov/feeds/press_all.xml"
+    ",https://www.coindesk.com/arc/outboundfeeds/rss/"
+    ",https://cointelegraph.com/rss"
+)
 DEFAULT_AUTONOMY_EVAL_HORIZONS = "15m,1h,4h,24h,expiry"
 AUTONOMY_ALLOWED_EVAL_HORIZONS = {"5m", "15m", "1h", "4h", "24h", "72h", "expiry"}
 AUTONOMY_WEEKDAYS = {"MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"}
@@ -159,6 +168,37 @@ class Settings(BaseSettings):
     x_watchlist_user_ids: str = ""
     x_min_public_metric_score: int = 0
 
+    # Free-standing Newswire gateway (ingest -> normalize -> bus -> #news / agent / WS)
+    newswire_news_channel_id: str = ""
+    newswire_digest_interval_seconds: int = 300
+    newswire_news_min_importance: float = 60.0
+    newswire_breaking_min_importance: float = 80.0
+    newswire_agent_min_importance: float = 50.0
+    newswire_max_events_buffer: int = 500
+    newswire_send_min_interval_ms: int = 1200
+    newswire_rss_feeds: str = DEFAULT_NEWSWIRE_RSS_FEEDS
+    newswire_rss_poll_seconds: int = 60
+    newswire_llm_enrich_enabled: bool = True
+    newswire_llm_enrich_min_importance: float = 70.0
+    newswire_llm_enrich_max_calls_per_hour: int = 30
+
+    # Alpaca News WebSocket (free, Benzinga-sourced)
+    alpaca_news_enabled: bool = False
+    alpaca_api_key: str = ""
+    alpaca_api_secret: str = ""
+    alpaca_news_ws_url: str = "wss://stream.data.alpaca.markets/v1beta1/news"
+    alpaca_news_symbols: str = "*"
+
+    # Trading Economics macro calendar WebSocket (guest:guest allowed)
+    trading_economics_enabled: bool = False
+    trading_economics_api_key: str = ""
+    trading_economics_ws_url: str = "wss://stream.tradingeconomics.com/"
+
+    # Curated X / Twitter newswire (reuses X_BEARER_TOKEN + X_WATCHLIST_USER_IDS)
+    x_newswire_enabled: bool = False
+    x_cashtags: str = "BTC,ETH,HYPE,SOL"
+    x_poll_seconds: int = 30
+
     debate_analyst_model_chain: str = DEFAULT_DEBATE_ROLE_MODEL_CHAINS["analyst"]
     debate_quant_model_chain: str = DEFAULT_DEBATE_ROLE_MODEL_CHAINS["quant"]
     debate_research_model_chain: str = DEFAULT_DEBATE_ROLE_MODEL_CHAINS["research"]
@@ -282,6 +322,46 @@ class Settings(BaseSettings):
     @property
     def x_watchlist_users(self) -> list[str]:
         return _csv(self.x_watchlist_user_ids)
+
+    @property
+    def newswire_rss_feed_urls(self) -> list[str]:
+        return _csv(self.newswire_rss_feeds)
+
+    @property
+    def newswire_cashtag_list(self) -> list[str]:
+        return [term.upper().lstrip("$") for term in _csv(self.x_cashtags)]
+
+    @property
+    def alpaca_news_symbol_list(self) -> list[str]:
+        return _csv(self.alpaca_news_symbols)
+
+    @property
+    def newswire_news_channel_configured(self) -> bool:
+        return bool(str(self.newswire_news_channel_id).strip())
+
+    @property
+    def newswire_symbols_universe(self) -> list[str]:
+        """Symbols the normalizer scans for in free-text (core + cashtags + short queries)."""
+        universe = set(self.autonomy_core_symbols) | set(self.newswire_cashtag_list)
+        for term in self.newswire_query_terms:
+            token = term.strip().upper()
+            if token.isalpha() and 2 <= len(token) <= 6:
+                universe.add(token)
+        return sorted(universe)
+
+    def newswire_config_warnings(self) -> list[str]:
+        warnings: list[str] = []
+        if self.newswire_enabled and self.discord_bot_token and not self.newswire_news_channel_configured:
+            warnings.append("NEWSWIRE_NEWS_CHANNEL_ID is required to post the news feed to #news")
+        if self.alpaca_news_enabled and not (self.alpaca_api_key and self.alpaca_api_secret):
+            warnings.append("ALPACA_NEWS_ENABLED requires ALPACA_API_KEY and ALPACA_API_SECRET")
+        if self.trading_economics_enabled and not self.trading_economics_api_key:
+            warnings.append("TRADING_ECONOMICS_ENABLED requires TRADING_ECONOMICS_API_KEY (guest:guest allowed)")
+        if self.x_newswire_enabled and not self.x_bearer_token:
+            warnings.append("X_NEWSWIRE_ENABLED requires X_BEARER_TOKEN")
+        if self.newswire_breaking_min_importance < self.newswire_news_min_importance:
+            warnings.append("NEWSWIRE_BREAKING_MIN_IMPORTANCE should be >= NEWSWIRE_NEWS_MIN_IMPORTANCE")
+        return warnings
 
     def autonomy_config_warnings(self) -> list[str]:
         warnings: list[str] = []

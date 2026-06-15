@@ -25,6 +25,7 @@ design.
   - `POST /autonomy/pause|resume`
   - `POST /autonomy/signals/{signal_id}/approve|reject|expire`
   - `POST /autonomy/evaluations/run`, `/autonomy/reports/daily/run`, `/autonomy/reports/weekly/run`, `/autonomy/feedback`
+  - `GET /newswire/events|events/{event_id}|status|sources`, `WS /newswire/stream`
   - `GET /metrics`
 - Discord mention bot with guild/channel/role allowlists and threaded answers.
 - Risk-routed high-stakes multi-agent debate engine for paper/manual trade proposals only, with institutional role rubrics, endpoint coverage, and optional official SDK `Info` data.
@@ -37,9 +38,10 @@ design.
 - Hyperliquid official `/info` client with TTL cache and conservative process-local rate guard.
 - Official docs grounding through GitBook markdown/`ask=` support plus static safety notes.
 - RSS news, optional Tavily/SerpAPI/NewsAPI/Perplexity search, optional X recent search.
+- Free-standing **Newswire**: a pub/sub news & macro ingestion gateway. Adapters (RSS reliability layer, Alpaca News WebSocket, Trading Economics macro WebSocket, curated X) normalize into one canonical `NewswireEvent`, scored/classified/halt-gated deterministically, then published on a transport-agnostic bus. Consumers: a dedicated Discord `#news` channel (breaking immediate + batched digest), the autonomy market map (push-fed), and external clients via REST + `WS /newswire/stream`. LLM is a second-pass summarizer/ranker only — never the first parser or a tradability gate.
 - Semantic tool gathering for market snapshots, funding, candles, account public state, fills, docs, news, and paper trades.
 - PostgreSQL persistence for audit events, tool calls, conversations, cache, news, paper trades, debate runs, role outputs, state snapshots, trade proposals, autonomous market state, signals, paper orders/fills/positions, and portfolio snapshots.
-- Alembic migrations through `0005_signal_evaluation_memory`.
+- Alembic migrations through `0006_newswire`.
 - Dockerfile and Docker Compose with Postgres.
 
 ## Quick start

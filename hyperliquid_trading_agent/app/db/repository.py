@@ -23,6 +23,7 @@ from hyperliquid_trading_agent.app.db.models import (
     MarketObservation,
     MemoryObservationRecord,
     NewsItem,
+    NewswireEventRow,
     OperatorFeedbackRecord,
     OperatorOutputLessonRecord,
     PaperFillRecord,
@@ -746,6 +747,34 @@ class Repository:
         async with self.sessionmaker() as session:
             result = await session.execute(select(AutonomyNewsEvent).order_by(AutonomyNewsEvent.observed_at_ms.desc()).limit(limit))
             return [_news_event_to_dict(item) for item in result.scalars().all()]
+
+    async def record_newswire_event(self, event: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                event_id = str(event["event_id"])
+                existing = await session.get(NewswireEventRow, event_id)
+                fields = _newswire_kwargs(event)
+                if existing is None:
+                    session.add(NewswireEventRow(event_id=event_id, **fields))
+                elif event.get("action") in {"updated", "removed"}:
+                    for key, value in fields.items():
+                        setattr(existing, key, value)
+                else:
+                    return existing.event_id
+                await session.commit()
+                return event_id
+        except Exception as exc:  # pragma: no cover - duplicate/unavailable persistence should not break ingestion
+            log.warning("newswire_event_record_failed", error=type(exc).__name__)
+            return None
+
+    async def list_newswire_events(self, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            result = await session.execute(select(NewswireEventRow).order_by(NewswireEventRow.received_at_ms.desc()).limit(limit))
+            return [_newswire_event_to_dict(item) for item in result.scalars().all()]
 
     async def create_or_update_trade_signal(self, signal: dict[str, Any], approved_by: str | None = None, rejected_by: str | None = None) -> None:
         if self.sessionmaker is None:
@@ -1541,6 +1570,65 @@ def _news_event_to_dict(item: AutonomyNewsEvent) -> dict[str, Any]:
         "importance_score": item.importance_score,
         "sentiment": item.sentiment,
         "freshness": str((item.metadata_json or {}).get("freshness") or "fresh"),
+        "metadata": item.metadata_json,
+    }
+
+
+def _newswire_kwargs(event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": int(event.get("schema_version") or 1),
+        "source": str(event.get("source") or "unknown"),
+        "provider": str(event.get("provider") or "unknown"),
+        "transport": str(event.get("transport") or "rss"),
+        "received_at_ms": int(event.get("received_at_ms") or 0),
+        "published_at_ms": event.get("published_at_ms"),
+        "updated_at_ms": event.get("updated_at_ms"),
+        "action": str(event.get("action") or "created"),
+        "headline": str(event.get("headline") or ""),
+        "body": str(event.get("body") or ""),
+        "url": event.get("url"),
+        "author": event.get("author"),
+        "symbols_json": list(event.get("symbols") or []),
+        "asset_class": str(event.get("asset_class") or "unknown"),
+        "event_type": str(event.get("event_type") or "headline"),
+        "urgency": str(event.get("urgency") or "normal"),
+        "importance_score": float(event.get("importance_score") or 0),
+        "sentiment": str(event.get("sentiment") or "unknown"),
+        "freshness": str(event.get("freshness") or "fresh"),
+        "confidence": float(event.get("confidence") or 0),
+        "source_score": float(event.get("source_score") or 0),
+        "tradability_json": dict(event.get("tradability") or {}),
+        "enrichment_json": event.get("enrichment"),
+        "metadata_json": redact_secrets(dict(event.get("metadata") or {})),
+    }
+
+
+def _newswire_event_to_dict(item: NewswireEventRow) -> dict[str, Any]:
+    return {
+        "event_id": item.event_id,
+        "schema_version": item.schema_version,
+        "source": item.source,
+        "provider": item.provider,
+        "transport": item.transport,
+        "received_at_ms": item.received_at_ms,
+        "published_at_ms": item.published_at_ms,
+        "updated_at_ms": item.updated_at_ms,
+        "action": item.action,
+        "headline": item.headline,
+        "body": item.body,
+        "url": item.url,
+        "author": item.author,
+        "symbols": item.symbols_json,
+        "asset_class": item.asset_class,
+        "event_type": item.event_type,
+        "urgency": item.urgency,
+        "importance_score": item.importance_score,
+        "sentiment": item.sentiment,
+        "freshness": item.freshness,
+        "confidence": item.confidence,
+        "source_score": item.source_score,
+        "tradability": item.tradability_json,
+        "enrichment": item.enrichment_json,
         "metadata": item.metadata_json,
     }
 
