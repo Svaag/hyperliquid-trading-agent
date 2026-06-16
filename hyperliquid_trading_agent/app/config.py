@@ -188,6 +188,26 @@ class Settings(BaseSettings):
     autonomy_model_insight_min_score: float = 80.0
     autonomy_model_max_calls_per_hour: int = 12
 
+    engine_enabled: bool = False
+    engine_mode: Literal["paper_shadow"] = "paper_shadow"
+    engine_execution_modes: str = "paper,shadow"
+    engine_event_retention_days: int = 7
+    engine_feature_retention_days: int = 14
+    engine_rollup_retention_days: int = 365
+    engine_debate_enabled: bool = True
+    engine_debate_max_per_day: int = 8
+    engine_debate_priority_min: float = 0.35
+    engine_min_net_ev_bps: float = 8.0
+    engine_min_risk_adjusted_utility: float = 0.25
+    engine_max_candidates_per_loop: int = 50
+    engine_max_approved_candidates_per_loop: int = 5
+    engine_model_artifact_dir: str = "/var/lib/hyperliquid-trading-agent/models"
+    engine_approved_scorer_model_id: str = ""
+    engine_scorer_fallback_mode: Literal["deterministic"] = "deterministic"
+    engine_shadow_enabled: bool = True
+    engine_paper_enabled: bool = True
+    engine_live_enabled: bool = False
+
     autonomy_evaluation_enabled: bool = True
     autonomy_event_evaluation_enabled: bool = True
     autonomy_memory_enabled: bool = True
@@ -227,6 +247,10 @@ class Settings(BaseSettings):
     autonomy_memory_require_change_control_for_risk_execution: bool = True
 
     newswire_enabled: bool = True
+    newswire_gateway_enabled: bool = True
+    autonomy_legacy_news_poll_enabled: bool = False
+    news_signal_generation_enabled: bool = True
+    news_event_risk_blocks_enabled: bool = True
     newswire_queries: str = "BTC,ETH,HYPE,Hyperliquid,Fed,CPI,FOMC,crypto liquidation"
     x_watchlist_user_ids: str = ""
     x_min_public_metric_score: int = 0
@@ -320,6 +344,13 @@ class Settings(BaseSettings):
             raise ValueError("ALPACA_TRADING_ENABLED must remain false for the MVP")
         return value
 
+    @field_validator("engine_live_enabled")
+    @classmethod
+    def engine_live_must_remain_disabled(cls, value: bool) -> bool:
+        if value:
+            raise ValueError("ENGINE_LIVE_ENABLED must remain false until a separate live-execution project is approved")
+        return value
+
     @field_validator("hyperliquid_exchange_enabled")
     @classmethod
     def mainnet_exchange_must_remain_disabled(cls, value: bool) -> bool:
@@ -411,6 +442,11 @@ class Settings(BaseSettings):
     @property
     def autonomy_weekly_report_day_normalized(self) -> str:
         return self.autonomy_weekly_report_day.strip().upper()
+
+    @property
+    def engine_execution_mode_list(self) -> list[str]:
+        modes = [item.lower() for item in _csv(self.engine_execution_modes)]
+        return [mode for mode in modes if mode in {"paper", "shadow"}]
 
     @property
     def autonomy_evaluation_effective_enabled(self) -> bool:

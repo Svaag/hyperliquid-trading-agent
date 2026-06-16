@@ -34,8 +34,11 @@ from hyperliquid_trading_agent.app.config import Settings, load_settings
 from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.db.session import create_engine, create_sessionmaker
 from hyperliquid_trading_agent.app.discord_bot import DiscordTradingBot
+from hyperliquid_trading_agent.app.engine.routes import register_engine_routes
+from hyperliquid_trading_agent.app.engine.service import InstitutionalEngineService
 from hyperliquid_trading_agent.app.governance.decision_context import DecisionContextRecorder
 from hyperliquid_trading_agent.app.governance.review import ReviewWorkflowService
+from hyperliquid_trading_agent.app.governance.risk_gateway import RiskGateway
 from hyperliquid_trading_agent.app.governance.routes import register_governance_routes
 from hyperliquid_trading_agent.app.governance.shadow import ShadowComparisonService
 from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
@@ -184,6 +187,7 @@ async def lifespan(app: FastAPI):
     high_stakes_roles = HighStakesRoleRunner(model_gateway=model_gateway, settings=settings, memory_service=memory_service)
     ws_worker = HyperliquidWebSocketWorker(settings=settings)
     tracking_service = PositionTrackingService(settings=settings, repository=repository, ws_worker=ws_worker)
+    risk_gateway = RiskGateway(settings=settings, repository=repository, decision_context_recorder=decision_context_recorder)
     autonomy_service = AutonomousTradingLoopService(
         settings=settings,
         repository=repository,
@@ -202,7 +206,16 @@ async def lifespan(app: FastAPI):
         options_flow=options_flow_detector,
         flow_enricher=flow_enricher,
         decision_context_recorder=decision_context_recorder,
+        risk_gateway=risk_gateway,
     )
+    engine_service = InstitutionalEngineService(
+        settings=settings,
+        repository=repository,
+        hyperliquid=hyperliquid,
+        risk_gateway=risk_gateway,
+        portfolio_service=autonomy_service.portfolio,
+    )
+    autonomy_service.engine_service = engine_service
     report_service.portfolio_service = autonomy_service.portfolio
     report_service.equity_portfolio_service = equity_paper
     high_stakes_graph = HighStakesDebateGraph(
@@ -242,6 +255,7 @@ async def lifespan(app: FastAPI):
     app.state.ws_worker = ws_worker
     app.state.tracking_service = tracking_service
     app.state.autonomy_service = autonomy_service
+    app.state.engine_service = engine_service
     app.state.evaluation_service = evaluation_service
     app.state.event_evaluation_service = event_evaluation_service
     app.state.memory_service = memory_service
@@ -269,11 +283,12 @@ async def lifespan(app: FastAPI):
     if settings.autonomy_enabled:
         autonomy_task = asyncio.create_task(autonomy_service.start(), name="autonomy-service")
         log.info("autonomy_service_task_started")
-    if settings.discord_bot_token:
+    if settings.discord_bot_token and settings.environment.lower() != "test":
         bot_task = asyncio.create_task(bot.start(), name="discord-bot")
         log.info("discord_bot_task_started")
     else:
-        log.info("discord_bot_disabled", reason="DISCORD_BOT_TOKEN-not-set")
+        reason = "test-environment" if settings.environment.lower() == "test" else "DISCORD_BOT_TOKEN-not-set"
+        log.info("discord_bot_disabled", reason=reason)
     if settings.newswire_enabled:
         # Subscribe consumers before adapters start so no early events are missed.
         await newswire_discord.start()
@@ -374,6 +389,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "position_tracking": _tracking_config_status(app),
             "autonomy": _autonomy_config_status(app),
             "tradfi": _tradfi_config_status(app),
+            "engine": {
+                "enabled": settings.engine_enabled,
+                "mode": settings.engine_mode,
+                "execution_modes": settings.engine_execution_mode_list,
+                "paper_enabled": settings.engine_paper_enabled,
+                "shadow_enabled": settings.engine_shadow_enabled,
+                "live_enabled": settings.engine_live_enabled,
+                "debate_enabled": settings.engine_debate_enabled,
+                "debate_priority_min": settings.engine_debate_priority_min,
+                "min_net_ev_bps": settings.engine_min_net_ev_bps,
+                "min_risk_adjusted_utility": settings.engine_min_risk_adjusted_utility,
+            },
             "high_stakes": {
                 "enabled": settings.high_stakes_debate_enabled,
                 "activation_policy": settings.high_stakes_activation_policy,
@@ -1096,6 +1123,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=401, detail="metrics token required")
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
+    register_engine_routes(app, settings, _require_agent_api)
     register_newswire_routes(app)
     return app
 

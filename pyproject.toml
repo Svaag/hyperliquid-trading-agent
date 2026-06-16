@@ -24,6 +24,9 @@ dependencies = [
     "hyperliquid-python-sdk>=0.15.0",
     "langgraph>=1.2.5,<2.0.0",
     "alpaca-py>=0.40.0",
+    "joblib>=1.4",
+    "pandas>=2.2",
+    "scikit-learn>=1.5",
 ]
 
 [project.optional-dependencies]

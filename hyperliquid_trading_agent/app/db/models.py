@@ -457,6 +457,446 @@ class NewswireEventRow(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class NormalizedEventRecord(TimestampMixin, Base):
+    __tablename__ = "normalized_events"
+    __table_args__ = (
+        Index("ix_normalized_events_received_at_ms", "received_ts_ms"),
+        Index("ix_normalized_events_event_type_received", "event_type", "received_ts_ms"),
+        Index("ix_normalized_events_asset_class_received", "asset_class", "received_ts_ms"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    event_type: Mapped[str] = mapped_column(String(96), nullable=False)
+    asset_class: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    symbols_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    source: Mapped[str] = mapped_column(String(96), nullable=False)
+    provider: Mapped[str] = mapped_column(String(96), nullable=False)
+    event_ts_ms: Mapped[int | None] = mapped_column(BigInteger)
+    received_ts_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    computed_ts_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    quality_score: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    staleness_ms: Mapped[int | None] = mapped_column(BigInteger)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class FeatureValueRecord(TimestampMixin, Base):
+    __tablename__ = "feature_values"
+    __table_args__ = (
+        Index("ix_feature_values_asset_feature_computed", "asset", "feature_name", "computed_ts_ms"),
+        Index("ix_feature_values_source_event", "source_event_id"),
+        Index("ix_feature_values_group_computed", "feature_group", "computed_ts_ms"),
+    )
+
+    feature_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    asset: Mapped[str] = mapped_column(String(64), nullable=False)
+    feature_group: Mapped[str] = mapped_column(String(64), nullable=False)
+    feature_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    value_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    scalar_value: Mapped[float | None] = mapped_column(Float)
+    event_ts_ms: Mapped[int | None] = mapped_column(BigInteger)
+    received_ts_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    computed_ts_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_event_id: Mapped[str | None] = mapped_column(String(96))
+    source: Mapped[str] = mapped_column(String(96), nullable=False)
+    version: Mapped[str] = mapped_column(String(96), nullable=False)
+    quality_score: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    staleness_ms: Mapped[int | None] = mapped_column(BigInteger)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class FeatureRollupRecord(TimestampMixin, Base):
+    __tablename__ = "feature_rollups"
+    __table_args__ = (
+        Index("ix_feature_rollups_asset_feature_window", "asset", "feature_name", "window_start_ms"),
+        Index("ix_feature_rollups_interval_window", "interval", "window_start_ms"),
+    )
+
+    rollup_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    asset: Mapped[str] = mapped_column(String(64), nullable=False)
+    feature_group: Mapped[str] = mapped_column(String(64), nullable=False)
+    feature_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    interval: Mapped[str] = mapped_column(String(16), nullable=False)
+    window_start_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    window_end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    min_value: Mapped[float | None] = mapped_column(Float)
+    max_value: Mapped[float | None] = mapped_column(Float)
+    avg_value: Mapped[float | None] = mapped_column(Float)
+    last_value: Mapped[float | None] = mapped_column(Float)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    quality_avg: Mapped[float | None] = mapped_column(Float)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class RegimeSnapshotRecord(TimestampMixin, Base):
+    __tablename__ = "regime_snapshots"
+    __table_args__ = (
+        Index("ix_regime_snapshots_created_at_ms", "created_at_ms"),
+        Index("ix_regime_snapshots_primary_asset_created", "primary_asset", "created_at_ms"),
+    )
+
+    regime_snapshot_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    primary_asset: Mapped[str] = mapped_column(String(64), nullable=False, default="GLOBAL")
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    as_of_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    vector_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    permissions_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    feature_refs_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    quality_flags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class AlphaCandidateRecord(TimestampMixin, Base):
+    __tablename__ = "alpha_candidates"
+    __table_args__ = (
+        Index("ix_alpha_candidates_status_created", "status", "created_at_ms"),
+        Index("ix_alpha_candidates_asset_status", "asset", "status"),
+        Index("ix_alpha_candidates_strategy_created", "strategy_id", "created_at_ms"),
+    )
+
+    candidate_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    strategy_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    asset: Mapped[str] = mapped_column(String(64), nullable=False)
+    asset_class: Mapped[str] = mapped_column(String(32), nullable=False, default="crypto")
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    horizon: Mapped[str] = mapped_column(String(32), nullable=False)
+    proposed_entry: Mapped[float] = mapped_column(Float, nullable=False)
+    stop: Mapped[float] = mapped_column(Float, nullable=False)
+    targets_json: Mapped[list[float]] = mapped_column(JSON, default=list)
+    thesis: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    invalidation_conditions_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    feature_snapshot_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    regime_snapshot_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    source_event_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    raw_alpha_score: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="new")
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expires_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class CandidateBookSnapshotRecord(TimestampMixin, Base):
+    __tablename__ = "candidate_book_snapshots"
+    __table_args__ = (Index("ix_candidate_book_snapshots_created", "created_at_ms"),)
+
+    candidate_book_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    as_of_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    candidate_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    ranked_candidate_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    rejected_candidate_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    portfolio_state_ref: Mapped[str | None] = mapped_column(String(128))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class EVEstimateRecord(TimestampMixin, Base):
+    __tablename__ = "ev_estimates"
+    __table_args__ = (
+        Index("ix_ev_estimates_candidate", "candidate_id"),
+        Index("ix_ev_estimates_created_at_ms", "created_at_ms"),
+    )
+
+    estimate_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    model_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    p_target: Mapped[float] = mapped_column(Float, nullable=False)
+    p_stop: Mapped[float] = mapped_column(Float, nullable=False)
+    p_timeout: Mapped[float] = mapped_column(Float, nullable=False)
+    expected_favorable_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    expected_adverse_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    expected_holding_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expected_fee_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    expected_spread_cost_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    expected_slippage_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    expected_market_impact_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    expected_funding_cost_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    tail_loss_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    net_ev_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    risk_adjusted_utility: Mapped[float] = mapped_column(Float, nullable=False)
+    uncertainty: Mapped[float] = mapped_column(Float, nullable=False)
+    calibration_bucket: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class AllocationDecisionRecord(TimestampMixin, Base):
+    __tablename__ = "allocation_decisions"
+    __table_args__ = (
+        Index("ix_allocation_decisions_candidate", "candidate_id"),
+        Index("ix_allocation_decisions_created", "created_at_ms"),
+    )
+
+    allocation_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    candidate_book_id: Mapped[str | None] = mapped_column(String(96))
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    allocated_size: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    allocated_notional_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    risk_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    max_size_multiplier: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    opportunity_cost_rank: Mapped[int | None] = mapped_column(Integer)
+    constraints_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    reason_codes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class EvidencePackRecord(TimestampMixin, Base):
+    __tablename__ = "evidence_packs"
+    __table_args__ = (Index("ix_evidence_packs_candidate", "candidate_id"),)
+
+    evidence_pack_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    asset: Mapped[str] = mapped_column(String(64), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    horizon: Mapped[str] = mapped_column(String(32), nullable=False)
+    feature_snapshot_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    pack_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class DebateDecisionRecord(TimestampMixin, Base):
+    __tablename__ = "debate_decisions"
+    __table_args__ = (
+        Index("ix_debate_decisions_candidate", "candidate_id"),
+        Index("ix_debate_decisions_evidence_pack", "evidence_pack_id"),
+        Index("ix_debate_decisions_created", "created_at_ms"),
+    )
+
+    debate_decision_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    evidence_pack_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    candidate_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    confidence_adjustment: Mapped[float] = mapped_column(Float, nullable=False)
+    max_size_multiplier: Mapped[float] = mapped_column(Float, nullable=False)
+    reason_codes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    required_invalidation_checks_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    audit_summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    role_outputs_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    judge_model: Mapped[str | None] = mapped_column(String(255))
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class OrderIntentRecord(TimestampMixin, Base):
+    __tablename__ = "order_intents"
+    __table_args__ = (
+        Index("ix_order_intents_candidate", "parent_candidate_id"),
+        Index("ix_order_intents_created", "created_at_ms"),
+        Index("ix_order_intents_mode", "execution_mode"),
+    )
+
+    intent_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    parent_candidate_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    portfolio_decision_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    asset: Mapped[str] = mapped_column(String(64), nullable=False)
+    asset_class: Mapped[str] = mapped_column(String(32), nullable=False, default="crypto")
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    order_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    time_in_force: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_size: Mapped[float] = mapped_column(Float, nullable=False)
+    target_notional_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    max_slippage_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    price_limit: Mapped[float | None] = mapped_column(Float)
+    reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    post_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    deadline_ts_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    model_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    config_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    risk_budget_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    execution_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class ExecutionReportRecord(TimestampMixin, Base):
+    __tablename__ = "execution_reports"
+    __table_args__ = (
+        Index("ix_execution_reports_intent", "intent_id"),
+        Index("ix_execution_reports_created", "created_at_ms"),
+        Index("ix_execution_reports_mode_status", "execution_mode", "status"),
+    )
+
+    report_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    intent_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    execution_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    requested_size: Mapped[float] = mapped_column(Float, nullable=False)
+    filled_size: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    avg_fill_px: Mapped[float | None] = mapped_column(Float)
+    fees_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    slippage_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    market_impact_bps: Mapped[float | None] = mapped_column(Float)
+    adapter: Mapped[str] = mapped_column(String(32), nullable=False)
+    assumptions_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class PositionThesisRecord(TimestampMixin, Base):
+    __tablename__ = "position_theses"
+    __table_args__ = (
+        Index("ix_position_theses_asset_state", "asset", "position_state"),
+        Index("ix_position_theses_candidate", "entry_candidate_id"),
+    )
+
+    position_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    entry_candidate_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    asset: Mapped[str] = mapped_column(String(64), nullable=False)
+    asset_class: Mapped[str] = mapped_column(String(32), nullable=False, default="crypto")
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    entry_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    expected_horizon: Mapped[str] = mapped_column(String(32), nullable=False)
+    stop: Mapped[float] = mapped_column(Float, nullable=False)
+    targets_json: Mapped[list[float]] = mapped_column(JSON, default=list)
+    invalidation_rules_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    thesis_features_at_entry_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    current_thesis_score: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    degradation_reasons_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    position_state: Mapped[str] = mapped_column(String(32), nullable=False, default="proposed")
+    execution_report_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    opened_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    closed_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class ReconciliationRunRecord(TimestampMixin, Base):
+    __tablename__ = "reconciliation_runs"
+    __table_args__ = (Index("ix_reconciliation_runs_started", "started_at_ms"),)
+
+    reconciliation_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    execution_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    expected_positions_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    observed_positions_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    mismatches_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    started_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    completed_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class PnLAttributionRecord(TimestampMixin, Base):
+    __tablename__ = "pnl_attribution_records"
+    __table_args__ = (
+        Index("ix_pnl_attribution_asset_window", "asset", "window_start_ms", "window_end_ms"),
+        Index("ix_pnl_attribution_strategy", "strategy_id"),
+    )
+
+    attribution_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    position_id: Mapped[str | None] = mapped_column(String(96))
+    candidate_id: Mapped[str | None] = mapped_column(String(96))
+    strategy_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    asset: Mapped[str] = mapped_column(String(64), nullable=False)
+    window_start_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    window_end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    alpha_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    timing_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    execution_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    fees_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    funding_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    residual_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    total_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class KillSwitchEventRecord(TimestampMixin, Base):
+    __tablename__ = "kill_switch_events"
+    __table_args__ = (
+        Index("ix_kill_switch_events_scope_action", "scope", "action"),
+        Index("ix_kill_switch_events_created", "created_at_ms"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    triggered_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    affected_assets_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    affected_strategies_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    block_new_orders: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    cancel_open_orders: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    freeze_config_changes: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expires_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class ModelVersionRecord(TimestampMixin, Base):
+    __tablename__ = "model_versions"
+    __table_args__ = (
+        Index("ix_model_versions_status", "status"),
+        Index("ix_model_versions_model_type", "model_type"),
+    )
+
+    model_version_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    model_type: Mapped[str] = mapped_column(String(96), nullable=False)
+    artifact_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    training_data_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    feature_schema_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String(128))
+    approved_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class ModelTrainingRunRecord(TimestampMixin, Base):
+    __tablename__ = "model_training_runs"
+    __table_args__ = (Index("ix_model_training_runs_created", "created_at_ms"),)
+
+    training_run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    model_version_id: Mapped[str | None] = mapped_column(String(128))
+    model_type: Mapped[str] = mapped_column(String(96), nullable=False)
+    dataset_start_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    dataset_end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    training_data_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    feature_schema_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    code_version: Mapped[str | None] = mapped_column(String(64))
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    artifact_uri: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    completed_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class FeatureSchemaVersionRecord(TimestampMixin, Base):
+    __tablename__ = "feature_schema_versions"
+
+    feature_schema_version_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    schema_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    feature_names_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    feature_definitions_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class RetentionRunRecord(TimestampMixin, Base):
+    __tablename__ = "retention_runs"
+    __table_args__ = (Index("ix_retention_runs_started", "started_at_ms"),)
+
+    retention_run_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    started_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    completed_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    deleted_counts_json: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)
+    rollup_counts_json: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)
+    caveats_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class TradeSignalRecord(TimestampMixin, Base):
     __tablename__ = "trade_signals"
     __table_args__ = (

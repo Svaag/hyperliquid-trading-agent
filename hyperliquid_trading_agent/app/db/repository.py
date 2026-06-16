@@ -7,18 +7,22 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from hyperliquid_trading_agent.app.db.models import (
+    AllocationDecisionRecord,
+    AlphaCandidateRecord,
     AlphaEventEvaluationMarkRecord,
     AlphaEventEvaluationRecord,
     AuditEvent,
     AutonomyEvent,
     AutonomyNewsEvent,
     CacheItem,
+    CandidateBookSnapshotRecord,
     CandidateConfigDiffRecord,
     CandidateLessonRecord,
     ConfigVersionRecord,
     ConversationMessage,
     ConversationThread,
     DailyReportRecord,
+    DebateDecisionRecord,
     DecisionContextRecord,
     DecisionRoleOutput,
     DecisionRun,
@@ -29,26 +33,42 @@ from hyperliquid_trading_agent.app.db.models import (
     EquityPaperPortfolioRecord,
     EquityPaperPositionRecord,
     EquityPortfolioSnapshotRecord,
+    EVEstimateRecord,
+    EvidencePackRecord,
+    ExecutionReportRecord,
+    FeatureRollupRecord,
+    FeatureSchemaVersionRecord,
+    FeatureValueRecord,
+    KillSwitchEventRecord,
     MarketAssetRecord,
     MarketLevelRecord,
     MarketObservation,
     MemoryInjectionEventRecord,
     MemoryObservationRecord,
+    ModelTrainingRunRecord,
+    ModelVersionRecord,
     NewsItem,
     NewswireEventRow,
+    NormalizedEventRecord,
     OperatorFeedbackRecord,
     OperatorOutputLessonRecord,
+    OrderIntentRecord,
     PaperFillRecord,
     PaperOrderRecord,
     PaperPortfolioRecord,
     PaperPositionRecord,
     PaperTradeIdea,
     PaperTradeSnapshot,
+    PnLAttributionRecord,
     PortfolioSnapshotRecord,
+    PositionThesisRecord,
     PositionTracker,
     PromotionDecisionRecord,
     PromptVersionRecord,
+    ReconciliationRunRecord,
+    RegimeSnapshotRecord,
     ReplayResultRecord,
+    RetentionRunRecord,
     ReviewPacketRecord,
     RiskGatewayDecisionRecord,
     RoleLessonRecord,
@@ -416,6 +436,546 @@ class Repository:
                 return [_risk_gateway_decision_to_dict(item) for item in result.scalars().all()]
         except Exception as exc:  # pragma: no cover
             log.warning("risk_gateway_decisions_list_failed", error=type(exc).__name__)
+            return []
+
+    async def record_normalized_event(self, event: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            NormalizedEventRecord(
+                event_id=str(event["event_id"]),
+                schema_version=int(event.get("schema_version") or 1),
+                event_type=str(event.get("event_type") or "unknown"),
+                asset_class=str(event.get("asset_class") or "unknown"),
+                symbols_json=list(event.get("symbols") or []),
+                source=str(event.get("source") or "unknown"),
+                provider=str(event.get("provider") or "unknown"),
+                event_ts_ms=event.get("event_ts_ms"),
+                received_ts_ms=int(event.get("received_ts_ms") or 0),
+                computed_ts_ms=int(event.get("computed_ts_ms") or 0),
+                payload_json=redact_secrets(dict(event.get("payload") or {})),
+                quality_score=float(event.get("quality_score") if event.get("quality_score") is not None else 1.0),
+                staleness_ms=event.get("staleness_ms"),
+                metadata_json=redact_secrets(dict(event.get("metadata") or {})),
+            ),
+            "event_id",
+        )
+
+    async def get_normalized_event(self, event_id: str) -> dict[str, Any] | None:
+        return await self._get_engine_record(NormalizedEventRecord, event_id)
+
+    async def list_normalized_events(self, *, limit: int = 100, event_type: str | None = None, asset_class: str | None = None) -> list[dict[str, Any]]:
+        filters = []
+        if event_type:
+            filters.append(NormalizedEventRecord.event_type == event_type)
+        if asset_class:
+            filters.append(NormalizedEventRecord.asset_class == asset_class)
+        return await self._list_engine_records(NormalizedEventRecord, order_by=NormalizedEventRecord.received_ts_ms, limit=limit, filters=filters)
+
+    async def record_feature_value(self, feature: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            FeatureValueRecord(
+                feature_id=str(feature["feature_id"]),
+                asset=str(feature.get("asset") or "").upper(),
+                feature_group=str(feature.get("feature_group") or "unknown"),
+                feature_name=str(feature.get("feature_name") or "unknown"),
+                value_json=redact_secrets(dict(feature.get("value") or {})),
+                scalar_value=feature.get("scalar_value"),
+                event_ts_ms=feature.get("event_ts_ms"),
+                received_ts_ms=int(feature.get("received_ts_ms") or 0),
+                computed_ts_ms=int(feature.get("computed_ts_ms") or 0),
+                source_event_id=feature.get("source_event_id"),
+                source=str(feature.get("source") or "unknown"),
+                version=str(feature.get("version") or "v0"),
+                quality_score=float(feature.get("quality_score") if feature.get("quality_score") is not None else 1.0),
+                staleness_ms=feature.get("staleness_ms"),
+                metadata_json=redact_secrets(dict(feature.get("metadata") or {})),
+            ),
+            "feature_id",
+        )
+
+    async def list_feature_values(self, *, asset: str | None = None, feature_name: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = []
+        if asset:
+            filters.append(FeatureValueRecord.asset == asset.upper())
+        if feature_name:
+            filters.append(FeatureValueRecord.feature_name == feature_name)
+        return await self._list_engine_records(FeatureValueRecord, order_by=FeatureValueRecord.computed_ts_ms, limit=limit, filters=filters)
+
+    async def record_feature_rollup(self, rollup: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            FeatureRollupRecord(
+                rollup_id=str(rollup["rollup_id"]),
+                asset=str(rollup.get("asset") or "").upper(),
+                feature_group=str(rollup.get("feature_group") or "unknown"),
+                feature_name=str(rollup.get("feature_name") or "unknown"),
+                interval=str(rollup.get("interval") or "1m"),
+                window_start_ms=int(rollup.get("window_start_ms") or 0),
+                window_end_ms=int(rollup.get("window_end_ms") or 0),
+                min_value=rollup.get("min_value"),
+                max_value=rollup.get("max_value"),
+                avg_value=rollup.get("avg_value"),
+                last_value=rollup.get("last_value"),
+                count=int(rollup.get("count") or 0),
+                quality_avg=rollup.get("quality_avg"),
+                metadata_json=redact_secrets(dict(rollup.get("metadata") or {})),
+            ),
+            "rollup_id",
+        )
+
+    async def record_regime_snapshot(self, regime: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            RegimeSnapshotRecord(
+                regime_snapshot_id=str(regime["regime_snapshot_id"]),
+                primary_asset=str(regime.get("primary_asset") or "GLOBAL").upper(),
+                created_at_ms=int(regime.get("created_at_ms") or 0),
+                as_of_ms=int(regime.get("as_of_ms") or regime.get("created_at_ms") or 0),
+                vector_json=redact_secrets(dict(regime)),
+                permissions_json=redact_secrets(dict(regime.get("permissions") or {})),
+                feature_refs_json=list(regime.get("feature_refs") or []),
+                quality_flags_json=list(regime.get("quality_flags") or []),
+                metadata_json=redact_secrets(dict(regime.get("metadata") or {})),
+            ),
+            "regime_snapshot_id",
+        )
+
+    async def latest_regime_snapshot(self, primary_asset: str | None = None) -> dict[str, Any] | None:
+        items = await self._list_engine_records(
+            RegimeSnapshotRecord,
+            order_by=RegimeSnapshotRecord.created_at_ms,
+            limit=1,
+            filters=[RegimeSnapshotRecord.primary_asset == primary_asset.upper()] if primary_asset else [],
+        )
+        return items[0] if items else None
+
+    async def record_alpha_candidate(self, candidate: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            AlphaCandidateRecord(
+                candidate_id=str(candidate["candidate_id"]),
+                strategy_id=str(candidate.get("strategy_id") or "unknown"),
+                asset=str(candidate.get("asset") or "").upper(),
+                asset_class=str(candidate.get("asset_class") or "unknown"),
+                venue=str(candidate.get("venue") or "unknown"),
+                side=str(candidate.get("side") or "flat"),
+                horizon=str(candidate.get("horizon") or "unknown"),
+                proposed_entry=float(candidate.get("proposed_entry") or 0),
+                stop=float(candidate.get("stop") or 0),
+                targets_json=list(candidate.get("targets") or []),
+                thesis=str(candidate.get("thesis") or ""),
+                invalidation_conditions_json=list(candidate.get("invalidation_conditions") or []),
+                feature_snapshot_id=str(candidate.get("feature_snapshot_id") or ""),
+                regime_snapshot_id=str(candidate.get("regime_snapshot_id") or ""),
+                source_event_ids_json=list(candidate.get("source_event_ids") or []),
+                raw_alpha_score=float(candidate.get("raw_alpha_score") or 0),
+                confidence=float(candidate.get("confidence") or 0),
+                status=str(candidate.get("status") or "new"),
+                created_at_ms=int(candidate.get("created_at_ms") or 0),
+                expires_at_ms=int(candidate.get("expires_at_ms") or 0),
+                metadata_json=redact_secrets(dict(candidate.get("metadata") or {})),
+            ),
+            "candidate_id",
+        )
+
+    async def get_alpha_candidate(self, candidate_id: str) -> dict[str, Any] | None:
+        return await self._get_engine_record(AlphaCandidateRecord, candidate_id)
+
+    async def list_alpha_candidates(self, *, status: str | None = None, asset: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = []
+        if status:
+            filters.append(AlphaCandidateRecord.status == status)
+        if asset:
+            filters.append(AlphaCandidateRecord.asset == asset.upper())
+        return await self._list_engine_records(AlphaCandidateRecord, order_by=AlphaCandidateRecord.created_at_ms, limit=limit, filters=filters)
+
+    async def record_candidate_book_snapshot(self, snapshot: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            CandidateBookSnapshotRecord(
+                candidate_book_id=str(snapshot["candidate_book_id"]),
+                created_at_ms=int(snapshot.get("created_at_ms") or 0),
+                as_of_ms=int(snapshot.get("as_of_ms") or snapshot.get("created_at_ms") or 0),
+                candidate_ids_json=list(snapshot.get("candidate_ids") or []),
+                ranked_candidate_ids_json=list(snapshot.get("ranked_candidate_ids") or []),
+                rejected_candidate_ids_json=list(snapshot.get("rejected_candidate_ids") or []),
+                portfolio_state_ref=snapshot.get("portfolio_state_ref"),
+                metadata_json=redact_secrets(dict(snapshot.get("metadata") or {})),
+            ),
+            "candidate_book_id",
+        )
+
+    async def latest_candidate_book_snapshot(self) -> dict[str, Any] | None:
+        items = await self._list_engine_records(CandidateBookSnapshotRecord, order_by=CandidateBookSnapshotRecord.created_at_ms, limit=1)
+        return items[0] if items else None
+
+    async def record_ev_estimate(self, estimate: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            EVEstimateRecord(
+                estimate_id=str(estimate["estimate_id"]),
+                candidate_id=str(estimate.get("candidate_id") or ""),
+                model_version_id=str(estimate.get("model_version_id") or "unknown"),
+                p_target=float(estimate.get("p_target") or 0),
+                p_stop=float(estimate.get("p_stop") or 0),
+                p_timeout=float(estimate.get("p_timeout") or 0),
+                expected_favorable_bps=float(estimate.get("expected_favorable_bps") or 0),
+                expected_adverse_bps=float(estimate.get("expected_adverse_bps") or 0),
+                expected_holding_ms=int(estimate.get("expected_holding_ms") or 0),
+                expected_fee_bps=float(estimate.get("expected_fee_bps") or 0),
+                expected_spread_cost_bps=float(estimate.get("expected_spread_cost_bps") or 0),
+                expected_slippage_bps=float(estimate.get("expected_slippage_bps") or 0),
+                expected_market_impact_bps=float(estimate.get("expected_market_impact_bps") or 0),
+                expected_funding_cost_bps=float(estimate.get("expected_funding_cost_bps") or 0),
+                tail_loss_bps=float(estimate.get("tail_loss_bps") or 0),
+                net_ev_bps=float(estimate.get("net_ev_bps") or 0),
+                risk_adjusted_utility=float(estimate.get("risk_adjusted_utility") or 0),
+                uncertainty=float(estimate.get("uncertainty") or 0),
+                calibration_bucket=str(estimate.get("calibration_bucket") or "unknown"),
+                created_at_ms=int(estimate.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(estimate.get("metadata") or {})),
+            ),
+            "estimate_id",
+        )
+
+    async def list_ev_estimates(self, *, candidate_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = [EVEstimateRecord.candidate_id == candidate_id] if candidate_id else []
+        return await self._list_engine_records(EVEstimateRecord, order_by=EVEstimateRecord.created_at_ms, limit=limit, filters=filters)
+
+    async def record_allocation_decision(self, allocation: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            AllocationDecisionRecord(
+                allocation_id=str(allocation["allocation_id"]),
+                candidate_id=str(allocation.get("candidate_id") or ""),
+                candidate_book_id=allocation.get("candidate_book_id"),
+                status=str(allocation.get("status") or "skip"),
+                allocated_size=float(allocation.get("allocated_size") or 0),
+                allocated_notional_usd=float(allocation.get("allocated_notional_usd") or 0),
+                risk_usd=float(allocation.get("risk_usd") or 0),
+                max_size_multiplier=float(allocation.get("max_size_multiplier") if allocation.get("max_size_multiplier") is not None else 1.0),
+                opportunity_cost_rank=allocation.get("opportunity_cost_rank"),
+                constraints_json=redact_secrets(dict(allocation.get("constraints") or {})),
+                reason_codes_json=list(allocation.get("reason_codes") or []),
+                created_at_ms=int(allocation.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(allocation.get("metadata") or {})),
+            ),
+            "allocation_id",
+        )
+
+    async def list_allocation_decisions(self, *, candidate_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = [AllocationDecisionRecord.candidate_id == candidate_id] if candidate_id else []
+        return await self._list_engine_records(AllocationDecisionRecord, order_by=AllocationDecisionRecord.created_at_ms, limit=limit, filters=filters)
+
+    async def record_evidence_pack(self, pack: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            EvidencePackRecord(
+                evidence_pack_id=str(pack["evidence_pack_id"]),
+                candidate_id=str(pack.get("candidate_id") or ""),
+                strategy_id=str(pack.get("strategy_id") or ""),
+                asset=str(pack.get("asset") or "").upper(),
+                side=str(pack.get("side") or ""),
+                horizon=str(pack.get("horizon") or ""),
+                feature_snapshot_id=str(pack.get("feature_snapshot_id") or ""),
+                pack_json=redact_secrets(dict(pack)),
+                created_at_ms=int(pack.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(pack.get("metadata") or {})),
+            ),
+            "evidence_pack_id",
+        )
+
+    async def get_evidence_pack(self, evidence_pack_id: str) -> dict[str, Any] | None:
+        return await self._get_engine_record(EvidencePackRecord, evidence_pack_id)
+
+    async def record_debate_decision(self, decision: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            DebateDecisionRecord(
+                debate_decision_id=str(decision["debate_decision_id"]),
+                evidence_pack_id=str(decision.get("evidence_pack_id") or ""),
+                candidate_id=str(decision.get("candidate_id") or ""),
+                decision=str(decision.get("decision") or "require_more_data"),
+                confidence_adjustment=float(decision.get("confidence_adjustment") or 0),
+                max_size_multiplier=float(decision.get("max_size_multiplier") if decision.get("max_size_multiplier") is not None else 1.0),
+                reason_codes_json=list(decision.get("reason_codes") or []),
+                required_invalidation_checks_json=list(decision.get("required_invalidation_checks") or []),
+                audit_summary=str(decision.get("audit_summary") or ""),
+                role_outputs_json=redact_secrets(list(decision.get("role_outputs") or [])),
+                judge_model=decision.get("judge_model"),
+                created_at_ms=int(decision.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(decision.get("metadata") or {})),
+            ),
+            "debate_decision_id",
+        )
+
+    async def list_debate_decisions(self, *, candidate_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = [DebateDecisionRecord.candidate_id == candidate_id] if candidate_id else []
+        return await self._list_engine_records(DebateDecisionRecord, order_by=DebateDecisionRecord.created_at_ms, limit=limit, filters=filters)
+
+    async def record_order_intent(self, intent: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            OrderIntentRecord(
+                intent_id=str(intent["intent_id"]),
+                parent_candidate_id=str(intent.get("parent_candidate_id") or ""),
+                portfolio_decision_id=str(intent.get("portfolio_decision_id") or ""),
+                asset=str(intent.get("asset") or "").upper(),
+                asset_class=str(intent.get("asset_class") or "unknown"),
+                venue=str(intent.get("venue") or "unknown"),
+                side=str(intent.get("side") or "buy"),
+                order_type=str(intent.get("order_type") or "marketable_limit"),
+                time_in_force=str(intent.get("time_in_force") or "ioc"),
+                target_size=float(intent.get("target_size") or 0),
+                target_notional_usd=float(intent.get("target_notional_usd") or 0),
+                max_slippage_bps=float(intent.get("max_slippage_bps") or 0),
+                price_limit=intent.get("price_limit"),
+                reduce_only=bool(intent.get("reduce_only", False)),
+                post_only=bool(intent.get("post_only", False)),
+                deadline_ts_ms=int(intent.get("deadline_ts_ms") or 0),
+                strategy_id=str(intent.get("strategy_id") or "unknown"),
+                model_version_id=str(intent.get("model_version_id") or "unknown"),
+                config_version_id=str(intent.get("config_version_id") or "unknown"),
+                risk_budget_id=str(intent.get("risk_budget_id") or "unknown"),
+                execution_mode=str(intent.get("execution_mode") or "paper"),
+                created_at_ms=int(intent.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(intent.get("metadata") or {})),
+            ),
+            "intent_id",
+        )
+
+    async def list_order_intents(self, *, execution_mode: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = [OrderIntentRecord.execution_mode == execution_mode] if execution_mode else []
+        return await self._list_engine_records(OrderIntentRecord, order_by=OrderIntentRecord.created_at_ms, limit=limit, filters=filters)
+
+    async def record_execution_report(self, report: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            ExecutionReportRecord(
+                report_id=str(report["report_id"]),
+                intent_id=str(report.get("intent_id") or ""),
+                execution_mode=str(report.get("execution_mode") or "paper"),
+                status=str(report.get("status") or "accepted"),
+                requested_size=float(report.get("requested_size") or 0),
+                filled_size=float(report.get("filled_size") or 0),
+                avg_fill_px=report.get("avg_fill_px"),
+                fees_usd=float(report.get("fees_usd") or 0),
+                slippage_bps=float(report.get("slippage_bps") or 0),
+                market_impact_bps=report.get("market_impact_bps"),
+                adapter=str(report.get("adapter") or report.get("execution_mode") or "paper"),
+                assumptions_json=redact_secrets(dict(report.get("assumptions") or {})),
+                created_at_ms=int(report.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(report.get("metadata") or {})),
+            ),
+            "report_id",
+        )
+
+    async def list_execution_reports(self, *, intent_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = [ExecutionReportRecord.intent_id == intent_id] if intent_id else []
+        return await self._list_engine_records(ExecutionReportRecord, order_by=ExecutionReportRecord.created_at_ms, limit=limit, filters=filters)
+
+    async def record_position_thesis(self, thesis: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            PositionThesisRecord(
+                position_id=str(thesis["position_id"]),
+                entry_candidate_id=str(thesis.get("entry_candidate_id") or ""),
+                strategy_id=str(thesis.get("strategy_id") or ""),
+                asset=str(thesis.get("asset") or "").upper(),
+                asset_class=str(thesis.get("asset_class") or "unknown"),
+                venue=str(thesis.get("venue") or "unknown"),
+                side=str(thesis.get("side") or "long"),
+                entry_reason=str(thesis.get("entry_reason") or ""),
+                expected_horizon=str(thesis.get("expected_horizon") or ""),
+                stop=float(thesis.get("stop") or 0),
+                targets_json=list(thesis.get("targets") or []),
+                invalidation_rules_json=list(thesis.get("invalidation_rules") or []),
+                thesis_features_at_entry_json=redact_secrets(dict(thesis.get("thesis_features_at_entry") or {})),
+                current_thesis_score=float(thesis.get("current_thesis_score") if thesis.get("current_thesis_score") is not None else 1.0),
+                degradation_reasons_json=list(thesis.get("degradation_reasons") or []),
+                position_state=str(thesis.get("position_state") or "proposed"),
+                execution_report_ids_json=list(thesis.get("execution_report_ids") or []),
+                opened_at_ms=thesis.get("opened_at_ms"),
+                updated_at_ms=int(thesis.get("updated_at_ms") or 0),
+                closed_at_ms=thesis.get("closed_at_ms"),
+                metadata_json=redact_secrets(dict(thesis.get("metadata") or {})),
+            ),
+            "position_id",
+        )
+
+    async def list_position_theses(self, *, state: str | None = None, asset: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = []
+        if state:
+            filters.append(PositionThesisRecord.position_state == state)
+        if asset:
+            filters.append(PositionThesisRecord.asset == asset.upper())
+        return await self._list_engine_records(PositionThesisRecord, order_by=PositionThesisRecord.updated_at_ms, limit=limit, filters=filters)
+
+    async def record_reconciliation_run(self, run: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            ReconciliationRunRecord(
+                reconciliation_id=str(run["reconciliation_id"]),
+                execution_mode=str(run.get("execution_mode") or "paper"),
+                status=str(run.get("status") or "ok"),
+                expected_positions_json=redact_secrets(list(run.get("expected_positions") or [])),
+                observed_positions_json=redact_secrets(list(run.get("observed_positions") or [])),
+                mismatches_json=redact_secrets(list(run.get("mismatches") or [])),
+                started_at_ms=int(run.get("started_at_ms") or 0),
+                completed_at_ms=run.get("completed_at_ms"),
+                metadata_json=redact_secrets(dict(run.get("metadata") or {})),
+            ),
+            "reconciliation_id",
+        )
+
+    async def list_reconciliation_runs(self, *, execution_mode: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = [ReconciliationRunRecord.execution_mode == execution_mode] if execution_mode else []
+        return await self._list_engine_records(ReconciliationRunRecord, order_by=ReconciliationRunRecord.started_at_ms, limit=limit, filters=filters)
+
+    async def record_pnl_attribution(self, item: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            PnLAttributionRecord(
+                attribution_id=str(item["attribution_id"]),
+                position_id=item.get("position_id"),
+                candidate_id=item.get("candidate_id"),
+                strategy_id=str(item.get("strategy_id") or "unknown"),
+                asset=str(item.get("asset") or "").upper(),
+                window_start_ms=int(item.get("window_start_ms") or 0),
+                window_end_ms=int(item.get("window_end_ms") or 0),
+                alpha_pnl_usd=float(item.get("alpha_pnl_usd") or 0),
+                timing_pnl_usd=float(item.get("timing_pnl_usd") or 0),
+                execution_pnl_usd=float(item.get("execution_pnl_usd") or 0),
+                fees_usd=float(item.get("fees_usd") or 0),
+                funding_usd=float(item.get("funding_usd") or 0),
+                residual_pnl_usd=float(item.get("residual_pnl_usd") or 0),
+                total_pnl_usd=float(item.get("total_pnl_usd") or 0),
+                metrics_json=redact_secrets(dict(item.get("metrics") or {})),
+                metadata_json=redact_secrets(dict(item.get("metadata") or {})),
+            ),
+            "attribution_id",
+        )
+
+    async def record_kill_switch_event(self, event: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            KillSwitchEventRecord(
+                event_id=str(event["event_id"]),
+                scope=str(event.get("scope") or "global"),
+                action=str(event.get("action") or "triggered"),
+                triggered_by=str(event.get("triggered_by") or "unknown"),
+                reason=str(event.get("reason") or ""),
+                affected_assets_json=list(event.get("affected_assets") or []),
+                affected_strategies_json=list(event.get("affected_strategies") or []),
+                block_new_orders=bool(event.get("block_new_orders", True)),
+                cancel_open_orders=bool(event.get("cancel_open_orders", False)),
+                freeze_config_changes=bool(event.get("freeze_config_changes", True)),
+                created_at_ms=int(event.get("created_at_ms") or 0),
+                expires_at_ms=event.get("expires_at_ms"),
+                metadata_json=redact_secrets(dict(event.get("metadata") or {})),
+            ),
+            "event_id",
+        )
+
+    async def record_model_version(self, version: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            ModelVersionRecord(
+                model_version_id=str(version["model_version_id"]),
+                model_type=str(version.get("model_type") or "unknown"),
+                artifact_uri=str(version.get("artifact_uri") or ""),
+                training_data_hash=str(version.get("training_data_hash") or ""),
+                feature_schema_hash=str(version.get("feature_schema_hash") or ""),
+                metrics_json=redact_secrets(dict(version.get("metrics") or {})),
+                status=str(version.get("status") or "candidate"),
+                approved_by=version.get("approved_by"),
+                approved_at_ms=version.get("approved_at_ms"),
+                created_at_ms=int(version.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(version.get("metadata") or {})),
+            ),
+            "model_version_id",
+        )
+
+    async def list_model_versions(self, *, status: str | None = None, model_type: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = []
+        if status:
+            filters.append(ModelVersionRecord.status == status)
+        if model_type:
+            filters.append(ModelVersionRecord.model_type == model_type)
+        return await self._list_engine_records(ModelVersionRecord, order_by=ModelVersionRecord.created_at_ms, limit=limit, filters=filters)
+
+    async def record_model_training_run(self, run: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            ModelTrainingRunRecord(
+                training_run_id=str(run["training_run_id"]),
+                model_version_id=run.get("model_version_id"),
+                model_type=str(run.get("model_type") or "unknown"),
+                dataset_start_ms=int(run.get("dataset_start_ms") or 0),
+                dataset_end_ms=int(run.get("dataset_end_ms") or 0),
+                training_data_hash=str(run.get("training_data_hash") or ""),
+                feature_schema_hash=str(run.get("feature_schema_hash") or ""),
+                code_version=run.get("code_version"),
+                metrics_json=redact_secrets(dict(run.get("metrics") or {})),
+                artifact_uri=run.get("artifact_uri"),
+                status=str(run.get("status") or "started"),
+                created_at_ms=int(run.get("created_at_ms") or 0),
+                completed_at_ms=run.get("completed_at_ms"),
+                metadata_json=redact_secrets(dict(run.get("metadata") or {})),
+            ),
+            "training_run_id",
+        )
+
+    async def record_feature_schema_version(self, version: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            FeatureSchemaVersionRecord(
+                feature_schema_version_id=str(version["feature_schema_version_id"]),
+                schema_hash=str(version.get("schema_hash") or ""),
+                feature_names_json=list(version.get("feature_names") or []),
+                feature_definitions_json=redact_secrets(dict(version.get("feature_definitions") or {})),
+                created_at_ms=int(version.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(version.get("metadata") or {})),
+            ),
+            "feature_schema_version_id",
+        )
+
+    async def record_retention_run(self, run: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            RetentionRunRecord(
+                retention_run_id=str(run["retention_run_id"]),
+                status=str(run.get("status") or "started"),
+                started_at_ms=int(run.get("started_at_ms") or 0),
+                completed_at_ms=run.get("completed_at_ms"),
+                deleted_counts_json=dict(run.get("deleted_counts") or {}),
+                rollup_counts_json=dict(run.get("rollup_counts") or {}),
+                caveats_json=list(run.get("caveats") or []),
+                metadata_json=redact_secrets(dict(run.get("metadata") or {})),
+            ),
+            "retention_run_id",
+        )
+
+    async def list_retention_runs(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        return await self._list_engine_records(RetentionRunRecord, order_by=RetentionRunRecord.started_at_ms, limit=limit)
+
+    async def _merge_engine_record(self, item: Any, primary_key_attr: str) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                merged = await session.merge(item)
+                await session.commit()
+                return str(getattr(merged, primary_key_attr))
+        except Exception as exc:  # pragma: no cover - engine persistence should not break runtime loop
+            log.warning("engine_record_merge_failed", table=getattr(item, "__tablename__", "unknown"), error=type(exc).__name__)
+            return None
+
+    async def _get_engine_record(self, record_cls: Any, primary_key: str) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                item = await session.get(record_cls, primary_key)
+                return _engine_record_to_dict(item) if item is not None else None
+        except Exception as exc:  # pragma: no cover
+            log.warning("engine_record_get_failed", table=getattr(record_cls, "__tablename__", "unknown"), error=type(exc).__name__)
+            return None
+
+    async def _list_engine_records(self, record_cls: Any, *, order_by: Any, limit: int = 100, filters: list[Any] | None = None) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        try:
+            async with self.sessionmaker() as session:
+                stmt = select(record_cls)
+                for condition in filters or []:
+                    stmt = stmt.where(condition)
+                stmt = stmt.order_by(order_by.desc()).limit(limit)
+                result = await session.execute(stmt)
+                return [_engine_record_to_dict(item) for item in result.scalars().all()]
+        except Exception as exc:  # pragma: no cover
+            log.warning("engine_record_list_failed", table=getattr(record_cls, "__tablename__", "unknown"), error=type(exc).__name__)
             return []
 
     async def record_memory_injection_event(self, event: dict[str, Any]) -> str | None:
@@ -2336,6 +2896,18 @@ def _datetime_from_optional_iso(value: Any) -> datetime | None:
 
 def _ms_from_datetime(value: datetime | None) -> int | None:
     return int(value.timestamp() * 1000) if value is not None else None
+
+
+def _engine_record_to_dict(item: Any) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    for column in item.__table__.columns:
+        key = column.name
+        value = getattr(item, key)
+        if isinstance(value, datetime):
+            value = value.isoformat()
+        out_key = key[:-5] if key.endswith("_json") else key
+        data[out_key] = value
+    return data
 
 
 def _market_asset_to_dict(item: MarketAssetRecord) -> dict[str, Any]:

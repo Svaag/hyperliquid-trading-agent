@@ -83,6 +83,7 @@ class AutonomousTradingLoopService:
         flow_enricher: Any | None = None,
         decision_context_recorder: Any | None = None,
         risk_gateway: RiskGateway | None = None,
+        engine_service: Any | None = None,
     ):
         self.settings = settings
         self.repository = repository
@@ -103,6 +104,7 @@ class AutonomousTradingLoopService:
         self.flow_enricher = flow_enricher
         self.decision_context_recorder = decision_context_recorder
         self.risk_gateway = risk_gateway or RiskGateway(settings=settings, repository=repository, decision_context_recorder=decision_context_recorder)
+        self.engine_service = engine_service
         self.universe_resolver = MarketUniverseResolver(settings, hyperliquid)
         self.reducer = MarketMapReducer()
         self.newswire = AutonomyNewswire(settings, news)
@@ -583,6 +585,11 @@ class AutonomousTradingLoopService:
 
     async def _run_iteration(self) -> None:
         ts = _now_ms()
+        if self.settings.engine_enabled and self.engine_service is not None:
+            await self.engine_service.run_once(symbols=self.settings.autonomy_core_symbols)
+            self.last_iteration_at_ms = ts
+            AUTONOMY_LOOP_ITERATIONS.labels(result="ok").inc()
+            return
         await self._ensure_universe(ts)
         mids = await self._current_mids()
         if mids:

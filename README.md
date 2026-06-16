@@ -41,7 +41,8 @@ design.
 - Free-standing **Newswire**: a pub/sub news & macro ingestion gateway. Adapters (RSS reliability layer, Alpaca News WebSocket, Trading Economics macro WebSocket, curated X) normalize into one canonical `NewswireEvent`, scored/classified/halt-gated deterministically, then published on a transport-agnostic bus. Consumers: a dedicated Discord `#news` channel (breaking immediate + batched digest), the autonomy market map (push-fed), and external clients via REST + `WS /newswire/stream`. LLM is a second-pass summarizer/ranker only — never the first parser or a tradability gate.
 - Semantic tool gathering for market snapshots, funding, candles, account public state, fills, docs, news, and paper trades.
 - PostgreSQL persistence for audit events, tool calls, conversations, cache, news, paper trades, debate runs, role outputs, state snapshots, trade proposals, autonomous market state, signals, paper orders/fills/positions, and portfolio snapshots.
-- Alembic migrations through `0008_alpha_event_evaluations`.
+- Paper/shadow-only institutional engine scaffolding: normalized event ledger, point-in-time feature store, regime vector, alpha candidates, EV estimates, allocation decisions, EvidencePacks, debate decisions, OrderIntents, execution reports, position theses, reconciliation/attribution/model registry tables, and read-only `/engine/*` inspection endpoints.
+- Alembic migrations through `0014_model_registry_retention`.
 - Dockerfile and Docker Compose with Postgres.
 
 ## Quick start
@@ -191,7 +192,21 @@ AUTONOMY_TUNING_PROPOSALS_ENABLED=true
 AUTONOMY_TUNING_PROPOSAL_TTL_DAYS=14
 
 NEWSWIRE_ENABLED=true
+NEWSWIRE_GATEWAY_ENABLED=true
+AUTONOMY_LEGACY_NEWS_POLL_ENABLED=false
+NEWS_SIGNAL_GENERATION_ENABLED=true
+NEWS_EVENT_RISK_BLOCKS_ENABLED=true
 NEWSWIRE_QUERIES=BTC,ETH,HYPE,Hyperliquid,Fed,CPI,FOMC,crypto liquidation
+
+# Institutional engine scaffold (paper/shadow only; live execution remains rejected)
+ENGINE_ENABLED=false
+ENGINE_MODE=paper_shadow
+ENGINE_EXECUTION_MODES=paper,shadow
+ENGINE_LIVE_ENABLED=false
+ENGINE_MIN_NET_EV_BPS=8
+ENGINE_MIN_RISK_ADJUSTED_UTILITY=0.25
+ENGINE_DEBATE_ENABLED=true
+ENGINE_DEBATE_PRIORITY_MIN=0.35
 
 # Optional equity paper loop when Alpaca data credentials are present
 TRADFI_ENABLED=true
