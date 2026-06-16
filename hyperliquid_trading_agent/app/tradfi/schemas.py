@@ -11,6 +11,34 @@ from pydantic import BaseModel, Field
 
 AssetKind = Literal["stock", "etf", "index", "crypto", "option", "unknown"]
 
+# --- Asset Metadata ----------------------------------------------------------
+
+
+class TradFiAsset(BaseModel):
+    """TradFi asset metadata used by the cross-asset intent router."""
+
+    symbol: str
+    name: str = ""
+    exchange: str = ""
+    asset_class: str = "us_equity"
+    status: str = ""
+    tradable: bool | None = None
+    marginable: bool | None = None
+    shortable: bool | None = None
+    easy_to_borrow: bool | None = None
+
+    @property
+    def active(self) -> bool | None:
+        if not self.status:
+            return None
+        return self.status.lower().endswith("active") or self.status.lower() == "active"
+
+    @property
+    def is_etf_like(self) -> bool:
+        text = f"{self.symbol} {self.name}".upper()
+        return any(term in text for term in [" ETF", " ETN", " FUND", " TRUST", " SPDR", " ISHARES", " PROSHARES"])
+
+
 # --- Stock Data --------------------------------------------------------------
 
 

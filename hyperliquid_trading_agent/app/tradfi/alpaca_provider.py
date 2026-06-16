@@ -35,6 +35,7 @@ from hyperliquid_trading_agent.app.tradfi.schemas import (
     StockQuote,
     StockSnapshot,
     StockTrade,
+    TradFiAsset,
 )
 
 log = get_logger(__name__)
@@ -362,6 +363,32 @@ class AlpacaTradFiProvider(TradFiProvider):
         except Exception as exc:
             log.warning("alpaca_get_calendar_failed", error=type(exc).__name__)
             return []
+
+    # --- Asset metadata --------------------------------------------------------
+
+    async def get_asset_metadata(self, symbols: list[str]) -> dict[str, TradFiAsset]:
+        if not symbols:
+            return {}
+        client = self._ensure_trading()
+        result: dict[str, TradFiAsset] = {}
+        for symbol in sorted({s.upper() for s in symbols if s.strip()}):
+            try:
+                asset = await asyncio.to_thread(client.get_asset, symbol)
+            except Exception as exc:
+                log.debug("alpaca_get_asset_metadata_miss", symbol=symbol, error=type(exc).__name__)
+                continue
+            result[symbol] = TradFiAsset(
+                symbol=str(getattr(asset, "symbol", symbol)).upper(),
+                name=str(getattr(asset, "name", "") or ""),
+                exchange=str(getattr(asset, "exchange", "") or ""),
+                asset_class=str(getattr(asset, "asset_class", "") or ""),
+                status=str(getattr(asset, "status", "") or ""),
+                tradable=bool(getattr(asset, "tradable", False)),
+                marginable=bool(getattr(asset, "marginable", False)),
+                shortable=bool(getattr(asset, "shortable", False)),
+                easy_to_borrow=bool(getattr(asset, "easy_to_borrow", False)),
+            )
+        return result
 
     # --- Internal converters ----------------------------------------------------
 

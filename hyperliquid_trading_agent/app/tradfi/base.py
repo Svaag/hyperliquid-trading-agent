@@ -15,6 +15,7 @@ from hyperliquid_trading_agent.app.tradfi.schemas import (
     StockQuote,
     StockSnapshot,
     StockTrade,
+    TradFiAsset,
 )
 
 
@@ -87,6 +88,16 @@ class TradFiProvider(ABC):
         end: date,
         event_types: list[str] | None = None,
     ) -> list[CalendarEvent]: ...
+
+    # --- Asset metadata --------------------------------------------------------
+
+    async def get_asset_metadata(self, symbols: list[str]) -> dict[str, TradFiAsset]:
+        """Optional provider hook for resolving ticker collisions.
+
+        Implementations should return only symbols known by the vendor. The base
+        default keeps older/fake providers source-compatible.
+        """
+        return {}
 
     # --- Lifecycle --------------------------------------------------------------
 

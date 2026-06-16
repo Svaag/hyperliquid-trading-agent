@@ -12,6 +12,7 @@ class ResolvedAsset:
     sz_decimals: int | None = None
     max_leverage: int | None = None
     context: dict[str, Any] | None = None
+    dex: str | None = None
 
 
 class AssetResolver:
@@ -23,14 +24,22 @@ class AssetResolver:
         spot_meta: dict[str, Any] | None = None,
         perp_ctxs: list[dict[str, Any]] | None = None,
         spot_ctxs: list[dict[str, Any]] | None = None,
+        dex: str | None = None,
     ):
         self.perp_meta = perp_meta or {"universe": []}
         self.spot_meta = spot_meta or {"universe": []}
         self.perp_ctxs = perp_ctxs or []
         self.spot_ctxs = spot_ctxs or []
+        self.dex = dex
 
     @classmethod
-    def from_meta_and_contexts(cls, perp_meta_and_ctxs: list[Any] | None = None, spot_meta_and_ctxs: list[Any] | None = None) -> AssetResolver:
+    def from_meta_and_contexts(
+        cls,
+        perp_meta_and_ctxs: list[Any] | None = None,
+        spot_meta_and_ctxs: list[Any] | None = None,
+        *,
+        dex: str | None = None,
+    ) -> AssetResolver:
         perp_meta: dict[str, Any] = {"universe": []}
         perp_ctxs: list[dict[str, Any]] = []
         spot_meta: dict[str, Any] = {"universe": []}
@@ -41,7 +50,7 @@ class AssetResolver:
         if spot_meta_and_ctxs and len(spot_meta_and_ctxs) >= 2:
             spot_meta = spot_meta_and_ctxs[0]
             spot_ctxs = spot_meta_and_ctxs[1]
-        return cls(perp_meta=perp_meta, spot_meta=spot_meta, perp_ctxs=perp_ctxs, spot_ctxs=spot_ctxs)
+        return cls(perp_meta=perp_meta, spot_meta=spot_meta, perp_ctxs=perp_ctxs, spot_ctxs=spot_ctxs, dex=dex)
 
     def resolve(self, symbol: str) -> ResolvedAsset | None:
         return self.resolve_perp(symbol) or self.resolve_spot(symbol)
@@ -50,14 +59,21 @@ class AssetResolver:
         target = _normalize_symbol(symbol)
         for idx, item in enumerate(self.perp_meta.get("universe", [])):
             name = str(item.get("name", ""))
-            if _normalize_symbol(name) == target:
+            normalized_name = _normalize_symbol(name)
+            dex, base_symbol = _split_dex_symbol(normalized_name)
+            aliases = {normalized_name}
+            if base_symbol:
+                aliases.add(base_symbol)
+            if target in aliases:
+                resolved_dex = self.dex or dex
                 return ResolvedAsset(
                     coin=name,
                     asset_id=idx,
-                    kind="perp",
+                    kind="hip3_index" if resolved_dex else "perp",
                     sz_decimals=item.get("szDecimals"),
                     max_leverage=item.get("maxLeverage"),
                     context=self.perp_ctxs[idx] if idx < len(self.perp_ctxs) else None,
+                    dex=resolved_dex,
                 )
         return None
 
@@ -83,3 +99,12 @@ class AssetResolver:
 
 def _normalize_symbol(symbol: str) -> str:
     return symbol.strip().upper().replace("/USDC", "")
+
+
+def _split_dex_symbol(symbol: str) -> tuple[str | None, str | None]:
+    if ":" not in symbol:
+        return None, None
+    dex, base = symbol.split(":", 1)
+    dex = dex.strip().lower()
+    base = base.strip().upper()
+    return (dex or None), (base or None)
