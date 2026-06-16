@@ -1061,6 +1061,11 @@ This plan explicitly does **not** implement:
 
 
 
+
+
+
+
+
 <!-- pi-plan-progress:start -->
 ## Progress
 
@@ -1069,9 +1074,9 @@ Status legend: `[x]` done, `[-]` skipped, `[>]` deferred, `[!]` blocked, `[ ]` p
 - [x] 1. Create the new institutional engine schema layer. _(done)_
 - [x] 2. Add Postgres migrations and repository methods for event ... _(done)_
 - [x] 3. Replace market-map/signal generation with normalized even... _(done)_
-- [ ] 4. Add learned EV scorer infrastructure and offline training... _(pending)_
+- [x] 4. Add learned EV scorer infrastructure and offline training... _(done)_
 - [x] 5. Add portfolio allocator and upgraded deterministic risk g... _(done)_
-- [ ] 6. Convert high-stakes AI debate into EvidencePack-based adj... _(pending)_
+- [x] 6. Convert high-stakes AI debate into EvidencePack-based adj... _(done)_
 - [x] 7. Add paper/shadow execution gateway and deterministic posi... _(done)_
 - [x] 8. Add read-only engine API endpoints and Discord output upd... _(done)_
 - [x] 9. Add retention, rollups, replay, attribution, and governan... _(done)_

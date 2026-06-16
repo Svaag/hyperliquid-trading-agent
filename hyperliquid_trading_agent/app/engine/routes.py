@@ -3,8 +3,13 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 
 from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.engine.validation_report import (
+    build_engine_validation_report,
+    render_engine_validation_dashboard,
+)
 
 RequireAuth = Callable[[Settings, str | None], None]
 
@@ -138,6 +143,27 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
     async def engine_model_versions(status: str | None = None, model_type: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
         _auth(authorization)
         return await _repo().list_model_versions(status=status, model_type=model_type, limit=limit)
+
+    @app.get("/engine/risk-rejects")
+    async def engine_risk_rejects(limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        _auth(authorization)
+        return await _repo().list_risk_gateway_decisions(limit=limit, decision="reject")
+
+    @app.get("/engine/pnl-attribution")
+    async def engine_pnl_attribution(strategy_id: str | None = None, asset: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        _auth(authorization)
+        return await _repo().list_pnl_attribution(strategy_id=strategy_id, asset=asset, limit=limit)
+
+    @app.get("/engine/validation-report")
+    async def engine_validation_report(limit: int = 500, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _auth(authorization)
+        return await build_engine_validation_report(_repo(), limit=limit)
+
+    @app.get("/engine/dashboard", response_class=HTMLResponse)
+    async def engine_dashboard(limit: int = 500, authorization: str | None = Header(default=None)) -> HTMLResponse:
+        _auth(authorization)
+        report = await build_engine_validation_report(_repo(), limit=limit)
+        return HTMLResponse(render_engine_validation_dashboard(report))
 
     @app.get("/engine/retention")
     async def engine_retention(limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:

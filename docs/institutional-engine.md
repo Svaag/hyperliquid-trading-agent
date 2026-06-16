@@ -85,6 +85,10 @@ GET /engine/execution-reports
 GET /engine/positions
 GET /engine/reconciliation
 GET /engine/model-versions
+GET /engine/risk-rejects
+GET /engine/pnl-attribution
+GET /engine/validation-report
+GET /engine/dashboard
 GET /engine/retention
 ```
 

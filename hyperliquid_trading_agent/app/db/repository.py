@@ -842,6 +842,14 @@ class Repository:
             "attribution_id",
         )
 
+    async def list_pnl_attribution(self, *, strategy_id: str | None = None, asset: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = []
+        if strategy_id:
+            filters.append(PnLAttributionRecord.strategy_id == strategy_id)
+        if asset:
+            filters.append(PnLAttributionRecord.asset == asset.upper())
+        return await self._list_engine_records(PnLAttributionRecord, order_by=PnLAttributionRecord.window_end_ms, limit=limit, filters=filters)
+
     async def record_kill_switch_event(self, event: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
             KillSwitchEventRecord(

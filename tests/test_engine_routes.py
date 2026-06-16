@@ -57,6 +57,12 @@ class FakeEngineRepository:
     async def list_model_versions(self, **kwargs):
         return [{"model_version_id": "model_1"}]
 
+    async def list_risk_gateway_decisions(self, **kwargs):
+        return [{"decision_id": "risk_1", "decision": "reject", "violations": ["stale_market_data"]}]
+
+    async def list_pnl_attribution(self, **kwargs):
+        return [{"attribution_id": "pnl_1", "strategy_id": "directional_momentum", "total_pnl_usd": 1.2}]
+
     async def list_retention_runs(self, **kwargs):
         return [{"retention_run_id": "ret_1"}]
 
@@ -83,6 +89,14 @@ def test_engine_readonly_routes_are_registered_and_auth_protected_in_dev():
     assert client.get("/engine/positions").json()[0]["position_id"] == "pos_1"
     assert client.get("/engine/reconciliation").json()[0]["reconciliation_id"] == "recon_1"
     assert client.get("/engine/model-versions").json()[0]["model_version_id"] == "model_1"
+    assert client.get("/engine/risk-rejects").json()[0]["decision_id"] == "risk_1"
+    assert client.get("/engine/pnl-attribution").json()[0]["attribution_id"] == "pnl_1"
+    report = client.get("/engine/validation-report").json()
+    assert report["summary"]["risk_reject_count"] == 1
+    assert "by_strategy" in report
+    dashboard = client.get("/engine/dashboard")
+    assert dashboard.status_code == 200
+    assert "Engine Validation Dashboard" in dashboard.text
     assert client.get("/engine/retention").json()[0]["retention_run_id"] == "ret_1"
 
 
