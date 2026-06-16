@@ -48,6 +48,7 @@ class AgentTools:
         self.paper = paper or PaperTradeSimulator()
         self.tradfi = tradfi
         self.options_flow = options_flow
+        self._hip3_symbol_cache: dict[str, str | None] = {}
 
     async def get_market_snapshot(self, coins: list[str], intervals: list[str] | None = None, include_l2: bool = False) -> ToolResult:
         async def run() -> dict[str, Any]:
@@ -56,18 +57,30 @@ class AgentTools:
             spot_meta_ctxs = await self.hyperliquid.spot_meta_and_asset_ctxs()
             resolver = AssetResolver.from_meta_and_contexts(perp_meta_ctxs, spot_meta_ctxs)
             assets: dict[str, Any] = {}
+            checked_hip3_dexs: set[str] = set()
             for coin in _clean_coins(coins):
                 resolved = resolver.resolve(coin)
+                source_mids = mids
                 if resolved is None:
-                    assets[coin.upper()] = {"error": "asset_not_found", "mid": mids.get(coin.upper())}
+                    resolved, source_mids, dex = await self._resolve_hip3_asset(coin)
+                    if dex:
+                        checked_hip3_dexs.add(dex)
+                if resolved is None:
+                    assets[coin.upper()] = {
+                        "error": "asset_not_found",
+                        "mid": mids.get(coin.upper()),
+                        "checked_hip3_dexs": sorted(checked_hip3_dexs),
+                    }
                     continue
                 asset_data: dict[str, Any] = {
+                    "query_symbol": coin.upper(),
                     "coin": resolved.coin,
                     "kind": resolved.kind,
+                    "dex": resolved.dex,
                     "asset_id": resolved.asset_id,
                     "sz_decimals": resolved.sz_decimals,
                     "max_leverage": resolved.max_leverage,
-                    "mid": mids.get(resolved.coin) or mids.get(coin.upper()),
+                    "mid": _mid_for_resolved(source_mids, resolved.coin, coin),
                     "context": resolved.context,
                 }
                 if include_l2:
@@ -84,6 +97,8 @@ class AgentTools:
             resolver = AssetResolver.from_meta_and_contexts(perp_meta_ctxs, spot_meta_ctxs)
             resolved = resolver.resolve(coin)
             if resolved is None:
+                resolved, _mids, _dex = await self._resolve_hip3_asset(coin)
+            if resolved is None:
                 return {"coin": coin, "error": "asset_not_found"}
             return {"asset": asdict(resolved)}
 
@@ -91,15 +106,17 @@ class AgentTools:
 
     async def get_order_book(self, coin: str, n_sig_figs: int | None = None, mantissa: int | None = None) -> ToolResult:
         async def run() -> Any:
-            return await self.hyperliquid.l2_book(coin.upper(), n_sig_figs=n_sig_figs, mantissa=mantissa)
+            resolved_coin = await self._canonical_market_coin(coin)
+            return await self.hyperliquid.l2_book(resolved_coin, n_sig_figs=n_sig_figs, mantissa=mantissa)
 
         return await self._run_tool("get_order_book", {"coin": coin}, run, "hyperliquid:/info/l2Book")
 
     async def get_candles(self, coin: str, interval: str = "1h", lookback_hours: int = 24) -> ToolResult:
         async def run() -> Any:
+            resolved_coin = await self._canonical_market_coin(coin)
             end = int(time.time() * 1000)
             start = end - lookback_hours * 60 * 60 * 1000
-            return await self.hyperliquid.candle_snapshot(coin.upper(), interval, start, end)
+            return await self.hyperliquid.candle_snapshot(resolved_coin, interval, start, end)
 
         return await self._run_tool(
             "get_candles",
@@ -110,11 +127,12 @@ class AgentTools:
 
     async def get_funding_context(self, coin: str) -> ToolResult:
         async def run() -> dict[str, Any]:
+            resolved_coin = await self._canonical_market_coin(coin)
             end = int(time.time() * 1000)
             start = end - 48 * 60 * 60 * 1000
-            history = await self.hyperliquid.funding_history(coin.upper(), start, end)
+            history = await self.hyperliquid.funding_history(resolved_coin, start, end)
             predicted = await self.hyperliquid.predicted_fundings()
-            return {"coin": coin.upper(), "funding_history_48h": history, "predicted_fundings": _filter_predicted(predicted, coin)}
+            return {"coin": resolved_coin, "query_symbol": coin.upper(), "funding_history_48h": history, "predicted_fundings": _filter_predicted(predicted, resolved_coin)}
 
         return await self._run_tool("get_funding_context", {"coin": coin}, run, "hyperliquid:/info/funding")
 
@@ -385,6 +403,89 @@ class AgentTools:
             }
         return await self._run_tool("estimate_option_greeks", {"symbol": symbol, "strike": strike, "expiration": expiration, "option_type": option_type}, run, "tradfi:alpaca")
 
+    async def _canonical_market_coin(self, coin: str) -> str:
+        cleaned = coin.strip()
+        if not cleaned:
+            return coin.upper()
+        if ":" in cleaned:
+            return cleaned
+        cached = self._hip3_symbol_cache.get(cleaned.upper())
+        if cached:
+            return cached
+        perp_meta_ctxs = await self.hyperliquid.meta_and_asset_ctxs()
+        spot_meta_ctxs = await self.hyperliquid.spot_meta_and_asset_ctxs()
+        resolver = AssetResolver.from_meta_and_contexts(perp_meta_ctxs, spot_meta_ctxs)
+        resolved = resolver.resolve(cleaned)
+        if resolved is not None:
+            return resolved.coin
+        resolved, _mids, _dex = await self._resolve_hip3_asset(cleaned)
+        if resolved is not None:
+            self._hip3_symbol_cache[cleaned.upper()] = resolved.coin
+            return resolved.coin
+        return cleaned.upper()
+
+    async def _resolve_hip3_asset(self, symbol: str) -> tuple[Any | None, dict[str, str], str | None]:
+        target = symbol.strip()
+        if not target:
+            return None, {}, None
+        cache_key = target.upper()
+        if cache_key in self._hip3_symbol_cache and self._hip3_symbol_cache[cache_key] is None:
+            return None, {}, None
+        cached = self._hip3_symbol_cache.get(cache_key)
+        if cached:
+            dex = cached.split(":", 1)[0].lower() if ":" in cached else None
+            mids = await self.hyperliquid.all_mids(dex=dex or "") if dex else {}
+            meta_ctxs = await self.hyperliquid.meta_and_asset_ctxs(dex=dex or "") if dex else []
+            resolved = AssetResolver.from_meta_and_contexts(meta_ctxs, dex=dex).resolve(cached) if dex else None
+            return resolved, mids, dex
+        for dex in await self._candidate_hip3_dexs(target):
+            try:
+                mids = await self.hyperliquid.all_mids(dex=dex)
+                meta_ctxs = await self.hyperliquid.meta_and_asset_ctxs(dex=dex)
+            except Exception:
+                continue
+            resolver = AssetResolver.from_meta_and_contexts(meta_ctxs, dex=dex)
+            resolved = resolver.resolve(target)
+            if resolved is not None:
+                self._hip3_symbol_cache[cache_key] = resolved.coin
+                return resolved, mids, dex
+        self._hip3_symbol_cache[cache_key] = None
+        return None, {}, None
+
+    async def _candidate_hip3_dexs(self, symbol: str) -> list[str]:
+        configured = list(getattr(self.hyperliquid.settings, "autonomy_hip3_dex_names", []))
+        candidates: list[str] = []
+        if ":" in symbol:
+            candidates.append(symbol.split(":", 1)[0].lower())
+        candidates.extend(str(dex).strip().lower() for dex in configured if str(dex).strip())
+        target = symbol.split(":", 1)[-1].strip().upper()
+        try:
+            dexs = await self.hyperliquid.perp_dexs()
+        except Exception:
+            dexs = []
+        if isinstance(dexs, list):
+            for dex_info in dexs:
+                if not isinstance(dex_info, dict):
+                    continue
+                dex_name = str(dex_info.get("name") or "").strip().lower()
+                if not dex_name:
+                    continue
+                assets = dex_info.get("assetToStreamingOiCap") or []
+                for item in assets:
+                    asset_name = str(item[0] if isinstance(item, (list, tuple)) and item else "").upper()
+                    if asset_name == target or asset_name.endswith(f":{target}"):
+                        candidates.append(dex_name)
+                        break
+        # TradeXYZ is currently exposed by Hyperliquid's API as dex "xyz".
+        # Keep this low-cost fallback for semantic reads like "SPCX read" even
+        # when AUTONOMY_HIP3_DEXS is not configured.
+        candidates.append("xyz")
+        out: list[str] = []
+        for dex in candidates:
+            if dex and dex not in out:
+                out.append(dex)
+        return out
+
     async def _run_tool(self, name: str, input_json: dict[str, Any], func, source: str) -> ToolResult:
         started = time.perf_counter()
         timestamp_ms = int(time.time() * 1000)
@@ -400,6 +501,21 @@ class AgentTools:
             if self.repository:
                 await self.repository.record_tool_call(name, "error", input_json=input_json, output_json={"error": type(exc).__name__}, latency_ms=int((time.perf_counter() - started) * 1000))
             raise
+
+
+def _mid_for_resolved(mids: dict[str, Any], resolved_coin: str, query_symbol: str) -> Any:
+    resolved_upper = resolved_coin.upper()
+    query_upper = query_symbol.upper()
+    if resolved_coin in mids:
+        return mids[resolved_coin]
+    if resolved_upper in mids:
+        return mids[resolved_upper]
+    if query_upper in mids:
+        return mids[query_upper]
+    if ":" in resolved_upper:
+        dex, base = resolved_upper.split(":", 1)
+        return mids.get(base) or mids.get(f"{dex.lower()}:{base}") or mids.get(f"{dex}:{base}")
+    return None
 
 
 def _clean_coins(coins: list[str]) -> list[str]:
