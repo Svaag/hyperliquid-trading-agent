@@ -15,8 +15,18 @@ The loop is non-executing:
 ```text
 TradeSignal
   -> SignalEvaluation + horizon marks
-  -> allMids price path updates
+  -> allMids/equity price path updates
   -> MFE/MAE/R-multiple + TP/stop/expiry outcome
+  -> MemoryObservation
+  -> CandidateLesson
+  -> ShadowRoleLessonMemory
+  -> RoleLessonMemory or needs_human_review
+  -> Daily/weekly report + Token Capital + TuningProposal
+
+NewswireEvent / NewsEvent
+  -> AlphaEventEvaluation + horizon marks
+  -> crypto/equity/macro-proxy price path updates
+  -> worked/failed/mixed/volatility-only outcome
   -> MemoryObservation
   -> CandidateLesson
   -> ShadowRoleLessonMemory
@@ -43,6 +53,20 @@ Tracked outcome fields include:
 - terminal outcome
 - horizon marks
 - rejected-signal opportunity cost
+
+## Event/catalyst evaluation
+
+High-signal events are evaluated as first-class alpha subjects when:
+
+```env
+AUTONOMY_EVENT_EVALUATION_ENABLED=true
+AUTONOMY_EVENT_EVAL_HORIZONS=15m,1h,4h,24h,72h
+AUTONOMY_EVENT_EVAL_MIN_IMPORTANCE=50
+AUTONOMY_EVENT_EVAL_MIN_SOURCE_SCORE=0.4
+AUTONOMY_EVENT_EVAL_MACRO_PROXIES=BTC,ETH,SPY,QQQ
+```
+
+Bullish events are evaluated long, bearish events short, and mixed/unknown events as neutral volatility catalysts. Macro events without tagged symbols use the configured proxy basket. Event outcomes are observe-only and can link to later signals through `metadata.source_event_ids`.
 
 ## Token Capital
 
@@ -146,8 +170,12 @@ Protected by `AGENT_API_BEARER_TOKEN` outside dev/test/local.
 ```http
 GET  /autonomy/evaluations/signals
 GET  /autonomy/evaluations/signals/{signal_id}
+GET  /autonomy/evaluations/events
+GET  /autonomy/evaluations/events/{evaluation_id}
+GET  /autonomy/evaluations/events/by-event/{event_id}
 POST /autonomy/evaluations/run
 POST /autonomy/evaluations/backfill
+POST /autonomy/evaluations/events/backfill
 
 GET  /autonomy/reports/daily
 GET  /autonomy/reports/daily/{date}
@@ -179,17 +207,37 @@ POST /autonomy/tuning-proposals/{proposal_id}/reject
 POST /autonomy/tuning-proposals/{proposal_id}/expire
 ```
 
-## Safe rollout
+## Safe rollout / full configured start
 
-Keep the existing conservative canary while the scoring loop validates:
+Use existing deployment-specific `.env` values for tokens and channel IDs; do not invent secrets. For the first full configured start, keep the conservative canary while the scoring loop validates:
 
 ```env
+AUTONOMY_ENABLED=true
+AUTONOMY_MODE=paper_signoff
+AUTONOMY_REQUIRE_HUMAN_SIGNOFF=true
+HYPERLIQUID_WS_ENABLED=true
 AUTONOMY_UNIVERSE_TOP_N_PERPS=5
+AUTONOMY_MAX_TRACKED_ASSETS=20
+AUTONOMY_MAX_HOT_L2_ASSETS=5
 AUTONOMY_MAX_SIGNALS_PER_DAY=3
 AUTONOMY_EVALUATION_ENABLED=true
+AUTONOMY_EVENT_EVALUATION_ENABLED=true
 AUTONOMY_MEMORY_ENABLED=true
 AUTONOMY_REPORTS_ENABLED=true
 AUTONOMY_TUNING_PROPOSALS_ENABLED=true
+AUTONOMY_MEMORY_PROMPT_ROLES=analyst,quant,research,adversary,judge
+AUTONOMY_MEMORY_REQUIRE_CHANGE_CONTROL_FOR_RISK_EXECUTION=true
+NEWSWIRE_ENABLED=true
+NEWSWIRE_AGENT_MIN_IMPORTANCE=50
+```
+
+If Alpaca data credentials are present, enable the liquid equity canary:
+
+```env
+TRADFI_ENABLED=true
+AUTONOMY_EQUITY_ENABLED=true
+AUTONOMY_EQUITY_UNIVERSE=SPY,QQQ,NVDA,AAPL,MSFT,TSLA,COIN,MSTR
+AUTONOMY_EQUITY_MAX_SIGNALS_PER_DAY=3
 ```
 
 Verify:

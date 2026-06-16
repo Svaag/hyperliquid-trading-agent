@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from hyperliquid_trading_agent.app.autonomy.discord import AutonomyAlertSink
 from hyperliquid_trading_agent.app.autonomy.schemas import (
+    AlphaEventEvaluation,
     AutonomyReport,
     SignalEvaluation,
     TokenCapitalSnapshot,
@@ -46,6 +47,8 @@ class TokenCapitalScorer:
         timestamp_ms: int,
         evaluations: list[SignalEvaluation],
         portfolio_snapshot: Any | None,
+        event_evaluations: list[AlphaEventEvaluation] | None = None,
+        equity_portfolio_snapshot: Any | None = None,
         memory_counts: dict[str, int] | None = None,
         feedback_items: list[dict[str, Any]] | None = None,
         reliability: dict[str, Any] | None = None,
@@ -53,11 +56,12 @@ class TokenCapitalScorer:
         created_from_report_id: str | None = None,
     ) -> TokenCapitalSnapshot:
         memory_counts = memory_counts or {}
+        event_evaluations = event_evaluations or []
         feedback_items = feedback_items or []
         reliability = reliability or {}
         hard_gates = hard_gates or []
         risk_adjusted = self._risk_adjusted_performance(evaluations, portfolio_snapshot)
-        signal_quality = self._signal_quality(evaluations)
+        signal_quality = self._signal_quality(evaluations, event_evaluations)
         memory_score = self._memory_compounding(memory_counts)
         risk_discipline = self._risk_discipline(evaluations, hard_gates)
         operator_score = self._operator_communication(feedback_items)
@@ -94,6 +98,10 @@ class TokenCapitalScorer:
                 "evaluation_count": len(evaluations),
                 "completed_evaluation_count": len([item for item in evaluations if item.status == "complete"]),
                 "portfolio": _snapshot_details(portfolio_snapshot),
+                "equity_portfolio": _snapshot_details(equity_portfolio_snapshot),
+                "event_evaluation_count": len(event_evaluations),
+                "completed_event_evaluation_count": len([item for item in event_evaluations if item.status == "complete"]),
+                "event_quality": _event_quality_details(event_evaluations),
                 "memory_counts": memory_counts,
                 "feedback_count": len(feedback_items),
                 "reliability": reliability,
@@ -137,7 +145,14 @@ class TokenCapitalScorer:
                 score -= min(20.0, (leverage - 3) * 10)
         return _clamp(score)
 
-    def _signal_quality(self, evaluations: list[SignalEvaluation]) -> float:
+    def _signal_quality(self, evaluations: list[SignalEvaluation], event_evaluations: list[AlphaEventEvaluation] | None = None) -> float:
+        trade_score = self._trade_signal_quality(evaluations)
+        event_score = self._event_signal_quality(event_evaluations or [])
+        if event_score is None:
+            return trade_score
+        return _clamp(trade_score * 0.70 + event_score * 0.30)
+
+    def _trade_signal_quality(self, evaluations: list[SignalEvaluation]) -> float:
         completed = [item for item in evaluations if item.status == "complete"]
         if not completed:
             return 50.0
@@ -152,6 +167,17 @@ class TokenCapitalScorer:
         score += min(10.0, mfe_mae_ratio * 3)
         if missed:
             score -= min(15.0, sum(missed) / len(missed) * 4)
+        return _clamp(score)
+
+    def _event_signal_quality(self, event_evaluations: list[AlphaEventEvaluation]) -> float | None:
+        completed = [item for item in event_evaluations if item.status == "complete"]
+        if not completed:
+            return None
+        worked = len([item for item in completed if item.terminal_outcome == "worked"])
+        failed = len([item for item in completed if item.terminal_outcome == "failed"])
+        volatility = len([item for item in completed if item.terminal_outcome == "volatility_only"])
+        mixed = len([item for item in completed if item.terminal_outcome == "mixed"])
+        score = 50.0 + worked / len(completed) * 30 - failed / len(completed) * 25 + volatility / len(completed) * 8 - mixed / len(completed) * 5
         return _clamp(score)
 
     def _memory_compounding(self, counts: dict[str, int]) -> float:
@@ -196,17 +222,21 @@ class AutonomyReportService:
         settings: Settings,
         repository: Any = None,
         evaluation_service: Any | None = None,
+        event_evaluation_service: Any | None = None,
         memory_service: Any | None = None,
         tuning_service: Any | None = None,
         portfolio_service: Any | None = None,
+        equity_portfolio_service: Any | None = None,
         alert_sink: AutonomyAlertSink | None = None,
     ):
         self.settings = settings
         self.repository = repository
         self.evaluation_service = evaluation_service
+        self.event_evaluation_service = event_evaluation_service
         self.memory_service = memory_service
         self.tuning_service = tuning_service
         self.portfolio_service = portfolio_service
+        self.equity_portfolio_service = equity_portfolio_service
         self.alert_sink = alert_sink
         self.scorer = TokenCapitalScorer()
         self.last_daily_key: str | None = None
@@ -277,10 +307,12 @@ class AutonomyReportService:
     async def _generate(self, report_type: str, window: ReportWindow, *, post: bool) -> AutonomyReport:
         try:
             evaluations = await self._evaluations_for_window(window)
+            event_evaluations = await self._event_evaluations_for_window(window)
             memory_counts = await self._memory_counts()
             feedback = await self._feedback_for_window(window)
-            proposals = await self._tuning_proposals_for_window(evaluations)
+            proposals = await self._tuning_proposals_for_window(evaluations, event_evaluations)
             snapshot = self.portfolio_service.latest_snapshot() if self.portfolio_service is not None else None
+            equity_snapshot = _latest_equity_snapshot(self.equity_portfolio_service)
             reliability = {
                 "evaluation_errors": getattr(self.evaluation_service, "error_count", 0),
                 "report_errors": self.report_error_count,
@@ -292,13 +324,15 @@ class AutonomyReportService:
                 timestamp_ms=window.end_ms,
                 evaluations=evaluations,
                 portfolio_snapshot=snapshot,
+                event_evaluations=event_evaluations,
+                equity_portfolio_snapshot=equity_snapshot,
                 memory_counts=memory_counts,
                 feedback_items=feedback,
                 reliability=reliability,
                 hard_gates=self._hard_gates(evaluations),
                 created_from_report_id=report_id,
             )
-            report_json = self._build_report_json(report_type, window, evaluations, snapshot, token_capital, memory_counts, feedback, proposals)
+            report_json = self._build_report_json(report_type, window, evaluations, event_evaluations, snapshot, equity_snapshot, token_capital, memory_counts, feedback, proposals)
             summary = format_report_summary(report_type, window.key, report_json)
             report = AutonomyReport(
                 id=report_id,
@@ -356,6 +390,15 @@ class AutonomyReportService:
         evaluations = await self.evaluation_service.list_evaluations(limit=1000)
         return [item for item in evaluations if window.start_ms <= item.created_at_ms <= window.end_ms or (item.completed_at_ms is not None and window.start_ms <= item.completed_at_ms <= window.end_ms)]
 
+    async def _event_evaluations_for_window(self, window: ReportWindow) -> list[AlphaEventEvaluation]:
+        if self.event_evaluation_service is None:
+            return []
+        try:
+            evaluations = await self.event_evaluation_service.list_evaluations(limit=2000)
+        except Exception:
+            return []
+        return [item for item in evaluations if window.start_ms <= item.received_at_ms <= window.end_ms or (item.completed_at_ms is not None and window.start_ms <= item.completed_at_ms <= window.end_ms)]
+
     async def _memory_counts(self) -> dict[str, int]:
         if self.memory_service is None:
             return {}
@@ -373,13 +416,17 @@ class AutonomyReportService:
             return [item for item in await self.repository.list_operator_feedback(limit=500) if window.start_ms <= int(item.get("created_at_ms") or 0) <= window.end_ms]
         return []
 
-    async def _tuning_proposals_for_window(self, evaluations: list[SignalEvaluation]) -> list[TuningProposal]:
+    async def _tuning_proposals_for_window(self, evaluations: list[SignalEvaluation], event_evaluations: list[AlphaEventEvaluation]) -> list[TuningProposal]:
         if self.tuning_service is None:
             return []
+        proposals: list[TuningProposal] = []
         generate = getattr(self.tuning_service, "generate_from_evaluations", None)
         if callable(generate):
-            return await generate(evaluations)
-        return []
+            proposals.extend(await generate(evaluations))
+        generate_events = getattr(self.tuning_service, "generate_from_event_evaluations", None)
+        if callable(generate_events):
+            proposals.extend(await generate_events(event_evaluations))
+        return proposals
 
     def _hard_gates(self, evaluations: list[SignalEvaluation]) -> list[dict[str, Any]]:
         gates: list[dict[str, Any]] = []
@@ -397,24 +444,30 @@ class AutonomyReportService:
         report_type: str,
         window: ReportWindow,
         evaluations: list[SignalEvaluation],
+        event_evaluations: list[AlphaEventEvaluation],
         snapshot: Any | None,
+        equity_snapshot: Any | None,
         token_capital: TokenCapitalSnapshot,
         memory_counts: dict[str, int],
         feedback: list[dict[str, Any]],
         proposals: list[TuningProposal],
     ) -> dict[str, Any]:
         completed = [item for item in evaluations if item.status == "complete"]
+        completed_events = [item for item in event_evaluations if item.status == "complete"]
         approved = [item for item in evaluations if item.approved]
         rejected = [item for item in evaluations if item.rejected]
         missed = [item for item in rejected if (item.opportunity_cost_r or 0) >= 1]
         best = sorted(completed, key=lambda item: item.max_favorable_r or -999, reverse=True)[:3]
         worst = sorted(completed, key=lambda item: item.max_adverse_r or 999)[:3]
+        best_events = sorted(completed_events, key=lambda item: item.max_favorable_bps or -99999, reverse=True)[:3]
+        worst_events = sorted(completed_events, key=lambda item: item.max_adverse_bps or 99999)[:3]
         return {
             "report_type": report_type,
             "key": window.key,
             "period": {"start_ms": window.start_ms, "end_ms": window.end_ms},
             "token_capital": token_capital.model_dump(mode="json"),
             "portfolio": _snapshot_details(snapshot),
+            "equity_portfolio": _snapshot_details(equity_snapshot),
             "signals": {
                 "posted_or_created": len(evaluations),
                 "approved": len(approved),
@@ -425,8 +478,18 @@ class AutonomyReportService:
                 "avg_marked_r": _avg([item.realized_or_marked_r for item in completed]),
                 "avg_4h_r": _avg_mark(evaluations, "4h"),
             },
+            "events": {
+                "evaluated": len(event_evaluations),
+                "completed": len(completed_events),
+                "worked": len([item for item in completed_events if item.terminal_outcome == "worked"]),
+                "failed": len([item for item in completed_events if item.terminal_outcome == "failed"]),
+                "volatility_only": len([item for item in completed_events if item.terminal_outcome == "volatility_only"]),
+                "hit_rate": _event_hit_rate(completed_events),
+            },
             "best": [_evaluation_brief(item) for item in best],
             "worst": [_evaluation_brief(item) for item in worst],
+            "best_events": [_event_evaluation_brief(item) for item in best_events],
+            "worst_events": [_event_evaluation_brief(item) for item in worst_events],
             "missed_opportunities": [_evaluation_brief(item) for item in missed],
             "memory": memory_counts,
             "operator_feedback": {"count": len(feedback), "recent": feedback[:5]},
@@ -448,6 +511,7 @@ def format_report_summary(report_type: str, key: str, report: dict[str, Any]) ->
     token = report.get("token_capital", {})
     portfolio = report.get("portfolio", {})
     signals = report.get("signals", {})
+    events = report.get("events", {})
     proposals = report.get("tuning_proposals", [])
     title = "AI Trading Desk Weekly Review" if report_type == "weekly" else "AI Trading Desk Daily Report"
     lines = [f"📊 **{title} — {key} UTC**", ""]
@@ -461,6 +525,7 @@ def format_report_summary(report_type: str, key: str, report: dict[str, Any]) ->
             f"- Created/posted: `{signals.get('posted_or_created', 0)}` | Approved: `{signals.get('approved', 0)}` | Rejected: `{signals.get('rejected', 0)}`",
             f"- Completed: `{signals.get('completed', 0)}` | Avg 4h R: `{_fmt(signals.get('avg_4h_r'))}` | Avg marked R: `{_fmt(signals.get('avg_marked_r'))}`",
             f"- TP before stop: `{signals.get('tp_before_stop', 0)}` | Stop before TP: `{signals.get('stop_before_tp', 0)}`",
+            f"- Catalysts evaluated: `{events.get('evaluated', 0)}` | Completed: `{events.get('completed', 0)}` | Worked/failed/vol-only: `{events.get('worked', 0)}`/`{events.get('failed', 0)}`/`{events.get('volatility_only', 0)}` | Hit rate: `{_fmt(events.get('hit_rate'))}`",
         ]
     )
     if report.get("best"):
@@ -469,6 +534,12 @@ def format_report_summary(report_type: str, key: str, report: dict[str, Any]) ->
     if report.get("worst"):
         lines.append("\n**Worst:**")
         lines.extend(f"- {item['symbol']} {item['side']} {item['signal_type']}: MAE `{_fmt(item.get('max_adverse_r'))}R`, outcome `{item['terminal_outcome']}`" for item in report["worst"][:3])
+    if report.get("best_events"):
+        lines.append("\n**Best catalysts:**")
+        lines.extend(f"- {item['symbol']} {item['event_type']} {item['direction']}: MFE `{_fmt(item.get('max_favorable_bps'))}` bps, outcome `{item['terminal_outcome']}`" for item in report["best_events"][:3])
+    if report.get("worst_events"):
+        lines.append("\n**Worst catalysts:**")
+        lines.extend(f"- {item['symbol']} {item['event_type']} {item['direction']}: MAE `{_fmt(item.get('max_adverse_bps'))}` bps, outcome `{item['terminal_outcome']}`" for item in report["worst_events"][:3])
     if report.get("missed_opportunities"):
         lines.append("\n**Missed opportunities:**")
         lines.extend(f"- {item['symbol']} {item['side']} rejected: opportunity `{_fmt(item.get('opportunity_cost_r'))}R`" for item in report["missed_opportunities"][:3])
@@ -516,6 +587,70 @@ def _evaluation_brief(item: SignalEvaluation) -> dict[str, Any]:
         "max_adverse_r": item.max_adverse_r,
         "opportunity_cost_r": item.opportunity_cost_r,
     }
+
+
+def _event_evaluation_brief(item: AlphaEventEvaluation) -> dict[str, Any]:
+    return {
+        "evaluation_id": item.id,
+        "event_id": item.event_id,
+        "symbol": item.symbol,
+        "event_source": item.event_source,
+        "provider": item.provider,
+        "event_type": item.event_type,
+        "asset_class": item.asset_class,
+        "direction": item.direction,
+        "sentiment": item.sentiment,
+        "terminal_outcome": item.terminal_outcome,
+        "max_favorable_bps": item.max_favorable_bps,
+        "max_adverse_bps": item.max_adverse_bps,
+        "max_abs_move_bps": item.max_abs_move_bps,
+        "linked_signal_ids": item.linked_signal_ids,
+    }
+
+
+def _event_quality_details(items: list[AlphaEventEvaluation]) -> dict[str, Any]:
+    completed = [item for item in items if item.status == "complete"]
+    by_type: dict[str, dict[str, int]] = {}
+    for item in completed:
+        key = f"{item.asset_class}:{item.event_source}:{item.event_type}:{item.sentiment}"
+        bucket = by_type.setdefault(key, {"count": 0, "worked": 0, "failed": 0, "volatility_only": 0})
+        bucket["count"] += 1
+        if item.terminal_outcome in bucket:
+            bucket[item.terminal_outcome] += 1
+    return {
+        "completed": len(completed),
+        "hit_rate": _event_hit_rate(completed),
+        "failed_rate": _event_failed_rate(completed),
+        "volatility_only_count": len([item for item in completed if item.terminal_outcome == "volatility_only"]),
+        "by_scope": by_type,
+    }
+
+
+def _event_hit_rate(items: list[AlphaEventEvaluation]) -> float | None:
+    if not items:
+        return None
+    return len([item for item in items if item.terminal_outcome == "worked"]) / len(items)
+
+
+def _event_failed_rate(items: list[AlphaEventEvaluation]) -> float | None:
+    if not items:
+        return None
+    return len([item for item in items if item.terminal_outcome == "failed"]) / len(items)
+
+
+def _latest_equity_snapshot(service: Any | None) -> Any | None:
+    if service is None:
+        return None
+    snapshots = getattr(service, "snapshots", None)
+    if snapshots:
+        return snapshots[-1]
+    snapshot = getattr(service, "snapshot", None)
+    if callable(snapshot):
+        try:
+            return snapshot()
+        except Exception:
+            return None
+    return None
 
 
 def _snapshot_details(snapshot: Any | None) -> dict[str, Any]:

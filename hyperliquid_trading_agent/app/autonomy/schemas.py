@@ -25,9 +25,12 @@ SignalSide = Literal["long", "short"]
 SignalEvaluationStatus = Literal["open", "complete", "partial", "expired_no_data", "error"]
 SignalTerminalOutcome = Literal["tp_hit", "stop_hit", "expired_positive", "expired_negative", "expired_flat", "insufficient_data", "open"]
 SignalEvaluationMarkStatus = Literal["pending", "marked", "missed_no_price", "error"]
+AlphaEventEvaluationStatus = Literal["open", "complete", "partial", "expired_no_data", "skipped", "error"]
+AlphaEventDirection = Literal["long", "short", "neutral"]
+AlphaEventTerminalOutcome = Literal["worked", "failed", "mixed", "volatility_only", "insufficient_data", "open"]
 EvaluationHorizon = Literal["5m", "15m", "1h", "4h", "24h", "72h", "expiry"]
 RoleName = Literal["analyst", "quant", "research", "risk", "treasury", "execution", "adversary", "judge"]
-LessonType = Literal["role_behavior", "signal_quality", "risk_discipline", "operator_output", "data_quality", "incident_warning"]
+LessonType = Literal["role_behavior", "signal_quality", "risk_discipline", "operator_output", "data_quality", "incident_warning", "catalyst_quality"]
 LessonValidationStatus = Literal["active", "needs_human_review", "shadow", "archived", "expired", "rejected"]
 TuningProposalStatus = Literal["draft", "proposed", "accepted_manually", "rejected", "expired", "superseded"]
 Sentiment = Literal["bullish", "bearish", "mixed", "unknown"]
@@ -297,6 +300,7 @@ class AutonomyCommand(BaseModel):
         "weekly_report",
         "token_capital",
         "signal_outcome",
+        "event_outcome",
         "feedback_signal",
         "feedback_bot",
         "memories",
@@ -393,9 +397,65 @@ class SignalEvaluation(BaseModel):
     marks: list[SignalEvaluationMark] = Field(default_factory=list)
 
 
+class AlphaEventEvaluationMark(BaseModel):
+    id: str
+    evaluation_id: str
+    event_id: str
+    symbol: str
+    asset_class: str = "unknown"
+    horizon: str
+    due_at_ms: int
+    marked_at_ms: int | None = None
+    price: float | None = None
+    direction_adjusted_return_bps: float | None = None
+    abs_move_bps: float | None = None
+    max_favorable_bps_until_mark: float | None = None
+    max_adverse_bps_until_mark: float | None = None
+    max_abs_move_bps_until_mark: float | None = None
+    status: SignalEvaluationMarkStatus = "pending"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AlphaEventEvaluation(BaseModel):
+    id: str
+    event_id: str
+    event_source: str = "unknown"
+    provider: str = "unknown"
+    event_type: str = "headline"
+    asset_class: str = "unknown"
+    symbol: str
+    direction: AlphaEventDirection = "neutral"
+    sentiment: Sentiment = "unknown"
+    status: AlphaEventEvaluationStatus = "open"
+    terminal_outcome: AlphaEventTerminalOutcome = "open"
+    received_at_ms: int
+    completed_at_ms: int | None = None
+    headline: str = ""
+    url: str | None = None
+    importance_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    source_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    urgency: str = "normal"
+    freshness: Freshness = "fresh"
+    market_regime: str = "unknown"
+    reference_price: float | None = None
+    reference_price_at_ms: int | None = None
+    latest_price: float | None = None
+    latest_price_at_ms: int | None = None
+    max_favorable_price: float | None = None
+    max_adverse_price: float | None = None
+    max_favorable_bps: float | None = None
+    max_adverse_bps: float | None = None
+    max_abs_move_bps: float | None = None
+    realized_or_marked_bps: float | None = None
+    linked_signal_ids: list[str] = Field(default_factory=list)
+    error: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    marks: list[AlphaEventEvaluationMark] = Field(default_factory=list)
+
+
 class MemoryObservation(BaseModel):
     id: str
-    source_type: Literal["signal_evaluation", "daily_report", "weekly_report", "operator_feedback", "role_output", "schema_validation", "incident"]
+    source_type: Literal["signal_evaluation", "event_evaluation", "daily_report", "weekly_report", "operator_feedback", "role_output", "schema_validation", "incident"]
     source_id: str
     role: str | None = None
     symbol: str | None = None

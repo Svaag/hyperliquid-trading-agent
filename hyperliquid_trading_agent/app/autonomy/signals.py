@@ -105,6 +105,7 @@ class SignalEngine:
                 "exchange_actions": [],
                 "human_signoff_required": self.settings.autonomy_require_human_signoff,
             },
+            metadata={"asset_class": "crypto", "source_event_ids": _source_event_ids(state)},
         )
 
 
@@ -223,7 +224,7 @@ async def maybe_attach_model_insight(signal: TradeSignal, model_gateway: Any, se
     memory_block = ""
     if memory_service is not None and callable(getattr(memory_service, "memory_block_for_role", None)):
         try:
-            memory_block = await memory_service.memory_block_for_role("risk", symbol=signal.symbol, signal_type=signal.signal_type, max_items=4)
+            memory_block = await memory_service.memory_block_for_role("research", symbol=signal.symbol, signal_type=signal.signal_type, max_items=4)
         except Exception:
             memory_block = ""
     prompt = (
@@ -296,6 +297,12 @@ def _first_target_with_min_rr(side: str, entry: float, stop: float, targets: lis
         if rr is not None and rr >= min_rr:
             return target
     return None
+
+
+def _source_event_ids(state: AssetMarketState) -> list[str]:
+    if state.news_state is None:
+        return []
+    return [event.id for event in state.news_state.latest_events[:5]]
 
 
 def _thesis(state: AssetMarketState, market_map: GlobalMarketMap, side: str, signal_type: str) -> str:

@@ -5,6 +5,7 @@ from typing import Any
 from uuid import uuid4
 
 from hyperliquid_trading_agent.app.autonomy.schemas import (
+    AlphaEventEvaluation,
     CandidateLesson,
     MemoryObservation,
     OperatorFeedback,
@@ -85,6 +86,17 @@ class MemoryService:
         await self.record_observation(observation)
         candidates: list[CandidateLesson] = []
         for candidate in _candidates_from_evaluation(evaluation, observation, self.settings):
+            candidates.append(await self.upsert_candidate(candidate))
+        promoted = await self.promote_candidates()
+        return [*candidates, *promoted]
+
+    async def observe_event_evaluation(self, evaluation: AlphaEventEvaluation) -> list[CandidateLesson]:
+        if not self.settings.autonomy_memory_enabled:
+            return []
+        observation = _observation_from_event_evaluation(evaluation)
+        await self.record_observation(observation)
+        candidates: list[CandidateLesson] = []
+        for candidate in _candidates_from_event_evaluation(evaluation, observation, self.settings):
             candidates.append(await self.upsert_candidate(candidate))
         promoted = await self.promote_candidates()
         return [*candidates, *promoted]
@@ -248,6 +260,7 @@ class MemoryService:
 
     async def memory_block_for_role(self, role: str, *, symbol: str | None = None, signal_type: str | None = None, market_regime: str | None = None, max_items: int = 5) -> str:
         lessons = await self.retrieve(role=role, symbol=symbol, signal_type=signal_type, market_regime=market_regime, max_items=max_items)
+        lessons = [lesson for lesson in lessons if _lesson_injection_allowed_for_role(lesson, role, self.settings)]
         if not lessons:
             return ""
         lines = ["Relevant validated role memories:"]
@@ -333,17 +346,34 @@ class MemoryService:
             await self.repository.set_candidate_lesson_status(candidate_id, "shadow")
         return lesson
 
-    async def promote_candidate_to_active(self, candidate_id: str, *, human_review_confirmed: bool = False) -> RoleLessonMemory | None:
+    async def promote_candidate_to_active(
+        self,
+        candidate_id: str,
+        *,
+        human_review_confirmed: bool = False,
+        change_control_id: str = "",
+        approved_for_role_injection_roles: list[str] | None = None,
+        reviewer: str = "",
+    ) -> RoleLessonMemory | None:
         candidate = self.candidates.get(candidate_id)
         if candidate is None and self._repo_enabled():
             data = await self.repository.get_candidate_lesson(candidate_id)
             candidate = CandidateLesson(**data) if data else None
         if candidate is None:
             return None
+        target_role = candidate.role or _default_role_for_lesson(candidate.lesson_type)
+        gated_role = target_role in {"risk", "execution", "treasury"}
         if _requires_human_review(candidate) and not human_review_confirmed:
             raise PermissionError("human_review_confirmed required for strategy/risk/execution/capital-affecting memory")
-        status = "active" if not _requires_human_review(candidate) else "needs_human_review"
-        lesson = self._role_lesson_from_candidate(candidate, status=status, now_ms=_now_ms())
+        if gated_role and self.settings.autonomy_memory_require_change_control_for_risk_execution and not change_control_id:
+            raise PermissionError("change_control_id required before risk/execution/treasury memory can become injectable")
+        status = "active"
+        metadata = {
+            "change_control_id": change_control_id,
+            "approved_for_role_injection_roles": approved_for_role_injection_roles or [],
+            "reviewer": reviewer,
+        }
+        lesson = self._role_lesson_from_candidate(candidate, status=status, now_ms=_now_ms(), metadata=metadata)
         if lesson is None:
             return None
         self.role_lessons[lesson.id] = lesson
@@ -375,7 +405,7 @@ class MemoryService:
             return candidate.sample_size >= self.settings.autonomy_signal_lesson_min_samples and candidate.confidence >= self.settings.autonomy_strategy_lesson_min_confidence
         return candidate.sample_size >= self.settings.autonomy_role_lesson_min_samples and candidate.confidence >= self.settings.autonomy_lesson_min_confidence
 
-    def _role_lesson_from_candidate(self, candidate: CandidateLesson, *, status: str, now_ms: int) -> RoleLessonMemory | None:
+    def _role_lesson_from_candidate(self, candidate: CandidateLesson, *, status: str, now_ms: int, metadata: dict[str, Any] | None = None) -> RoleLessonMemory | None:
         role = candidate.role or _default_role_for_lesson(candidate.lesson_type)
         if role not in ROLE_ORDER:
             role = "judge"
@@ -402,7 +432,7 @@ class MemoryService:
             created_at_ms=now_ms,
             activated_at_ms=now_ms if status == "active" else None,
             expires_at_ms=now_ms + ttl_days * 86_400_000,
-            metadata={"source": "evidence_gated_memory_pipeline", "exchange_actions": []},
+            metadata={"source": "evidence_gated_memory_pipeline", **(metadata or {}), "exchange_actions": []},
         )
 
     async def _persist_shadow_lesson(self, lesson: RoleLessonMemory) -> None:
@@ -514,6 +544,84 @@ def _candidates_from_evaluation(evaluation: SignalEvaluation, observation: Memor
     return candidates
 
 
+def _observation_from_event_evaluation(evaluation: AlphaEventEvaluation) -> MemoryObservation:
+    bps_text = "n/a" if evaluation.realized_or_marked_bps is None else f"{evaluation.realized_or_marked_bps:.1f} bps"
+    return MemoryObservation(
+        id=f"obs_{uuid4().hex}",
+        source_type="event_evaluation",
+        source_id=evaluation.id,
+        role="research",
+        symbol=evaluation.symbol,
+        signal_type=evaluation.event_type,
+        market_regime=evaluation.market_regime,
+        observation=f"{evaluation.symbol} {evaluation.event_type} catalyst from {evaluation.event_source} completed as {evaluation.terminal_outcome}; marked move {bps_text}; max favorable={evaluation.max_favorable_bps}, max adverse={evaluation.max_adverse_bps}, max abs={evaluation.max_abs_move_bps}.",
+        evidence=[evaluation.model_dump(mode="json", exclude={"marks"})],
+        severity="warning" if evaluation.terminal_outcome == "failed" else "info",
+        created_at_ms=_now_ms(),
+        metadata={"exchange_actions": []},
+    )
+
+
+def _candidates_from_event_evaluation(evaluation: AlphaEventEvaluation, observation: MemoryObservation, settings: Settings) -> list[CandidateLesson]:
+    candidates: list[CandidateLesson] = []
+    now_ms = _now_ms()
+    base: dict[str, Any] = {
+        "scope": {
+            "symbol": evaluation.symbol,
+            "event_type": evaluation.event_type,
+            "source": evaluation.event_source,
+            "asset_class": evaluation.asset_class,
+            "sentiment": evaluation.sentiment,
+            "direction": evaluation.direction,
+            "market_regime": evaluation.market_regime,
+        },
+        "evidence": observation.evidence,
+        "source_observation_ids": [observation.id],
+        "source_signal_ids": list(evaluation.linked_signal_ids),
+        "sample_size": 1,
+        "created_at_ms": now_ms,
+        "expires_at_ms": now_ms + settings.autonomy_memory_candidate_ttl_days * 86_400_000,
+        "metadata": {"event_id": evaluation.event_id, "event_evaluation_id": evaluation.id, "exchange_actions": []},
+    }
+    if evaluation.terminal_outcome == "worked":
+        candidates.append(
+            CandidateLesson(
+                id=f"cand_{uuid4().hex}",
+                lesson_type="catalyst_quality",
+                role="research",
+                claim=f"{evaluation.event_source} {evaluation.event_type} {evaluation.sentiment} catalysts showed directional follow-through for {evaluation.symbol} in this scope.",
+                confidence=0.58,
+                expected_future_behavior_change="When this catalyst scope repeats, preserve it as advisory research evidence but require normal signal/risk confirmation before any paper signal.",
+                **base,
+            )
+        )
+    elif evaluation.terminal_outcome == "failed":
+        candidates.append(
+            CandidateLesson(
+                id=f"cand_{uuid4().hex}",
+                lesson_type="catalyst_quality",
+                role="adversary",
+                claim=f"{evaluation.event_source} {evaluation.event_type} {evaluation.sentiment} catalysts failed to follow through for {evaluation.symbol} in this scope.",
+                confidence=0.60,
+                expected_future_behavior_change="Challenge similar catalysts in research review unless price/orderflow confirmation appears; do not relax thresholds from this evidence alone.",
+                **base,
+            )
+        )
+    elif evaluation.terminal_outcome == "volatility_only":
+        candidates.append(
+            CandidateLesson(
+                id=f"cand_{uuid4().hex}",
+                lesson_type="catalyst_quality",
+                role="research",
+                claim=f"{evaluation.event_source} {evaluation.event_type} catalysts generated volatility but weak direction for {evaluation.symbol}.",
+                confidence=0.55,
+                expected_future_behavior_change="Treat similar events as volatility catalysts, not standalone directional edge, until follow-through evidence accumulates.",
+                **base,
+            )
+        )
+    return candidates
+
+
 def _operator_feedback_claim(feedback: OperatorFeedback) -> str:
     if feedback.rating in {"good", "useful"}:
         return "Operator found this output/action format useful."
@@ -550,7 +658,25 @@ def _default_role_for_lesson(lesson_type: str) -> str:
         "operator_output": "judge",
         "data_quality": "research",
         "incident_warning": "adversary",
+        "catalyst_quality": "research",
     }.get(lesson_type, "analyst")
+
+
+def _role_memory_injection_allowed(role: str, settings: Settings) -> bool:
+    role_key = role.lower().strip().replace("-", "_")
+    sensitive_roles = {"risk", "execution", "treasury"}
+    return role_key in set(settings.autonomy_memory_prompt_role_list) and not (
+        settings.autonomy_memory_require_change_control_for_risk_execution and role_key in sensitive_roles
+    )
+
+
+def _lesson_injection_allowed_for_role(lesson: RoleLessonMemory, role: str, settings: Settings) -> bool:
+    role_key = role.lower().strip().replace("-", "_")
+    sensitive_roles = {"risk", "execution", "treasury"}
+    approved_roles = {str(item).lower() for item in lesson.metadata.get("approved_for_role_injection_roles", [])}
+    if settings.autonomy_memory_require_change_control_for_risk_execution and role_key in sensitive_roles:
+        return bool(lesson.metadata.get("change_control_id") and role_key in approved_roles)
+    return role_key in set(settings.autonomy_memory_prompt_role_list)
 
 
 def _scope_score(scope: dict[str, Any], *, symbol: str | None, signal_type: str | None, market_regime: str | None) -> int:

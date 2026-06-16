@@ -85,6 +85,8 @@ DEFAULT_NEWSWIRE_RSS_FEEDS = (
     ",https://cointelegraph.com/rss"
 )
 DEFAULT_AUTONOMY_EVAL_HORIZONS = "15m,1h,4h,24h,expiry"
+DEFAULT_AUTONOMY_EVENT_EVAL_HORIZONS = "15m,1h,4h,24h,72h"
+DEFAULT_AUTONOMY_MEMORY_PROMPT_ROLES = "analyst,quant,research,adversary,judge"
 AUTONOMY_ALLOWED_EVAL_HORIZONS = {"5m", "15m", "1h", "4h", "24h", "72h", "expiry"}
 AUTONOMY_WEEKDAYS = {"MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"}
 
@@ -187,11 +189,21 @@ class Settings(BaseSettings):
     autonomy_model_max_calls_per_hour: int = 12
 
     autonomy_evaluation_enabled: bool = True
+    autonomy_event_evaluation_enabled: bool = True
     autonomy_memory_enabled: bool = True
     autonomy_reports_enabled: bool = True
     autonomy_eval_horizons: str = DEFAULT_AUTONOMY_EVAL_HORIZONS
     autonomy_eval_max_open_signals: int = 500
     autonomy_eval_price_source: Literal["allMids"] = "allMids"
+    autonomy_event_eval_horizons: str = DEFAULT_AUTONOMY_EVENT_EVAL_HORIZONS
+    autonomy_event_eval_min_importance: float = 50.0
+    autonomy_event_eval_min_source_score: float = 0.4
+    autonomy_event_eval_max_open_events: int = 1000
+    autonomy_event_eval_symbols_per_event: int = 5
+    autonomy_event_eval_macro_proxies: str = "BTC,ETH,SPY,QQQ"
+    autonomy_event_eval_worked_bps: float = 50.0
+    autonomy_event_eval_failed_bps: float = -35.0
+    autonomy_event_eval_volatility_bps: float = 75.0
     autonomy_daily_report_enabled: bool = True
     autonomy_daily_report_utc: str = "00:05"
     autonomy_weekly_report_enabled: bool = True
@@ -211,6 +223,8 @@ class Settings(BaseSettings):
     autonomy_strategy_lesson_min_confidence: float = 0.75
     autonomy_tuning_proposals_enabled: bool = True
     autonomy_tuning_proposal_ttl_days: int = 14
+    autonomy_memory_prompt_roles: str = DEFAULT_AUTONOMY_MEMORY_PROMPT_ROLES
+    autonomy_memory_require_change_control_for_risk_execution: bool = True
 
     newswire_enabled: bool = True
     newswire_queries: str = "BTC,ETH,HYPE,Hyperliquid,Fed,CPI,FOMC,crypto liquidation"
@@ -383,12 +397,28 @@ class Settings(BaseSettings):
         return [item.lower() for item in _csv(self.autonomy_eval_horizons)]
 
     @property
+    def autonomy_event_eval_horizon_list(self) -> list[str]:
+        return [item.lower() for item in _csv(self.autonomy_event_eval_horizons)]
+
+    @property
+    def autonomy_event_eval_macro_proxy_symbols(self) -> list[str]:
+        return [symbol.upper() for symbol in _csv(self.autonomy_event_eval_macro_proxies)]
+
+    @property
+    def autonomy_memory_prompt_role_list(self) -> list[str]:
+        return [_canonical_role(role) for role in _csv(self.autonomy_memory_prompt_roles)]
+
+    @property
     def autonomy_weekly_report_day_normalized(self) -> str:
         return self.autonomy_weekly_report_day.strip().upper()
 
     @property
     def autonomy_evaluation_effective_enabled(self) -> bool:
         return self.autonomy_enabled and self.autonomy_evaluation_enabled
+
+    @property
+    def autonomy_event_evaluation_effective_enabled(self) -> bool:
+        return self.autonomy_enabled and self.autonomy_event_evaluation_enabled
 
     @property
     def autonomy_memory_effective_enabled(self) -> bool:
@@ -496,6 +526,20 @@ class Settings(BaseSettings):
                 warnings.append(f"AUTONOMY_EVAL_HORIZONS contains unsupported horizons: {','.join(invalid_horizons)}")
             if self.autonomy_eval_max_open_signals <= 0:
                 warnings.append("AUTONOMY_EVAL_MAX_OPEN_SIGNALS must be positive")
+        if self.autonomy_event_evaluation_enabled:
+            invalid_event_horizons = [item for item in self.autonomy_event_eval_horizon_list if item not in AUTONOMY_ALLOWED_EVAL_HORIZONS or item == "expiry"]
+            if not self.autonomy_event_eval_horizon_list:
+                warnings.append("AUTONOMY_EVENT_EVAL_HORIZONS is empty")
+            if invalid_event_horizons:
+                warnings.append(f"AUTONOMY_EVENT_EVAL_HORIZONS contains unsupported horizons: {','.join(invalid_event_horizons)}")
+            if self.autonomy_event_eval_max_open_events <= 0:
+                warnings.append("AUTONOMY_EVENT_EVAL_MAX_OPEN_EVENTS must be positive")
+            if self.autonomy_event_eval_symbols_per_event <= 0:
+                warnings.append("AUTONOMY_EVENT_EVAL_SYMBOLS_PER_EVENT must be positive")
+            if not self.autonomy_event_eval_macro_proxy_symbols:
+                warnings.append("AUTONOMY_EVENT_EVAL_MACRO_PROXIES is empty")
+            if self.autonomy_event_eval_min_source_score < 0 or self.autonomy_event_eval_min_source_score > 1:
+                warnings.append("AUTONOMY_EVENT_EVAL_MIN_SOURCE_SCORE must be between 0 and 1")
         if self.autonomy_reports_enabled:
             if self.autonomy_daily_report_enabled and not _valid_hhmm(self.autonomy_daily_report_utc):
                 warnings.append("AUTONOMY_DAILY_REPORT_UTC must be HH:MM")
@@ -520,6 +564,9 @@ class Settings(BaseSettings):
                 warnings.append("AUTONOMY_LESSON_MIN_CONFIDENCE must be between 0 and 1")
             if self.autonomy_strategy_lesson_min_confidence < 0 or self.autonomy_strategy_lesson_min_confidence > 1:
                 warnings.append("AUTONOMY_STRATEGY_LESSON_MIN_CONFIDENCE must be between 0 and 1")
+            invalid_memory_roles = [role for role in self.autonomy_memory_prompt_role_list if role not in ROLE_ORDER]
+            if invalid_memory_roles:
+                warnings.append(f"AUTONOMY_MEMORY_PROMPT_ROLES contains unsupported roles: {','.join(invalid_memory_roles)}")
         return warnings
 
     def role_model_chain(self, role: str) -> list[str]:

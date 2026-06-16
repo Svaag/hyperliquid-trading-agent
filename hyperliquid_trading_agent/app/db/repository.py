@@ -7,6 +7,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from hyperliquid_trading_agent.app.db.models import (
+    AlphaEventEvaluationMarkRecord,
+    AlphaEventEvaluationRecord,
     AuditEvent,
     AutonomyEvent,
     AutonomyNewsEvent,
@@ -809,6 +811,8 @@ class Repository:
             item.model_insight_json = redact_secrets(signal.get("model_insight")) if signal.get("model_insight") is not None else None
             item.discord_channel_id = signal.get("discord_channel_id")
             item.discord_message_id = signal.get("discord_message_id")
+            item.asset_class = str((signal.get("metadata") or {}).get("asset_class") or signal.get("asset_class") or item.asset_class or "crypto")
+            item.metadata_json = redact_secrets(dict(signal.get("metadata") or {}))
             if approved_by:
                 item.approved_by_discord_user_id = approved_by
                 item.approved_at = datetime.now(UTC)
@@ -931,6 +935,92 @@ class Repository:
                 stmt = stmt.where(SignalEvaluationMarkRecord.signal_id == signal_id)
             result = await session.execute(stmt)
             return [_signal_evaluation_mark_to_dict(item) for item in result.scalars().all()]
+
+    async def upsert_alpha_event_evaluation(self, evaluation: dict[str, Any]) -> None:
+        if self.sessionmaker is None:
+            return
+        try:
+            async with self.sessionmaker() as session:
+                item = await session.get(AlphaEventEvaluationRecord, str(evaluation["id"]))
+                if item is None:
+                    result = await session.execute(select(AlphaEventEvaluationRecord).where(AlphaEventEvaluationRecord.event_id == str(evaluation["event_id"]), AlphaEventEvaluationRecord.symbol == str(evaluation.get("symbol") or "").upper()))
+                    item = result.scalar_one_or_none()
+                if item is None:
+                    item = AlphaEventEvaluationRecord(id=str(evaluation["id"]), event_id=str(evaluation["event_id"]), symbol=str(evaluation.get("symbol") or "").upper(), received_at_ms=int(evaluation.get("received_at_ms") or 0))
+                    session.add(item)
+                _apply_alpha_event_evaluation(item, evaluation)
+                await session.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("alpha_event_evaluation_upsert_failed", event_id=evaluation.get("event_id"), symbol=evaluation.get("symbol"), error=type(exc).__name__)
+
+    async def upsert_alpha_event_evaluation_mark(self, mark: dict[str, Any]) -> None:
+        if self.sessionmaker is None:
+            return
+        try:
+            async with self.sessionmaker() as session:
+                item = await session.get(AlphaEventEvaluationMarkRecord, str(mark["id"]))
+                if item is None:
+                    result = await session.execute(select(AlphaEventEvaluationMarkRecord).where(AlphaEventEvaluationMarkRecord.event_id == str(mark["event_id"]), AlphaEventEvaluationMarkRecord.symbol == str(mark.get("symbol") or "").upper(), AlphaEventEvaluationMarkRecord.horizon == str(mark.get("horizon") or "")))
+                    item = result.scalar_one_or_none()
+                if item is None:
+                    item = AlphaEventEvaluationMarkRecord(id=str(mark["id"]), evaluation_id=str(mark["evaluation_id"]), event_id=str(mark["event_id"]), symbol=str(mark.get("symbol") or "").upper(), horizon=str(mark.get("horizon") or ""), due_at_ms=int(mark.get("due_at_ms") or 0), status=str(mark.get("status") or "pending"))
+                    session.add(item)
+                _apply_alpha_event_evaluation_mark(item, mark)
+                await session.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("alpha_event_evaluation_mark_upsert_failed", event_id=mark.get("event_id"), horizon=mark.get("horizon"), error=type(exc).__name__)
+
+    async def upsert_alpha_event_evaluation_marks(self, marks: list[dict[str, Any]]) -> None:
+        for mark in marks:
+            await self.upsert_alpha_event_evaluation_mark(mark)
+
+    async def get_alpha_event_evaluation(self, evaluation_id: str) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(AlphaEventEvaluationRecord, evaluation_id)
+            if item is None:
+                return None
+            return await self._alpha_event_evaluation_to_dict(session, item)
+
+    async def get_alpha_event_evaluation_by_event_id(self, event_id: str, symbol: str | None = None) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(AlphaEventEvaluationRecord).where(AlphaEventEvaluationRecord.event_id == event_id).order_by(AlphaEventEvaluationRecord.symbol.asc())
+            if symbol:
+                stmt = stmt.where(AlphaEventEvaluationRecord.symbol == symbol.upper())
+            result = await session.execute(stmt)
+            return [await self._alpha_event_evaluation_to_dict(session, item) for item in result.scalars().all()]
+
+    async def list_alpha_event_evaluations(self, status: str | None = None, symbol: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(AlphaEventEvaluationRecord).order_by(AlphaEventEvaluationRecord.received_at_ms.desc()).limit(limit)
+            if status:
+                stmt = stmt.where(AlphaEventEvaluationRecord.status == status)
+            if symbol:
+                stmt = stmt.where(AlphaEventEvaluationRecord.symbol == symbol.upper())
+            result = await session.execute(stmt)
+            return [await self._alpha_event_evaluation_to_dict(session, item) for item in result.scalars().all()]
+
+    async def list_open_alpha_event_evaluations(self, symbol: str | None = None, limit: int = 1000) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(AlphaEventEvaluationRecord).where(AlphaEventEvaluationRecord.status.in_(["open", "partial"])).order_by(AlphaEventEvaluationRecord.received_at_ms.desc()).limit(limit)
+            if symbol:
+                stmt = stmt.where(AlphaEventEvaluationRecord.symbol == symbol.upper())
+            result = await session.execute(stmt)
+            return [await self._alpha_event_evaluation_to_dict(session, item) for item in result.scalars().all()]
+
+    async def list_due_alpha_event_evaluation_marks(self, now_ms: int, limit: int = 500) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            result = await session.execute(select(AlphaEventEvaluationMarkRecord).where(AlphaEventEvaluationMarkRecord.status == "pending", AlphaEventEvaluationMarkRecord.due_at_ms <= now_ms).order_by(AlphaEventEvaluationMarkRecord.due_at_ms.asc()).limit(limit))
+            return [_alpha_event_evaluation_mark_to_dict(item) for item in result.scalars().all()]
 
     async def record_memory_observation(self, observation: dict[str, Any]) -> str | None:
         if self.sessionmaker is None:
@@ -1572,6 +1662,12 @@ class Repository:
         data["marks"] = [_signal_evaluation_mark_to_dict(mark) for mark in result.scalars().all()]
         return data
 
+    async def _alpha_event_evaluation_to_dict(self, session: AsyncSession, item: AlphaEventEvaluationRecord) -> dict[str, Any]:
+        result = await session.execute(select(AlphaEventEvaluationMarkRecord).where(AlphaEventEvaluationMarkRecord.evaluation_id == item.id).order_by(AlphaEventEvaluationMarkRecord.due_at_ms.asc()))
+        data = _alpha_event_evaluation_to_dict(item)
+        data["marks"] = [_alpha_event_evaluation_mark_to_dict(mark) for mark in result.scalars().all()]
+        return data
+
 
 def _apply_signal_evaluation(item: SignalEvaluationRecord, data: dict[str, Any]) -> None:
     item.symbol = str(data.get("symbol") or item.symbol).upper()
@@ -1636,6 +1732,60 @@ def _apply_signal_evaluation_mark(item: SignalEvaluationMarkRecord, data: dict[s
     item.mae_r_until_mark = data.get("mae_r_until_mark")
     item.stop_hit_before_mark = bool(data.get("stop_hit_before_mark"))
     item.take_profit_hit_before_mark = bool(data.get("take_profit_hit_before_mark"))
+    item.status = str(data.get("status") or item.status)
+    item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
+
+
+def _apply_alpha_event_evaluation(item: AlphaEventEvaluationRecord, data: dict[str, Any]) -> None:
+    item.event_id = str(data.get("event_id") or item.event_id)
+    item.event_source = str(data.get("event_source") or item.event_source)
+    item.provider = str(data.get("provider") or item.provider)
+    item.event_type = str(data.get("event_type") or item.event_type)
+    item.asset_class = str(data.get("asset_class") or item.asset_class)
+    item.symbol = str(data.get("symbol") or item.symbol).upper()
+    item.direction = str(data.get("direction") or item.direction)
+    item.sentiment = str(data.get("sentiment") or item.sentiment)
+    item.status = str(data.get("status") or item.status)
+    item.terminal_outcome = str(data.get("terminal_outcome") or item.terminal_outcome)
+    item.received_at_ms = int(data.get("received_at_ms") or item.received_at_ms)
+    item.completed_at_ms = data.get("completed_at_ms")
+    item.headline = str(data.get("headline") or item.headline)
+    item.url = data.get("url")
+    item.importance_score = _float_value(data.get("importance_score"), item.importance_score)
+    item.source_score = _float_value(data.get("source_score"), item.source_score)
+    item.urgency = str(data.get("urgency") or item.urgency)
+    item.freshness = str(data.get("freshness") or item.freshness)
+    item.market_regime = str(data.get("market_regime") or item.market_regime)
+    item.reference_price = data.get("reference_price")
+    item.reference_price_at_ms = data.get("reference_price_at_ms")
+    item.latest_price = data.get("latest_price")
+    item.latest_price_at_ms = data.get("latest_price_at_ms")
+    item.max_favorable_price = data.get("max_favorable_price")
+    item.max_adverse_price = data.get("max_adverse_price")
+    item.max_favorable_bps = data.get("max_favorable_bps")
+    item.max_adverse_bps = data.get("max_adverse_bps")
+    item.max_abs_move_bps = data.get("max_abs_move_bps")
+    item.realized_or_marked_bps = data.get("realized_or_marked_bps")
+    item.linked_signal_ids_json = list(data.get("linked_signal_ids") or [])
+    item.error = str(data.get("error") or "")
+    item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
+    item.updated_at = datetime.now(UTC)
+
+
+def _apply_alpha_event_evaluation_mark(item: AlphaEventEvaluationMarkRecord, data: dict[str, Any]) -> None:
+    item.evaluation_id = str(data.get("evaluation_id") or item.evaluation_id)
+    item.event_id = str(data.get("event_id") or item.event_id)
+    item.symbol = str(data.get("symbol") or item.symbol).upper()
+    item.asset_class = str(data.get("asset_class") or item.asset_class)
+    item.horizon = str(data.get("horizon") or item.horizon)
+    item.due_at_ms = int(data.get("due_at_ms") or item.due_at_ms)
+    item.marked_at_ms = data.get("marked_at_ms")
+    item.price = data.get("price")
+    item.direction_adjusted_return_bps = data.get("direction_adjusted_return_bps")
+    item.abs_move_bps = data.get("abs_move_bps")
+    item.max_favorable_bps_until_mark = data.get("max_favorable_bps_until_mark")
+    item.max_adverse_bps_until_mark = data.get("max_adverse_bps_until_mark")
+    item.max_abs_move_bps_until_mark = data.get("max_abs_move_bps_until_mark")
     item.status = str(data.get("status") or item.status)
     item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
 
@@ -1849,6 +1999,8 @@ def _newswire_event_to_dict(item: NewswireEventRow) -> dict[str, Any]:
 
 
 def _trade_signal_to_dict(item: TradeSignalRecord) -> dict[str, Any]:
+    metadata = dict(item.metadata_json or {})
+    metadata.setdefault("asset_class", item.asset_class)
     return {
         "id": item.id,
         "symbol": item.symbol,
@@ -1870,6 +2022,7 @@ def _trade_signal_to_dict(item: TradeSignalRecord) -> dict[str, Any]:
         "model_insight": item.model_insight_json,
         "discord_channel_id": item.discord_channel_id,
         "discord_message_id": item.discord_message_id,
+        "metadata": metadata,
     }
 
 
@@ -2104,6 +2257,68 @@ def _signal_evaluation_mark_to_dict(item: SignalEvaluationMarkRecord) -> dict[st
         "mae_r_until_mark": item.mae_r_until_mark,
         "stop_hit_before_mark": item.stop_hit_before_mark,
         "take_profit_hit_before_mark": item.take_profit_hit_before_mark,
+        "status": item.status,
+        "metadata": item.metadata_json,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+    }
+
+
+def _alpha_event_evaluation_to_dict(item: AlphaEventEvaluationRecord) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "event_id": item.event_id,
+        "event_source": item.event_source,
+        "provider": item.provider,
+        "event_type": item.event_type,
+        "asset_class": item.asset_class,
+        "symbol": item.symbol,
+        "direction": item.direction,
+        "sentiment": item.sentiment,
+        "status": item.status,
+        "terminal_outcome": item.terminal_outcome,
+        "received_at_ms": item.received_at_ms,
+        "completed_at_ms": item.completed_at_ms,
+        "headline": item.headline,
+        "url": item.url,
+        "importance_score": item.importance_score,
+        "source_score": item.source_score,
+        "urgency": item.urgency,
+        "freshness": item.freshness,
+        "market_regime": item.market_regime,
+        "reference_price": item.reference_price,
+        "reference_price_at_ms": item.reference_price_at_ms,
+        "latest_price": item.latest_price,
+        "latest_price_at_ms": item.latest_price_at_ms,
+        "max_favorable_price": item.max_favorable_price,
+        "max_adverse_price": item.max_adverse_price,
+        "max_favorable_bps": item.max_favorable_bps,
+        "max_adverse_bps": item.max_adverse_bps,
+        "max_abs_move_bps": item.max_abs_move_bps,
+        "realized_or_marked_bps": item.realized_or_marked_bps,
+        "linked_signal_ids": item.linked_signal_ids_json,
+        "error": item.error,
+        "metadata": item.metadata_json,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+    }
+
+
+def _alpha_event_evaluation_mark_to_dict(item: AlphaEventEvaluationMarkRecord) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "evaluation_id": item.evaluation_id,
+        "event_id": item.event_id,
+        "symbol": item.symbol,
+        "asset_class": item.asset_class,
+        "horizon": item.horizon,
+        "due_at_ms": item.due_at_ms,
+        "marked_at_ms": item.marked_at_ms,
+        "price": item.price,
+        "direction_adjusted_return_bps": item.direction_adjusted_return_bps,
+        "abs_move_bps": item.abs_move_bps,
+        "max_favorable_bps_until_mark": item.max_favorable_bps_until_mark,
+        "max_adverse_bps_until_mark": item.max_adverse_bps_until_mark,
+        "max_abs_move_bps_until_mark": item.max_abs_move_bps_until_mark,
         "status": item.status,
         "metadata": item.metadata_json,
         "created_at": item.created_at.isoformat() if item.created_at else None,

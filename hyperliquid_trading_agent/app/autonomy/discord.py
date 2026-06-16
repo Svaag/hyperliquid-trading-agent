@@ -94,6 +94,9 @@ def parse_autonomy_command(prompt: str, referenced_message: Any = None) -> Auton
     match = re.match(r"^(signal outcome|signal eval|signal evaluation)\s+([a-zA-Z0-9_:-]+)$", lowered)
     if match:
         return AutonomyCommand(action="signal_outcome", signal_id=match.group(2))
+    match = re.match(r"^(event outcome|event eval|catalyst outcome|catalyst eval)\s+([a-zA-Z0-9_:-]+)$", lowered)
+    if match:
+        return AutonomyCommand(action="event_outcome", signal_id=match.group(2))
     match = re.match(r"^mark\s+signal\s+([a-zA-Z0-9_:-]+)\s+(good|bad|unclear|too_noisy|useful|wrong)$", lowered)
     if match:
         return AutonomyCommand(action="feedback_signal", signal_id=match.group(1), rating=match.group(2))
@@ -232,6 +235,27 @@ def format_signal_evaluation(evaluation: dict | None) -> str:
         for mark in marks[:8]:
             lines.append(f"- {mark.get('horizon')}: `{mark.get('status')}` price `{_fmt_num(mark.get('price'))}` R `{_fmt_num(mark.get('r_multiple'))}`")
     lines.append("No live trade was placed.")
+    return "\n".join(lines)
+
+
+def format_event_evaluation(evaluations: list[dict] | None) -> str:
+    if not evaluations:
+        return "Event evaluation not found. No live trade was placed. No strategy setting was changed."
+    first = evaluations[0]
+    lines = [
+        f"**Catalyst outcome — `{first.get('event_id')}`**",
+        f"{first.get('event_source')} {first.get('event_type')} | urgency `{first.get('urgency')}` | sentiment `{first.get('sentiment')}`",
+    ]
+    for item in evaluations[:8]:
+        lines.append(
+            f"- {item.get('symbol')} {item.get('direction')} status `{item.get('status')}` outcome `{item.get('terminal_outcome')}` | "
+            f"MFE `{_fmt_num(item.get('max_favorable_bps'))}` bps | MAE `{_fmt_num(item.get('max_adverse_bps'))}` bps | max abs `{_fmt_num(item.get('max_abs_move_bps'))}` bps"
+        )
+        marks = item.get("marks") or []
+        if marks:
+            mark_text = ", ".join(f"{mark.get('horizon')}:{mark.get('status')}:{_fmt_num(mark.get('direction_adjusted_return_bps'))}bps" for mark in marks[:5])
+            lines.append(f"  marks: {mark_text}")
+    lines.append("No live trade was placed. No strategy setting was changed.")
     return "\n".join(lines)
 
 

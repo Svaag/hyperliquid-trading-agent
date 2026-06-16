@@ -5,7 +5,7 @@ from collections import defaultdict
 from typing import Any
 from uuid import uuid4
 
-from hyperliquid_trading_agent.app.autonomy.schemas import SignalEvaluation, TuningProposal
+from hyperliquid_trading_agent.app.autonomy.schemas import AlphaEventEvaluation, SignalEvaluation, TuningProposal
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.metrics import TUNING_PROPOSALS_CREATED
 
@@ -50,6 +50,25 @@ class TuningProposalService:
                 proposals.append(await self._upsert_proposal(_threshold_proposal(settings=self.settings, symbol=symbol, signal_type=signal_type, items=items, avg_r=avg_r, stop_rate=stop_rate)))
             if missed >= 1.0 and len([item for item in items if item.rejected]) >= 2:
                 proposals.append(await self._upsert_proposal(_review_rejection_proposal(settings=self.settings, symbol=symbol, signal_type=signal_type, items=items, missed=missed)))
+        return proposals
+
+    async def generate_from_event_evaluations(self, evaluations: list[AlphaEventEvaluation]) -> list[TuningProposal]:
+        if not self.settings.autonomy_tuning_proposals_enabled:
+            return []
+        grouped: dict[tuple[str, str, str, str], list[AlphaEventEvaluation]] = defaultdict(list)
+        for evaluation in evaluations:
+            if evaluation.status == "complete":
+                grouped[(evaluation.asset_class, evaluation.event_source, evaluation.event_type, evaluation.sentiment)].append(evaluation)
+        proposals: list[TuningProposal] = []
+        for scope, items in grouped.items():
+            if len(items) < 8:
+                continue
+            worked_rate = len([item for item in items if item.terminal_outcome == "worked"]) / len(items)
+            failed_rate = len([item for item in items if item.terminal_outcome == "failed"]) / len(items)
+            if failed_rate >= 0.45:
+                proposals.append(await self._upsert_proposal(_event_confirmation_gate_proposal(self.settings, scope, items, failed_rate)))
+            if worked_rate >= 0.60:
+                proposals.append(await self._upsert_proposal(_event_weight_review_proposal(self.settings, scope, items, worked_rate)))
         return proposals
 
     async def generate_from_lessons(self) -> list[TuningProposal]:
@@ -200,6 +219,79 @@ def _lesson_review_proposal(settings: Settings, candidate: dict[str, Any]) -> Tu
         evaluation_window="14d",
         metadata={"observe_and_recommend_only": True, "auto_apply_enabled": False, "exchange_actions": []},
     )
+
+
+def _event_confirmation_gate_proposal(settings: Settings, scope: tuple[str, str, str, str], items: list[AlphaEventEvaluation], failed_rate: float) -> TuningProposal:
+    now_ms = _now_ms()
+    asset_class, source, event_type, sentiment = scope
+    evidence = [_event_evaluation_evidence(item) for item in items[-12:]]
+    return TuningProposal(
+        id=f"tp_{uuid4().hex}",
+        proposal_type="data_quality_gate",
+        status="proposed",
+        title=f"Require confirmation for {source} {event_type} {sentiment} catalysts",
+        summary=f"{asset_class} catalysts in this scope failed {failed_rate:.0%} of completed evaluations. Recommendation only; no auto-apply.",
+        affected_scope={"asset_class": asset_class, "source": source, "event_type": event_type, "sentiment": sentiment},
+        current_behavior={"news_event_weighting": "eligible high-signal catalysts can contribute to signal evidence"},
+        proposed_diff={"confirmation_required": True, "candidate_change": "reduce standalone catalyst confidence until price/orderflow confirms"},
+        evidence=evidence,
+        source_signal_ids=[signal_id for item in items for signal_id in item.linked_signal_ids],
+        expected_impact="Reduce false-positive catalyst influence while preserving event tracking.",
+        risk_assessment="May underweight genuinely important catalysts if the sample is regime-specific; requires manual review and canary.",
+        blast_radius="low",
+        rollback_plan="Remove the confirmation gate and restore prior catalyst evidence handling.",
+        confidence=min(0.85, 0.50 + len(items) * 0.03 + failed_rate * 0.15),
+        sample_size=len(items),
+        created_at_ms=now_ms,
+        expires_at_ms=now_ms + settings.autonomy_tuning_proposal_ttl_days * 86_400_000,
+        evaluation_window="14d",
+        metadata={"observe_and_recommend_only": True, "requires_change_control": True, "auto_apply_enabled": False, "exchange_actions": []},
+    )
+
+
+def _event_weight_review_proposal(settings: Settings, scope: tuple[str, str, str, str], items: list[AlphaEventEvaluation], worked_rate: float) -> TuningProposal:
+    now_ms = _now_ms()
+    asset_class, source, event_type, sentiment = scope
+    evidence = [_event_evaluation_evidence(item) for item in items[-12:]]
+    return TuningProposal(
+        id=f"tp_{uuid4().hex}",
+        proposal_type="weight_change",
+        status="proposed",
+        title=f"Review catalyst evidence weight for {source} {event_type} {sentiment}",
+        summary=f"{asset_class} catalysts in this scope worked {worked_rate:.0%} of completed evaluations. Recommendation only; do not auto-apply.",
+        affected_scope={"asset_class": asset_class, "source": source, "event_type": event_type, "sentiment": sentiment},
+        current_behavior={"news_event_weighting": "default deterministic evidence weight"},
+        proposed_diff={"review_weight_change": "Consider modest scoped catalyst evidence increase after manual review and canary"},
+        evidence=evidence,
+        source_signal_ids=[signal_id for item in items for signal_id in item.linked_signal_ids],
+        expected_impact="Improve capture of repeatedly validated catalyst classes without changing execution behavior automatically.",
+        risk_assessment="Could overfit source/type samples; any change needs tests, approval, canary, monitoring, and rollback.",
+        blast_radius="low",
+        rollback_plan="Revert scoped catalyst evidence weight to the current default.",
+        confidence=min(0.85, 0.50 + len(items) * 0.03 + worked_rate * 0.15),
+        sample_size=len(items),
+        created_at_ms=now_ms,
+        expires_at_ms=now_ms + settings.autonomy_tuning_proposal_ttl_days * 86_400_000,
+        evaluation_window="14d",
+        metadata={"observe_and_recommend_only": True, "requires_change_control": True, "auto_apply_enabled": False, "exchange_actions": []},
+    )
+
+
+def _event_evaluation_evidence(item: AlphaEventEvaluation) -> dict[str, Any]:
+    return {
+        "event_id": item.event_id,
+        "evaluation_id": item.id,
+        "symbol": item.symbol,
+        "asset_class": item.asset_class,
+        "event_source": item.event_source,
+        "event_type": item.event_type,
+        "sentiment": item.sentiment,
+        "terminal_outcome": item.terminal_outcome,
+        "max_favorable_bps": item.max_favorable_bps,
+        "max_adverse_bps": item.max_adverse_bps,
+        "max_abs_move_bps": item.max_abs_move_bps,
+        "linked_signal_ids": item.linked_signal_ids,
+    }
 
 
 def _evaluation_evidence(item: SignalEvaluation) -> dict[str, Any]:

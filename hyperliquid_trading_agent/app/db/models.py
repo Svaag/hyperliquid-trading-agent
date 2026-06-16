@@ -387,6 +387,8 @@ class TradeSignalRecord(TimestampMixin, Base):
     model_insight_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     discord_channel_id: Mapped[str | None] = mapped_column(String(64))
     discord_message_id: Mapped[str | None] = mapped_column(String(64))
+    asset_class: Mapped[str] = mapped_column(String(32), default="crypto", nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     approved_by_discord_user_id: Mapped[str | None] = mapped_column(String(64))
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rejected_by_discord_user_id: Mapped[str | None] = mapped_column(String(64))
@@ -569,6 +571,78 @@ class SignalEvaluationMarkRecord(TimestampMixin, Base):
     mae_r_until_mark: Mapped[float | None] = mapped_column(Float)
     stop_hit_before_mark: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     take_profit_hit_before_mark: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class AlphaEventEvaluationRecord(TimestampMixin, Base):
+    __tablename__ = "alpha_event_evaluations"
+    __table_args__ = (
+        Index("uq_alpha_event_evaluations_event_symbol", "event_id", "symbol", unique=True),
+        Index("ix_alpha_event_evaluations_status_symbol", "status", "symbol"),
+        Index("ix_alpha_event_evaluations_source_type", "event_source", "event_type"),
+        Index("ix_alpha_event_evaluations_received_at_ms", "received_at_ms"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_source: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    provider: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False, default="headline")
+    asset_class: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    direction: Mapped[str] = mapped_column(String(16), nullable=False, default="neutral")
+    sentiment: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
+    terminal_outcome: Mapped[str] = mapped_column(String(64), nullable=False, default="open")
+    received_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    completed_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    headline: Mapped[str] = mapped_column(Text, default="")
+    url: Mapped[str | None] = mapped_column(Text)
+    importance_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    source_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    urgency: Mapped[str] = mapped_column(String(32), nullable=False, default="normal")
+    freshness: Mapped[str] = mapped_column(String(32), nullable=False, default="fresh")
+    market_regime: Mapped[str] = mapped_column(String(64), default="unknown", nullable=False)
+    reference_price: Mapped[float | None] = mapped_column(Float)
+    reference_price_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    latest_price: Mapped[float | None] = mapped_column(Float)
+    latest_price_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    max_favorable_price: Mapped[float | None] = mapped_column(Float)
+    max_adverse_price: Mapped[float | None] = mapped_column(Float)
+    max_favorable_bps: Mapped[float | None] = mapped_column(Float)
+    max_adverse_bps: Mapped[float | None] = mapped_column(Float)
+    max_abs_move_bps: Mapped[float | None] = mapped_column(Float)
+    realized_or_marked_bps: Mapped[float | None] = mapped_column(Float)
+    linked_signal_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AlphaEventEvaluationMarkRecord(TimestampMixin, Base):
+    __tablename__ = "alpha_event_evaluation_marks"
+    __table_args__ = (
+        Index("uq_alpha_event_eval_marks_event_symbol_horizon", "event_id", "symbol", "horizon", unique=True),
+        Index("ix_alpha_event_eval_marks_eval", "evaluation_id"),
+        Index("ix_alpha_event_eval_marks_due_status", "status", "due_at_ms"),
+        Index("ix_alpha_event_eval_marks_symbol_due", "symbol", "due_at_ms"),
+    )
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    evaluation_id: Mapped[str] = mapped_column(ForeignKey("alpha_event_evaluations.id"), nullable=False)
+    event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    asset_class: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    horizon: Mapped[str] = mapped_column(String(32), nullable=False)
+    due_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    marked_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    price: Mapped[float | None] = mapped_column(Float)
+    direction_adjusted_return_bps: Mapped[float | None] = mapped_column(Float)
+    abs_move_bps: Mapped[float | None] = mapped_column(Float)
+    max_favorable_bps_until_mark: Mapped[float | None] = mapped_column(Float)
+    max_adverse_bps_until_mark: Mapped[float | None] = mapped_column(Float)
+    max_abs_move_bps_until_mark: Mapped[float | None] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 

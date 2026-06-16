@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, cast
 
 from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.hyperliquid.asset_resolver import AssetResolver
@@ -311,7 +311,7 @@ class AgentTools:
             if self.tradfi is None:
                 return {"error": "tradfi_not_available"}
             snaps = await self.tradfi.get_snapshots(symbols)
-            comparison = {}
+            comparison: dict[str, Any] = {}
             for sym in symbols:
                 snap = snaps.get(sym.upper())
                 if snap is None:
@@ -467,7 +467,7 @@ class AgentTools:
                 if not matching_queries:
                     continue
                 ctx = ctxs[idx] if idx < len(ctxs) and isinstance(ctxs[idx], dict) else {}
-                asset_class = "commodity" if base in COMMODITY_SYMBOLS else "hip3_perp"
+                asset_class = cast(Any, "commodity" if base in COMMODITY_SYMBOLS else "hip3_perp")
                 for query in matching_queries:
                     candidates_by_query.setdefault(query, []).append(
                         AssetCandidate(
@@ -502,7 +502,7 @@ class AgentTools:
             asset = metadata.get(query.upper())
             if asset is None:
                 continue
-            asset_class = "etf" if asset.is_etf_like else "equity"
+            asset_class = cast(Any, "etf" if asset.is_etf_like else "equity")
             candidates_by_query.setdefault(query, []).append(
                 AssetCandidate(
                     query=query,

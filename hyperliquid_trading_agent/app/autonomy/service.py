@@ -9,6 +9,7 @@ from uuid import uuid4
 from hyperliquid_trading_agent.app.agent.model_gateway import ModelGateway
 from hyperliquid_trading_agent.app.autonomy.discord import (
     AutonomyAlertSink,
+    format_event_evaluation,
     format_flip_request,
     format_market_map,
     format_memories,
@@ -70,6 +71,7 @@ class AutonomousTradingLoopService:
         model_gateway: ModelGateway | None = None,
         alert_sink: AutonomyAlertSink | None = None,
         evaluation_service: Any | None = None,
+        event_evaluation_service: Any | None = None,
         memory_service: Any | None = None,
         report_service: Any | None = None,
         tuning_service: Any | None = None,
@@ -87,6 +89,7 @@ class AutonomousTradingLoopService:
         self.model_gateway = model_gateway
         self.alert_sink = alert_sink
         self.evaluation_service = evaluation_service
+        self.event_evaluation_service = event_evaluation_service
         self.memory_service = memory_service
         self.report_service = report_service
         self.tuning_service = tuning_service
@@ -128,6 +131,8 @@ class AutonomousTradingLoopService:
             await self.memory_service.load()
         if self.evaluation_service is not None and callable(getattr(self.evaluation_service, "load_open", None)):
             await self.evaluation_service.load_open()
+        if self.event_evaluation_service is not None and callable(getattr(self.event_evaluation_service, "load_open", None)):
+            await self.event_evaluation_service.load_open()
         if self.ws_worker is not None:
             self._subscription_id = await self.ws_worker.subscribe(SubscriptionSpec("allMids"), self._on_all_mids)
         self._task = asyncio.create_task(self._run(), name="autonomous-trading-loop")
@@ -176,6 +181,7 @@ class AutonomousTradingLoopService:
                 "last_scan_at_ms": self._last_equity_scan_ms or None,
             },
             "evaluation": self.evaluation_service.status() if self.evaluation_service is not None and callable(getattr(self.evaluation_service, "status", None)) else {},
+            "event_evaluation": self.event_evaluation_service.status() if self.event_evaluation_service is not None and callable(getattr(self.event_evaluation_service, "status", None)) else {},
             "memory": self.memory_service.status() if self.memory_service is not None and callable(getattr(self.memory_service, "status", None)) else {},
             "reports": self.report_service.status() if self.report_service is not None and callable(getattr(self.report_service, "status", None)) else {},
             "tuning_proposals": self.tuning_service.status() if self.tuning_service is not None and callable(getattr(self.tuning_service, "status", None)) else {},
@@ -422,6 +428,9 @@ class AutonomousTradingLoopService:
             if command.action == "signal_outcome" and command.signal_id and self.evaluation_service is not None:
                 evaluation = await self.evaluation_service.get_by_signal_id(command.signal_id)
                 return format_signal_evaluation(evaluation.model_dump(mode="json") if evaluation else None)
+            if command.action == "event_outcome" and command.signal_id and self.event_evaluation_service is not None:
+                evaluations = await self.event_evaluation_service.get_by_event_id(command.signal_id)
+                return format_event_evaluation([item.model_dump(mode="json") for item in evaluations] if evaluations else None)
             if command.action == "daily_report" and self.report_service is not None:
                 report = await self.report_service.generate_daily(post=False)
                 return report.summary
@@ -491,6 +500,9 @@ class AutonomousTradingLoopService:
         if signal.expires_at_ms <= now:
             updated_expired = signal.model_copy(update={"status": "expired"})
             self.equity_signals[updated_expired.id] = updated_expired
+            await self._persist_signal(updated_expired)
+            if self.evaluation_service is not None:
+                await self.evaluation_service.update_signal_status(updated_expired)
             raise EquityRiskControlError("equity signal is expired")
         request = EquityTradeRequest(
             symbol=signal.symbol,
@@ -511,6 +523,9 @@ class AutonomousTradingLoopService:
         snapshot = self.equity_portfolio.snapshot()
         updated = signal.model_copy(update={"status": "paper_ordered", "metadata": {**(signal.metadata or {}), "approved_by": actor, "asset_class": "equity"}})
         self.equity_signals[updated.id] = updated
+        await self._persist_signal(updated, approved_by=actor)
+        if self.evaluation_service is not None:
+            await self.evaluation_service.update_signal_status(updated, paper_position_id=position.id if position else None)
         await self._record_event(
             "equity_signal_approved_paper_ordered",
             actor=actor,
@@ -531,6 +546,9 @@ class AutonomousTradingLoopService:
             raise KeyError("equity signal not found")
         updated = signal.model_copy(update={"status": "rejected", "metadata": {**(signal.metadata or {}), "rejected_by": actor, "reject_reason": reason, "asset_class": "equity"}})
         self.equity_signals[updated.id] = updated
+        await self._persist_signal(updated, rejected_by=actor)
+        if self.evaluation_service is not None:
+            await self.evaluation_service.update_signal_status(updated)
         await self._record_event("equity_signal_rejected", actor=actor, symbol=signal.symbol, payload={"signal_id": signal.id, "reason": reason, "exchange_actions": []})
         return updated
 
@@ -559,6 +577,9 @@ class AutonomousTradingLoopService:
             if self.evaluation_service is not None:
                 for symbol, price in numeric_mids.items():
                     await self.evaluation_service.on_price(symbol, price, ts)
+            if self.event_evaluation_service is not None:
+                for symbol, price in numeric_mids.items():
+                    await self.event_evaluation_service.on_price(symbol, "crypto", price, ts)
             self.last_market_data_at_ms = ts
         if ts - self._last_deep_scan_ms >= self.settings.autonomy_deep_scan_interval_seconds * 1000:
             await self._deep_market_scan(ts)
@@ -573,6 +594,8 @@ class AutonomousTradingLoopService:
                 NEWSWIRE_EVENTS.labels(provider=event.provider).inc()
                 if self.repository is not None and getattr(self.repository, "enabled", False):
                     await self.repository.record_news_event(event.model_dump(mode="json"))
+                if self.event_evaluation_service is not None:
+                    await self.event_evaluation_service.create_for_news_event(event, market_regime=self.reducer.snapshot().risk_regime)
             self._last_news_ms = ts
         self.reducer.apply_paper_positions(self.portfolio.open_positions(), timestamp_ms=ts)
         await self._persist_market_observations()
@@ -582,6 +605,9 @@ class AutonomousTradingLoopService:
         if self.evaluation_service is not None:
             await self.evaluation_service.mark_due(ts)
             await self.evaluation_service.expire_overdue_signals(ts)
+        if self.event_evaluation_service is not None:
+            await self.event_evaluation_service.mark_due(ts)
+            await self.event_evaluation_service.expire_overdue_events(ts)
         if self.memory_service is not None:
             await self.memory_service.archive_expired(now_ms=ts)
         if self.report_service is not None:
@@ -619,6 +645,12 @@ class AutonomousTradingLoopService:
             snap = snapshots.get(symbol.upper())
             if snap is None:
                 continue
+            equity_px = _equity_snapshot_price(snap)
+            if equity_px is not None:
+                if self.evaluation_service is not None:
+                    await self.evaluation_service.on_price(symbol.upper(), equity_px, timestamp_ms)
+                if self.event_evaluation_service is not None:
+                    await self.event_evaluation_service.on_price(symbol.upper(), "equity", equity_px, timestamp_ms)
             flow_events: list[Any] = []
             if self.settings.options_flow_effective_enabled and self.options_flow is not None:
                 try:
@@ -646,6 +678,9 @@ class AutonomousTradingLoopService:
                 signal = signal.model_copy(update={"metadata": {**(signal.metadata or {}), "asset_class": "equity", "paper_only": True}})
                 self.equity_signals[signal.id] = signal
                 AUTONOMY_SIGNALS_CREATED.labels(signal_type=signal.signal_type).inc()
+                await self._persist_signal(signal)
+                if self.evaluation_service is not None:
+                    await self.evaluation_service.create_for_signal(signal, market_regime="equity")
                 await self._record_event("equity_signal_created", symbol=signal.symbol, payload={"signal_id": signal.id, "score": signal.score, "exchange_actions": []})
                 await self._post_equity_signal(signal)
         try:
@@ -677,6 +712,9 @@ class AutonomousTradingLoopService:
         posted = signal.model_copy(update={"status": "posted", "discord_channel_id": self.settings.autonomy_alert_channel_id, "discord_message_id": message_id})
         self.equity_signals[posted.id] = posted
         AUTONOMY_SIGNALS_POSTED.inc()
+        await self._persist_signal(posted)
+        if self.evaluation_service is not None:
+            await self.evaluation_service.update_signal_status(posted)
         await self._record_event("equity_signal_posted", symbol=posted.symbol, payload={"signal_id": posted.id, "discord_message_id": message_id, "exchange_actions": []})
 
     async def _persist_equity_flow_events(self, events: list[Any]) -> None:
@@ -767,7 +805,10 @@ class AutonomousTradingLoopService:
             await self._persist_signal(enriched)
             if self.evaluation_service is not None:
                 await self.evaluation_service.create_for_signal(enriched, market_regime=self.reducer.snapshot().risk_regime)
-            await self._record_event("signal_created", symbol=enriched.symbol, payload={"signal_id": enriched.id, "score": enriched.score, "exchange_actions": []})
+            if self.event_evaluation_service is not None:
+                for event_id in enriched.metadata.get("source_event_ids", [])[:5]:
+                    await self.event_evaluation_service.link_signal(event_id, enriched.id, enriched.symbol)
+            await self._record_event("signal_created", symbol=enriched.symbol, payload={"signal_id": enriched.id, "score": enriched.score, "source_event_ids": enriched.metadata.get("source_event_ids", []), "exchange_actions": []})
             await self._post_signal(enriched)
 
     def _can_call_model_insight(self, signal: TradeSignal) -> bool:
@@ -804,6 +845,9 @@ class AutonomousTradingLoopService:
         if self.evaluation_service is not None:
             for symbol, price in numeric_mids.items():
                 await self.evaluation_service.on_price(symbol, price, ts)
+        if self.event_evaluation_service is not None:
+            for symbol, price in numeric_mids.items():
+                await self.event_evaluation_service.on_price(symbol, "crypto", price, ts)
 
     async def _persist_market_observations(self) -> None:
         if self.repository is None or not getattr(self.repository, "enabled", False):
@@ -855,3 +899,19 @@ def _float(value: Any) -> float | None:
         return None if value is None else float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _equity_snapshot_price(snapshot: Any) -> float | None:
+    trade = getattr(snapshot, "latest_trade", None)
+    if trade is not None and getattr(trade, "price", None) is not None:
+        return _float(getattr(trade, "price"))
+    quote = getattr(snapshot, "latest_quote", None)
+    if quote is not None:
+        bid = _float(getattr(quote, "bid_price", None))
+        ask = _float(getattr(quote, "ask_price", None))
+        if bid and ask:
+            return (bid + ask) / 2
+    bar = getattr(snapshot, "daily_bar", None)
+    if bar is not None and getattr(bar, "close", None) is not None:
+        return _float(getattr(bar, "close"))
+    return None

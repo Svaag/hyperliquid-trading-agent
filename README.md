@@ -21,7 +21,7 @@ design.
   - `GET /tracking/positions/{tracker_id}/events`
   - `POST /tracking/positions/{tracker_id}/pause|resume|stop`
   - `GET /autonomy/status|universe|market-map|signals|portfolio|positions|orders|fills|news`
-  - `GET /autonomy/evaluations/signals`, `/autonomy/token-capital`, `/autonomy/reports/daily|weekly`, `/autonomy/memory/*`, `/autonomy/tuning-proposals`
+  - `GET /autonomy/evaluations/signals`, `/autonomy/evaluations/events`, `/autonomy/token-capital`, `/autonomy/reports/daily|weekly`, `/autonomy/memory/*`, `/autonomy/tuning-proposals`
   - `POST /autonomy/pause|resume`
   - `POST /autonomy/signals/{signal_id}/approve|reject|expire`
   - `POST /autonomy/evaluations/run`, `/autonomy/reports/daily/run`, `/autonomy/reports/weekly/run`, `/autonomy/feedback`
@@ -41,7 +41,7 @@ design.
 - Free-standing **Newswire**: a pub/sub news & macro ingestion gateway. Adapters (RSS reliability layer, Alpaca News WebSocket, Trading Economics macro WebSocket, curated X) normalize into one canonical `NewswireEvent`, scored/classified/halt-gated deterministically, then published on a transport-agnostic bus. Consumers: a dedicated Discord `#news` channel (breaking immediate + batched digest), the autonomy market map (push-fed), and external clients via REST + `WS /newswire/stream`. LLM is a second-pass summarizer/ranker only — never the first parser or a tradability gate.
 - Semantic tool gathering for market snapshots, funding, candles, account public state, fills, docs, news, and paper trades.
 - PostgreSQL persistence for audit events, tool calls, conversations, cache, news, paper trades, debate runs, role outputs, state snapshots, trade proposals, autonomous market state, signals, paper orders/fills/positions, and portfolio snapshots.
-- Alembic migrations through `0006_newswire`.
+- Alembic migrations through `0008_alpha_event_evaluations`.
 - Dockerfile and Docker Compose with Postgres.
 
 ## Quick start
@@ -163,6 +163,13 @@ AUTONOMY_REPORTS_ENABLED=true
 AUTONOMY_EVAL_HORIZONS=15m,1h,4h,24h,expiry
 AUTONOMY_EVAL_MAX_OPEN_SIGNALS=500
 AUTONOMY_EVAL_PRICE_SOURCE=allMids
+AUTONOMY_EVENT_EVALUATION_ENABLED=true
+AUTONOMY_EVENT_EVAL_HORIZONS=15m,1h,4h,24h,72h
+AUTONOMY_EVENT_EVAL_MIN_IMPORTANCE=50
+AUTONOMY_EVENT_EVAL_MIN_SOURCE_SCORE=0.4
+AUTONOMY_EVENT_EVAL_MACRO_PROXIES=BTC,ETH,SPY,QQQ
+AUTONOMY_MEMORY_PROMPT_ROLES=analyst,quant,research,adversary,judge
+AUTONOMY_MEMORY_REQUIRE_CHANGE_CONTROL_FOR_RISK_EXECUTION=true
 AUTONOMY_DAILY_REPORT_ENABLED=true
 AUTONOMY_DAILY_REPORT_UTC=00:05
 AUTONOMY_WEEKLY_REPORT_ENABLED=true
@@ -185,9 +192,15 @@ AUTONOMY_TUNING_PROPOSAL_TTL_DAYS=14
 
 NEWSWIRE_ENABLED=true
 NEWSWIRE_QUERIES=BTC,ETH,HYPE,Hyperliquid,Fed,CPI,FOMC,crypto liquidation
+
+# Optional equity paper loop when Alpaca data credentials are present
+TRADFI_ENABLED=true
+AUTONOMY_EQUITY_ENABLED=true
+AUTONOMY_EQUITY_UNIVERSE=SPY,QQQ,NVDA,AAPL,MSFT,TSLA,COIN,MSTR
+AUTONOMY_EQUITY_MAX_SIGNALS_PER_DAY=3
 ```
 
-When `AUTONOMY_ENABLED=true`, the service watches the configured universe, builds a deterministic market mental map, generates scored signals, posts qualifying alerts to `AUTONOMY_ALERT_CHANNEL_ID`, and waits for human signoff. Discord alert-channel commands: `approve signal <id>`, `reject signal <id>`, `signal <id>`, `signals`, `portfolio`, `positions`, `orders`, `market map`, `pause autonomy`, `resume autonomy`, `daily report`, `weekly report`, `token capital`, `signal outcome <id>`, `mark signal <id> good|bad|unclear|too_noisy|useful|wrong`, `memories [role]`, and `tuning proposals`. Approvals create paper orders/fills/positions only; no live trade is placed. If an approved signal opposes an existing open position (single-name exposure cap exhausted), the bot **autonomously closes the opposing paper position** and posts a flip-request alert: confirm with `approve flip <id>` (or `cancel flip <id>` to reject and keep the original position). The new side opens only on the second human approval. The persistent memory/evaluation knobs are shadow-safe: they evaluate and recommend, but never auto-apply strategy, risk, execution, or sizing changes. See [docs/autonomy-memory.md](docs/autonomy-memory.md).
+When `AUTONOMY_ENABLED=true`, the service watches the configured universe, builds a deterministic market mental map, generates scored signals, posts qualifying alerts to `AUTONOMY_ALERT_CHANNEL_ID`, and waits for human signoff. Discord alert-channel commands: `approve signal <id>`, `reject signal <id>`, `signal <id>`, `signals`, `portfolio`, `positions`, `orders`, `market map`, `pause autonomy`, `resume autonomy`, `daily report`, `weekly report`, `token capital`, `signal outcome <id>`, `event outcome <event_id>`, `mark signal <id> good|bad|unclear|too_noisy|useful|wrong`, `memories [role]`, and `tuning proposals`. Approvals create paper orders/fills/positions only; no live trade is placed. If an approved signal opposes an existing open position (single-name exposure cap exhausted), the bot **autonomously closes the opposing paper position** and posts a flip-request alert: confirm with `approve flip <id>` (or `cancel flip <id>` to reject and keep the original position). The new side opens only on the second human approval. The persistent memory/evaluation knobs are shadow-safe: they evaluate and recommend, but never auto-apply strategy, risk, execution, or sizing changes. High-signal newswire catalysts are evaluated as first-class alpha events and linked to signals when they become evidence. See [docs/autonomy-memory.md](docs/autonomy-memory.md).
 
 `/ready` reports autonomy degraded when enabled without an alert channel, when market data is stale, or when persistence is unavailable.
 

@@ -24,9 +24,10 @@ from hyperliquid_trading_agent.app.agent.tools import AgentTools
 from hyperliquid_trading_agent.app.autonomy.discord import DiscordAutonomyAlertSink
 from hyperliquid_trading_agent.app.autonomy.equity_features import EquitySignalGenerator
 from hyperliquid_trading_agent.app.autonomy.evaluation import SignalEvaluationService
+from hyperliquid_trading_agent.app.autonomy.event_evaluation import AlphaEventEvaluationService
 from hyperliquid_trading_agent.app.autonomy.memory import MemoryService
 from hyperliquid_trading_agent.app.autonomy.reports import AutonomyReportService
-from hyperliquid_trading_agent.app.autonomy.schemas import OperatorFeedback, TradeSignal
+from hyperliquid_trading_agent.app.autonomy.schemas import NewsEvent, OperatorFeedback, TradeSignal
 from hyperliquid_trading_agent.app.autonomy.service import AutonomousTradingLoopService
 from hyperliquid_trading_agent.app.autonomy.tuning import TuningProposalService
 from hyperliquid_trading_agent.app.config import Settings, load_settings
@@ -86,6 +87,8 @@ class AutonomyFeedbackRequest(BaseModel):
 class CandidatePromotionRequest(BaseModel):
     human_review_confirmed: bool = False
     reviewer: str = "api"
+    change_control_id: str = ""
+    approved_for_role_injection_roles: list[str] = []
 
 
 @asynccontextmanager
@@ -159,11 +162,13 @@ async def lifespan(app: FastAPI):
     )
     memory_service = MemoryService(settings=settings, repository=repository)
     evaluation_service = SignalEvaluationService(settings=settings, repository=repository, memory_service=memory_service)
+    event_evaluation_service = AlphaEventEvaluationService(settings=settings, repository=repository, memory_service=memory_service)
     tuning_service = TuningProposalService(settings=settings, repository=repository, memory_service=memory_service)
     report_service = AutonomyReportService(
         settings=settings,
         repository=repository,
         evaluation_service=evaluation_service,
+        event_evaluation_service=event_evaluation_service,
         memory_service=memory_service,
         tuning_service=tuning_service,
     )
@@ -179,6 +184,7 @@ async def lifespan(app: FastAPI):
         ws_worker=ws_worker,
         model_gateway=model_gateway,
         evaluation_service=evaluation_service,
+        event_evaluation_service=event_evaluation_service,
         memory_service=memory_service,
         report_service=report_service,
         tuning_service=tuning_service,
@@ -189,6 +195,7 @@ async def lifespan(app: FastAPI):
         flow_enricher=flow_enricher,
     )
     report_service.portfolio_service = autonomy_service.portfolio
+    report_service.equity_portfolio_service = equity_paper
     high_stakes_graph = HighStakesDebateGraph(
         settings=settings,
         context_builder=high_stakes_context,
@@ -211,7 +218,7 @@ async def lifespan(app: FastAPI):
     newswire_service = NewswireService(settings=settings, repository=repository)
     newswire_enricher = Enricher(settings=settings, model_gateway=model_gateway)
     newswire_discord = DiscordNewsPublisher(settings=settings, bus=newswire_service.bus, alert_sink=DiscordAutonomyAlertSink(bot), enricher=newswire_enricher)
-    newswire_agent_consumer = AgentNewsConsumer(settings=settings, bus=newswire_service.bus, autonomy_service=autonomy_service, repository=repository)
+    newswire_agent_consumer = AgentNewsConsumer(settings=settings, bus=newswire_service.bus, autonomy_service=autonomy_service, repository=repository, event_evaluation_service=event_evaluation_service)
 
     app.state.engine = engine
     app.state.repository = repository
@@ -225,6 +232,7 @@ async def lifespan(app: FastAPI):
     app.state.tracking_service = tracking_service
     app.state.autonomy_service = autonomy_service
     app.state.evaluation_service = evaluation_service
+    app.state.event_evaluation_service = event_evaluation_service
     app.state.memory_service = memory_service
     app.state.report_service = report_service
     app.state.tuning_service = tuning_service
@@ -834,8 +842,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/autonomy/evaluations/run")
     async def autonomy_evaluations_run(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        marks = await app.state.evaluation_service.mark_due(int(time.time() * 1000))
-        return {"marked": len(marks), "items": [item.model_dump(mode="json") for item in marks]}
+        now_ms = int(time.time() * 1000)
+        signal_marks = await app.state.evaluation_service.mark_due(now_ms)
+        event_marks = await app.state.event_evaluation_service.mark_due(now_ms)
+        return {
+            "marked": len(signal_marks) + len(event_marks),
+            "signal_marks": [item.model_dump(mode="json") for item in signal_marks],
+            "event_marks": [item.model_dump(mode="json") for item in event_marks],
+        }
 
     @app.post("/autonomy/evaluations/backfill")
     async def autonomy_evaluations_backfill(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -846,6 +860,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             evaluation = await app.state.evaluation_service.create_for_signal(signal)
             if evaluation is not None:
                 created += 1
+        return {"created_or_existing": created}
+
+    @app.get("/autonomy/evaluations/events")
+    async def autonomy_event_evaluations(status: str | None = None, symbol: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = await app.state.event_evaluation_service.list_evaluations(status=status, symbol=symbol, limit=200)
+        return {"items": [item.model_dump(mode="json") for item in items], "count": len(items)}
+
+    @app.get("/autonomy/evaluations/events/by-event/{event_id}")
+    async def autonomy_event_evaluation_by_event(event_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = await app.state.event_evaluation_service.get_by_event_id(event_id)
+        if not items:
+            raise HTTPException(status_code=404, detail="event evaluation not found")
+        return {"items": [item.model_dump(mode="json") for item in items], "count": len(items)}
+
+    @app.get("/autonomy/evaluations/events/{evaluation_id}")
+    async def autonomy_event_evaluation(evaluation_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        item = await app.state.event_evaluation_service.get(evaluation_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="event evaluation not found")
+        return item.model_dump(mode="json")
+
+    @app.post("/autonomy/evaluations/events/backfill")
+    async def autonomy_event_evaluations_backfill(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        created = 0
+        try:
+            from hyperliquid_trading_agent.app.newswire.schemas import NewswireEvent
+
+            for data in await app.state.repository.list_newswire_events(limit=500):
+                evaluations = await app.state.event_evaluation_service.create_for_newswire_event(NewswireEvent(**data), market_regime="backfill")
+                created += len(evaluations)
+        except Exception:
+            pass
+        for data in await app.state.repository.list_news_events(limit=500):
+            evaluations = await app.state.event_evaluation_service.create_for_news_event(NewsEvent(**data), market_regime="backfill")
+            created += len(evaluations)
         return {"created_or_existing": created}
 
     @app.get("/autonomy/reports/daily")
@@ -962,7 +1015,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def autonomy_memory_candidate_promote_active(candidate_id: str, request: CandidatePromotionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
         try:
-            lesson = await app.state.memory_service.promote_candidate_to_active(candidate_id, human_review_confirmed=bool(request and request.human_review_confirmed))
+            lesson = await app.state.memory_service.promote_candidate_to_active(
+                candidate_id,
+                human_review_confirmed=bool(request and request.human_review_confirmed),
+                change_control_id=(request.change_control_id if request else ""),
+                approved_for_role_injection_roles=(request.approved_for_role_injection_roles if request else []),
+                reviewer=(request.reviewer if request else "api"),
+            )
         except PermissionError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
         if lesson is None:
@@ -1028,6 +1087,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 def _autonomy_learning_degraded(autonomy_status: dict[str, Any], now_ms: int) -> bool:
     evaluation = autonomy_status.get("evaluation") or {}
+    event_evaluation = autonomy_status.get("event_evaluation") or {}
     reports = autonomy_status.get("reports") or {}
     memory = autonomy_status.get("memory") or {}
     open_evaluations = int(evaluation.get("open_evaluations") or 0)
@@ -1035,6 +1095,8 @@ def _autonomy_learning_degraded(autonomy_status: dict[str, Any], now_ms: int) ->
     if open_evaluations > 0 and last_mark_at and now_ms - int(last_mark_at) > 2 * 60 * 60 * 1000:
         return True
     if int(evaluation.get("error_count") or 0) >= 5:
+        return True
+    if int(event_evaluation.get("error_count") or 0) >= 5:
         return True
     if int(reports.get("error_count") or 0) >= 3:
         return True
@@ -1096,6 +1158,19 @@ def _autonomy_config_status(app: FastAPI) -> dict[str, Any]:
             "max_open_signals": settings.autonomy_eval_max_open_signals,
             "price_source": settings.autonomy_eval_price_source,
         },
+        "event_evaluation": {
+            "enabled": settings.autonomy_event_evaluation_enabled,
+            "effective_enabled": settings.autonomy_event_evaluation_effective_enabled,
+            "horizons": settings.autonomy_event_eval_horizon_list,
+            "min_importance": settings.autonomy_event_eval_min_importance,
+            "min_source_score": settings.autonomy_event_eval_min_source_score,
+            "max_open_events": settings.autonomy_event_eval_max_open_events,
+            "symbols_per_event": settings.autonomy_event_eval_symbols_per_event,
+            "macro_proxies": settings.autonomy_event_eval_macro_proxy_symbols,
+            "worked_bps": settings.autonomy_event_eval_worked_bps,
+            "failed_bps": settings.autonomy_event_eval_failed_bps,
+            "volatility_bps": settings.autonomy_event_eval_volatility_bps,
+        },
         "memory": {
             "enabled": settings.autonomy_memory_enabled,
             "effective_enabled": settings.autonomy_memory_effective_enabled,
@@ -1107,6 +1182,11 @@ def _autonomy_config_status(app: FastAPI) -> dict[str, Any]:
                 "role": settings.autonomy_memory_role_ttl_days,
                 "process": settings.autonomy_memory_process_ttl_days,
                 "incident": settings.autonomy_memory_incident_ttl_days,
+            },
+            "prompt_injection_policy": {
+                "default_roles": settings.autonomy_memory_prompt_role_list,
+                "excluded_without_change_control": ["risk", "execution", "treasury"],
+                "risk_execution_treasury_change_control_required": settings.autonomy_memory_require_change_control_for_risk_execution,
             },
             "promotion": {
                 "role_lesson_min_samples": settings.autonomy_role_lesson_min_samples,

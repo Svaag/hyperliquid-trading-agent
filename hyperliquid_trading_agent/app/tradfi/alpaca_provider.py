@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from datetime import date, datetime
-from typing import Any
+from typing import Any, cast
 
 from alpaca.data import (
     CorporateActionsRequest,
@@ -179,7 +179,7 @@ class AlpacaTradFiProvider(TradFiProvider):
                 adjustment=Adjustment.ALL,
                 feed=self.feed,
             )
-            response = await asyncio.to_thread(client.get_stock_bars, request)
+            response = cast(Any, await asyncio.to_thread(client.get_stock_bars, request))
             bars = response.get(symbol.upper(), [])
             return [
                 Bar(
@@ -190,7 +190,7 @@ class AlpacaTradFiProvider(TradFiProvider):
                     low=float(b.low),
                     close=float(b.close),
                     volume=float(b.volume),
-                    trade_count=b.trade_count,
+                    trade_count=int(b.trade_count) if b.trade_count is not None else None,
                     vwap=float(b.vwap) if b.vwap else None,
                     timeframe=timeframe,
                 )
@@ -435,7 +435,7 @@ class AlpacaTradFiProvider(TradFiProvider):
                 low=float(snap.daily_bar.low),
                 close=float(snap.daily_bar.close),
                 volume=float(snap.daily_bar.volume),
-                trade_count=snap.daily_bar.trade_count,
+                trade_count=int(snap.daily_bar.trade_count) if snap.daily_bar.trade_count is not None else None,
                 vwap=float(snap.daily_bar.vwap) if snap.daily_bar.vwap else None,
                 timeframe="1Day",
             )

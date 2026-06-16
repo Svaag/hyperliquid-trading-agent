@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.tradfi.schemas import (
@@ -98,7 +98,7 @@ class OptionsFlowDetector:
 
         return sorted(events, key=lambda e: e.urgency_score, reverse=True)
 
-    def _classify_flow(self, contract: OptionContract, chain: OptionsChain) -> str:
+    def _classify_flow(self, contract: OptionContract, chain: OptionsChain) -> Literal["call_buy", "call_sell", "put_buy", "put_sell", "multi_leg", "unknown"]:
         """Heuristic flow classifier based on option type and where the trade price sits vs bid/ask."""
         if contract.option_type == "call":
             if contract.last_price and contract.ask and contract.last_price >= contract.ask:
