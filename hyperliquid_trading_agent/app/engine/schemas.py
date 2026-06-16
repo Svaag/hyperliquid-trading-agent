@@ -22,6 +22,7 @@ CandidateStatus = Literal[
     "debate_blocked",
     "approved_for_paper",
     "approved_for_shadow",
+    "throttled",
     "expired",
     "cancelled",
 ]

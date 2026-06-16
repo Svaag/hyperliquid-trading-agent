@@ -2066,6 +2066,17 @@ class Repository:
             result = await session.execute(stmt)
             return [_replay_result_to_dict(item) for item in result.scalars().all()]
 
+    async def record_engine_replay_comparison(self, result: dict[str, Any]) -> str | None:
+        return await self.record_replay_result(result)
+
+    async def list_engine_replay_comparisons(self, limit: int = 100) -> list[dict[str, Any]]:
+        items = await self.list_replay_results(limit=limit)
+        return [item for item in items if str(item.get("proposal_id") or "").startswith("engine:") or (item.get("metadata") or {}).get("artifact_type") == "engine_shadow_comparison"]
+
+    async def latest_engine_replay_comparison(self) -> dict[str, Any] | None:
+        items = await self.list_engine_replay_comparisons(limit=1)
+        return items[0] if items else None
+
     async def list_shadow_comparisons(self, proposal_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []

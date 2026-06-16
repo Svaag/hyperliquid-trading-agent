@@ -7,6 +7,8 @@ from typing import Any
 from hyperliquid_trading_agent.app.autonomy.discord import AutonomyAlertSink
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.discord_bot import _chunk
+from hyperliquid_trading_agent.app.engine.readiness import build_paper_readiness_scorecard
+from hyperliquid_trading_agent.app.engine.replay_compare import latest_engine_replay_comparison
 from hyperliquid_trading_agent.app.engine.validation_report import build_engine_validation_report
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.metrics import ENGINE_VALIDATION_ALERTS, ENGINE_VALIDATION_DIGESTS
@@ -76,17 +78,23 @@ class EngineValidationMonitorService:
 
     async def run_once(self, *, post: bool = True) -> dict[str, Any]:
         report = await build_engine_validation_report(self.repository, limit=500)
+        readiness = await build_paper_readiness_scorecard(self.repository, self.settings, self.engine_service, limit=1000)
+        latest_replay = await latest_engine_replay_comparison(self.repository)
         alerts = await self._detect_alerts(report)
+        if readiness.get("grade") == "blocked":
+            alerts.append({"type": "readiness_blocked", "severity": "warning", "detail": f"score={readiness.get('score')} recommendation={readiness.get('recommendation')}"})
+        if latest_replay and (latest_replay.get("metadata") or {}).get("verdict") == "candidate_worse":
+            alerts.append({"type": "replay_candidate_worse", "severity": "warning", "detail": str(latest_replay.get("replay_id"))})
         self.last_alerts = alerts
         self.alert_count += len(alerts)
         for alert in alerts:
             ENGINE_VALIDATION_ALERTS.labels(alert_type=str(alert.get("type") or "unknown")).inc()
-        message = format_engine_validation_digest(report, alerts, settings=self.settings, service_status=self._engine_status())
+        message = format_engine_validation_digest(report, alerts, settings=self.settings, service_status=self._engine_status(), readiness=readiness, latest_replay=latest_replay)
         if post:
             await self._send(message)
             self.last_digest_at_ms = _now_ms()
             self.digest_count += 1
-        return {"report": report, "alerts": alerts, "message": message}
+        return {"report": report, "readiness": readiness, "latest_replay": latest_replay, "alerts": alerts, "message": message}
 
     async def _run(self) -> None:
         # Send once after the engine has had time to complete at least one loop.
@@ -212,12 +220,15 @@ def format_engine_validation_digest(
     *,
     settings: Settings,
     service_status: dict[str, Any] | None = None,
+    readiness: dict[str, Any] | None = None,
+    latest_replay: dict[str, Any] | None = None,
 ) -> str:
     service_status = service_status or {}
     summary = report.get("summary") or {}
     execution = report.get("execution_simulations") or {}
     by_strategy = report.get("by_strategy") or {}
     buckets = report.get("ev_calibration", {}).get("bucket_summary") or {}
+    readiness = readiness or {}
     mode = "shadow-only" if settings.engine_shadow_enabled and not settings.engine_paper_enabled else "paper/shadow"
     lines = [
         f"🧪 **Engine validation digest — {mode}**",
@@ -225,6 +236,7 @@ def format_engine_validation_digest(
         f"Candidates `{summary.get('candidate_count', 0)}` | EVs `{summary.get('ev_estimate_count', 0)}` | allocations `{summary.get('allocated_count', 0)}/{summary.get('allocation_count', 0)}` ({summary.get('allocation_rate_pct', 0)}%)",
         f"Intents shadow/paper `{summary.get('shadow_intent_count', 0)}`/`{summary.get('paper_intent_count', 0)}` | reports `{summary.get('execution_report_count', 0)}` | risk rejects `{summary.get('risk_reject_count', 0)}`",
         f"Sim avg slippage `{execution.get('avg_slippage_bps', 0)}` bps | fees `${execution.get('fees_usd', 0)}` | open positions `{summary.get('open_position_count', 0)}`",
+        f"Readiness: `{str(readiness.get('grade') or 'unknown').upper()}` `{readiness.get('score', 'n/a')}/100` | hard blocks `{len(readiness.get('hard_blocks') or [])}` | recommendation `{readiness.get('recommendation') or 'n/a'}`",
         "",
     ]
     if alerts:
@@ -235,6 +247,11 @@ def format_engine_validation_digest(
     else:
         lines.append("✅ **No alert conditions detected.**")
     lines.append("")
+    if latest_replay:
+        metadata = latest_replay.get("metadata") or {}
+        diffs = latest_replay.get("diffs") or {}
+        lines.append(f"**Latest replay:** `{metadata.get('verdict', latest_replay.get('status'))}` variant `{metadata.get('variant_id', '-')}` | EV Δ `{diffs.get('avg_net_ev_delta_bps', 0)}` bps | reject Δ `{diffs.get('risk_reject_rate_delta_pct', 0)}`%")
+        lines.append("")
     lines.append("**Top strategies:**")
     ranked = sorted(by_strategy.items(), key=lambda item: (item[1].get("allocated_count", 0), item[1].get("candidate_count", 0)), reverse=True)
     for strategy, values in ranked[:6]:

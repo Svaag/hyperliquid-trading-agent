@@ -4,14 +4,29 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
 
 from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.engine.readiness import build_paper_readiness_scorecard
+from hyperliquid_trading_agent.app.engine.replay_compare import (
+    EngineReplayComparisonService,
+    latest_engine_replay_comparison,
+    list_engine_replay_comparisons,
+)
 from hyperliquid_trading_agent.app.engine.validation_report import (
     build_engine_validation_report,
     render_engine_validation_dashboard,
 )
 
 RequireAuth = Callable[[Settings, str | None], None]
+
+
+class EngineReplayComparisonRequest(BaseModel):
+    window_hours: int = Field(default=24, ge=1, le=24 * 30)
+    universe: list[str] = Field(default_factory=list)
+    baseline_config: dict[str, Any] = Field(default_factory=dict)
+    candidate_config: dict[str, Any] = Field(default_factory=dict)
+    variant_id: str | None = None
 
 
 def register_engine_routes(app: FastAPI, settings: Settings, require_auth: RequireAuth) -> None:
@@ -32,6 +47,8 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
         service_status = service.status() if service is not None and callable(getattr(service, "status", None)) else {}
         monitor = getattr(app.state, "engine_validation_monitor", None)
         monitor_status = monitor.status() if monitor is not None and callable(getattr(monitor, "status", None)) else {}
+        pnl = getattr(app.state, "engine_pnl_attribution", None)
+        pnl_status = pnl.status() if pnl is not None and callable(getattr(pnl, "status", None)) else {}
         return {
             "enabled": settings.engine_enabled,
             "mode": settings.engine_mode,
@@ -42,6 +59,7 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
             "repository_enabled": getattr(repository, "enabled", False),
             "service": service_status,
             "validation_monitor": monitor_status,
+            "pnl_attribution": pnl_status,
             "debate": {"enabled": settings.engine_debate_enabled, "max_per_day": settings.engine_debate_max_per_day, "priority_min": settings.engine_debate_priority_min},
             "retention": {
                 "event_days": settings.engine_event_retention_days,
@@ -161,6 +179,40 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
     async def engine_validation_report(limit: int = 500, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _auth(authorization)
         return await build_engine_validation_report(_repo(), limit=limit)
+
+    @app.get("/engine/readiness")
+    async def engine_readiness(window_hours: int | None = None, limit: int = 1000, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _auth(authorization)
+        service = getattr(app.state, "engine_service", None)
+        return await build_paper_readiness_scorecard(_repo(), settings, service, window_hours=window_hours, limit=limit)
+
+    @app.get("/engine/replay-comparisons")
+    async def engine_replay_comparisons(limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        _auth(authorization)
+        return await list_engine_replay_comparisons(_repo(), limit=limit)
+
+    @app.get("/engine/replay-comparisons/latest")
+    async def engine_replay_comparison_latest(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _auth(authorization)
+        item = await latest_engine_replay_comparison(_repo())
+        if item is None:
+            raise HTTPException(status_code=404, detail="engine replay comparison not found")
+        return item
+
+    @app.post("/engine/replay-comparisons/run")
+    async def engine_replay_comparison_run(request: EngineReplayComparisonRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _auth(authorization)
+        end_ms = int(__import__("time").time() * 1000)
+        start_ms = end_ms - request.window_hours * 60 * 60 * 1000
+        service = EngineReplayComparisonService(repository=_repo(), settings=settings)
+        return await service.compare_variant(
+            baseline_config=request.baseline_config,
+            candidate_config=request.candidate_config,
+            window_start_ms=start_ms,
+            window_end_ms=end_ms,
+            universe=request.universe or settings.autonomy_core_symbols,
+            variant_id=request.variant_id,
+        )
 
     @app.get("/engine/dashboard", response_class=HTMLResponse)
     async def engine_dashboard(limit: int = 500, authorization: str | None = Header(default=None)) -> HTMLResponse:

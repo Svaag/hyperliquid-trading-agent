@@ -74,6 +74,22 @@ When `ENGINE_ENABLED=true`, `ENGINE_VALIDATION_DIGEST_ENABLED=true`, `DISCORD_BO
 
 Alert conditions include stale engine loop, engine runtime errors, paper intents/reports in shadow-only mode, live mode enabled, risk reject spikes, missing/stale feature or regime data, and EV calibration drift once realized attribution samples exist.
 
+## Paper-readiness scorecard
+
+`GET /engine/readiness` returns a deterministic conservative promotion scorecard. Paper readiness is blocked by live flags, paper leakage during shadow-only mode, stale engine loops, runtime errors, insufficient shadow observation/sample size, missing core feature/regime data, critical risk-reject spikes, failed replay comparisons, and unhealthy PnL marking.
+
+The default gate requires 24h shadow observation, at least 100 engine runs, 250 candidates, 50 shadow intents, 95% EV/feature/regime coverage, risk rejects <=25%, allocation rate between 5% and 60%, strategy allocation share <=55%, average simulated slippage <=8 bps, no hard blocks, and score >=85.
+
+## Shadow replay, throttles, and PnL marking
+
+`POST /engine/replay-comparisons/run` stores immutable engine shadow comparison summaries in the existing `replay_results` storage shape with `proposal_id="engine:{variant_id}"` and `metadata.artifact_type="engine_shadow_comparison"`.
+
+Strategy throttles cap candidates and allocations per strategy and annotate throttled candidates/allocations without creating exchange actions.
+
+The engine PnL attribution loop marks simulated paper/shadow positions from Hyperliquid `all_mids`, records `pnl_attribution_records`, and closes simulated theses on stop/target/max-age conditions.
+
+See `docs/engine-paper-readiness-runbook.md` for promotion and rollback steps.
+
 ## Read-only API
 
 Protected by the existing agent API token outside dev/test/local:
@@ -99,7 +115,13 @@ GET /engine/model-versions
 GET /engine/risk-rejects
 GET /engine/pnl-attribution
 GET /engine/validation-report
+GET /engine/readiness
+GET /engine/replay-comparisons
+GET /engine/replay-comparisons/latest
+POST /engine/replay-comparisons/run
 GET /engine/dashboard
+GET /dashboard
+GET /dashboard/data
 GET /engine/retention
 ```
 

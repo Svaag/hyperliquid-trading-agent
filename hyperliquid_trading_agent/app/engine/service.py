@@ -22,6 +22,7 @@ from hyperliquid_trading_agent.app.engine.position_manager import PositionManage
 from hyperliquid_trading_agent.app.engine.regime import RegimeEngine
 from hyperliquid_trading_agent.app.engine.schemas import AlphaCandidate, OrderIntent
 from hyperliquid_trading_agent.app.engine.scorer import EVScorerService
+from hyperliquid_trading_agent.app.engine.throttles import StrategyThrottleController
 from hyperliquid_trading_agent.app.governance.risk_gateway import RiskGateway
 
 
@@ -62,6 +63,7 @@ class InstitutionalEngineService:
         self.debate = DebateAdjudicator(repository)
         self.execution = ExecutionGateway(repository=repository)
         self.positions = PositionManager(repository)
+        self.throttles = StrategyThrottleController(settings)
         self.strategies = [
             DirectionalMomentumStrategy(),
             SupportResistanceReversionStrategy(),
@@ -127,6 +129,8 @@ class InstitutionalEngineService:
             estimates = {}
             allocations = {}
             executed = []
+            current_loop_allocations = []
+            throttle_events = []
             for symbol in symbols:
                 features = await self.feature_store.latest(asset=symbol, limit=200)
                 if not features:
@@ -134,16 +138,36 @@ class InstitutionalEngineService:
                 regime = self.regime_engine.compute(features, primary_asset=symbol)
                 await self._persist_regime(regime)
                 snapshot = self.feature_store.snapshot(asset=symbol)
+                symbol_candidates = []
                 for strategy in self.strategies:
-                    all_candidates.extend(strategy.generate(snapshot, regime, timestamp_ms=ts))
-                await self.candidate_book.add_many(all_candidates[-self.settings.engine_max_candidates_per_loop :])
-                for candidate in all_candidates[-self.settings.engine_max_candidates_per_loop :]:
+                    symbol_candidates.extend(strategy.generate(snapshot, regime, timestamp_ms=ts))
+                symbol_candidates = symbol_candidates[: self.settings.engine_max_candidates_per_loop]
+                symbol_candidates, symbol_throttle_events = await self.throttles.filter_candidates(symbol_candidates, repository=self.repository, timestamp_ms=ts)
+                throttle_events.extend(symbol_throttle_events)
+                all_candidates.extend(symbol_candidates)
+                await self.candidate_book.add_many(symbol_candidates)
+                for candidate in symbol_candidates:
                     ev = await self.scorer.score(candidate, regime)
                     estimates[candidate.candidate_id] = ev
                     allocation = await self.allocator.allocate(candidate, ev, regime=regime, portfolio_state=self._portfolio_snapshot())
+                    allocation = allocation.model_copy(update={"metadata": {**allocation.metadata, "strategy_id": candidate.strategy_id}})
+                    allowed_by_throttle, throttle_reasons, throttle_metadata = await self.throttles.allow_allocation(candidate, current_loop_allocations=current_loop_allocations, repository=self.repository, timestamp_ms=ts)
+                    if not allowed_by_throttle:
+                        allocation = allocation.model_copy(
+                            update={
+                                "status": "skip",
+                                "allocated_size": 0.0,
+                                "allocated_notional_usd": 0.0,
+                                "risk_usd": 0.0,
+                                "reason_codes": [*allocation.reason_codes, *throttle_reasons],
+                                "metadata": {**allocation.metadata, **throttle_metadata},
+                            }
+                        )
+                        await self._persist_allocation(allocation)
                     allocations[candidate.candidate_id] = allocation
                     if allocation.status not in {"allocate", "reduce", "require_debate"}:
                         continue
+                    current_loop_allocations.append(allocation)
                     priority = debate_priority(candidate, ev, allocation, regime, portfolio_equity=float(self._portfolio_snapshot().get("equity_usd") or 100_000))
                     if self.settings.engine_debate_enabled and self.debate_count_today < self.settings.engine_debate_max_per_day and priority >= self.settings.engine_debate_priority_min:
                         pack = self.pack_builder.build(candidate, ev, allocation, regime, feature_snapshot=snapshot.features)
@@ -174,7 +198,7 @@ class InstitutionalEngineService:
             self.candidates_created += len(all_candidates)
             self.last_run_at_ms = ts
             self.run_count += 1
-            return {"candidate_book_id": book.candidate_book_id, "candidates": len(all_candidates), "executed": len(executed)}
+            return {"candidate_book_id": book.candidate_book_id, "candidates": len(all_candidates), "executed": len(executed), "throttle_events": len(throttle_events)}
         except Exception as exc:
             self.last_error = type(exc).__name__
             raise
@@ -238,3 +262,9 @@ class InstitutionalEngineService:
             record = getattr(self.repository, "record_evidence_pack", None)
             if callable(record):
                 await record(pack.model_dump(mode="json"))
+
+    async def _persist_allocation(self, allocation) -> None:
+        if self.repository is not None and getattr(self.repository, "enabled", False):
+            record = getattr(self.repository, "record_allocation_decision", None)
+            if callable(record):
+                await record(allocation.model_dump(mode="json"))
