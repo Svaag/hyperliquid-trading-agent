@@ -19,6 +19,7 @@ from hyperliquid_trading_agent.app.tradfi.schemas import (
     StockQuote,
     StockSnapshot,
     StockTrade,
+    TradFiAsset,
 )
 
 log = get_logger(__name__)
@@ -55,6 +56,7 @@ class TradFiClient:
             "option_snap": cache_ttl_quote_seconds,
             "corp": cache_ttl_corp_seconds,
             "calendar": cache_ttl_calendar_seconds,
+            "asset_meta": cache_ttl_calendar_seconds,
         }
         self._cache: dict[str, tuple[float, Any]] = {}
         self._last_request_ms: float = 0
@@ -132,6 +134,15 @@ class TradFiClient:
     async def get_calendar(self, start: date, end: date, event_types: list[str] | None = None) -> list[CalendarEvent]:
         key = f"calendar:{start}:{end}:{','.join(event_types or [])}"
         return await self._cached(key, "calendar", lambda: self._provider.get_calendar(start, end, event_types)) or []
+
+    # --- Asset metadata --------------------------------------------------------
+
+    async def get_asset_metadata(self, symbols: list[str]) -> dict[str, TradFiAsset]:
+        syms = sorted({symbol.upper() for symbol in symbols if symbol.strip()})
+        if not syms:
+            return {}
+        key = f"asset_meta:{','.join(syms)}"
+        return await self._cached(key, "asset_meta", lambda: self._provider.get_asset_metadata(syms)) or {}
 
     # --- Caching + rate guard ---------------------------------------------------
 

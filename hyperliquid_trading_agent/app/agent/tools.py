@@ -8,6 +8,13 @@ from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.hyperliquid.asset_resolver import AssetResolver
 from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
 from hyperliquid_trading_agent.app.hyperliquid.docs_grounding import HyperliquidDocs
+from hyperliquid_trading_agent.app.markets.resolution import (
+    COMMODITY_SYMBOLS,
+    AssetCandidate,
+    ResolutionPlan,
+    parse_market_intent,
+    route_market_intent,
+)
 from hyperliquid_trading_agent.app.metrics import TOOL_CALLS
 from hyperliquid_trading_agent.app.news.service import NewsService
 from hyperliquid_trading_agent.app.paper.schemas import PaperTradeRequest
@@ -135,6 +142,13 @@ class AgentTools:
             return {"coin": resolved_coin, "query_symbol": coin.upper(), "funding_history_48h": history, "predicted_fundings": _filter_predicted(predicted, resolved_coin)}
 
         return await self._run_tool("get_funding_context", {"coin": coin}, run, "hyperliquid:/info/funding")
+
+    async def resolve_market_intent(self, prompt: str) -> ToolResult:
+        async def run() -> dict[str, Any]:
+            plan = await self._build_market_resolution_plan(prompt)
+            return plan.model_dump(mode="json")
+
+        return await self._run_tool("resolve_market_intent", {"prompt": prompt[:500]}, run, "local:intent-router")
 
     async def get_public_user_state(self, address: str) -> ToolResult:
         async def run() -> dict[str, Any]:
@@ -403,6 +417,136 @@ class AgentTools:
             }
         return await self._run_tool("estimate_option_greeks", {"symbol": symbol, "strike": strike, "expiration": expiration, "option_type": option_type}, run, "tradfi:alpaca")
 
+    async def _build_market_resolution_plan(self, prompt: str) -> ResolutionPlan:
+        intent = parse_market_intent(prompt)
+        candidates_by_query: dict[str, list[AssetCandidate]] = {symbol: [] for symbol in intent.symbols}
+        if not intent.symbols:
+            return route_market_intent(intent, candidates_by_query)
+
+        perp_meta_ctxs = await self.hyperliquid.meta_and_asset_ctxs()
+        spot_meta_ctxs = await self.hyperliquid.spot_meta_and_asset_ctxs()
+        resolver = AssetResolver.from_meta_and_contexts(perp_meta_ctxs, spot_meta_ctxs)
+        for query in intent.symbols:
+            resolved = resolver.resolve(query)
+            if resolved is not None:
+                candidates_by_query[query].append(
+                    AssetCandidate(
+                        query=query,
+                        symbol=query.split(":", 1)[-1].upper(),
+                        canonical_symbol=resolved.coin,
+                        display_symbol=resolved.coin,
+                        asset_class="spot" if resolved.kind == "spot" else "crypto_perp",
+                        provider="hyperliquid",
+                        venue="hyperliquid-main",
+                        source="hyperliquid_meta",
+                        dex=resolved.dex,
+                        liquidity_usd=_float_or_none((resolved.context or {}).get("dayNtlVlm")),
+                        open_interest=_float_or_none((resolved.context or {}).get("openInterest")),
+                        metadata={"kind": resolved.kind, "context": resolved.context or {}},
+                    )
+                )
+        await self._add_hip3_candidates(intent.symbols, candidates_by_query)
+        await self._add_tradfi_candidates(intent.symbols, candidates_by_query)
+        return route_market_intent(intent, candidates_by_query)
+
+    async def _add_hip3_candidates(self, symbols: list[str], candidates_by_query: dict[str, list[AssetCandidate]]) -> None:
+        dexs = await self._all_candidate_hip3_dexs(symbols)
+        for dex in dexs:
+            try:
+                meta_ctxs = await self.hyperliquid.meta_and_asset_ctxs(dex=dex)
+            except Exception:
+                continue
+            universe = meta_ctxs[0].get("universe", []) if isinstance(meta_ctxs, list) and meta_ctxs and isinstance(meta_ctxs[0], dict) else []
+            ctxs = meta_ctxs[1] if isinstance(meta_ctxs, list) and len(meta_ctxs) > 1 and isinstance(meta_ctxs[1], list) else []
+            for idx, item in enumerate(universe):
+                if not isinstance(item, dict):
+                    continue
+                canonical = str(item.get("name") or "")
+                base = canonical.split(":", 1)[-1].upper()
+                matching_queries = [query for query in symbols if _query_matches_canonical(query, canonical)]
+                if not matching_queries:
+                    continue
+                ctx = ctxs[idx] if idx < len(ctxs) and isinstance(ctxs[idx], dict) else {}
+                asset_class = "commodity" if base in COMMODITY_SYMBOLS else "hip3_perp"
+                for query in matching_queries:
+                    candidates_by_query.setdefault(query, []).append(
+                        AssetCandidate(
+                            query=query,
+                            symbol=base,
+                            canonical_symbol=canonical,
+                            display_symbol=base,
+                            asset_class=asset_class,
+                            provider="hyperliquid",
+                            venue=f"hyperliquid-{dex}",
+                            source="hyperliquid_hip3_meta",
+                            dex=dex,
+                            liquidity_usd=_float_or_none(ctx.get("dayNtlVlm")),
+                            open_interest=_float_or_none(ctx.get("openInterest")),
+                            metadata={"context": ctx, "meta": item},
+                        )
+                    )
+
+    async def _add_tradfi_candidates(self, symbols: list[str], candidates_by_query: dict[str, list[AssetCandidate]]) -> None:
+        if self.tradfi is None:
+            return
+        tradfi_symbols = [symbol.split(":", 1)[-1].upper() for symbol in symbols if ":" not in symbol]
+        if not tradfi_symbols:
+            return
+        try:
+            metadata = await self.tradfi.get_asset_metadata(tradfi_symbols)
+        except Exception:
+            metadata = {}
+        for query in symbols:
+            if ":" in query:
+                continue
+            asset = metadata.get(query.upper())
+            if asset is None:
+                continue
+            asset_class = "etf" if asset.is_etf_like else "equity"
+            candidates_by_query.setdefault(query, []).append(
+                AssetCandidate(
+                    query=query,
+                    symbol=asset.symbol,
+                    canonical_symbol=asset.symbol,
+                    display_symbol=asset.symbol,
+                    asset_class=asset_class,
+                    provider="alpaca",
+                    venue=asset.exchange or "alpaca",
+                    source="alpaca_asset_metadata",
+                    active=asset.active,
+                    tradable=asset.tradable,
+                    metadata=asset.model_dump(mode="json"),
+                )
+            )
+
+    async def _all_candidate_hip3_dexs(self, symbols: list[str]) -> list[str]:
+        candidates: list[str] = []
+        configured = list(getattr(self.hyperliquid.settings, "autonomy_hip3_dex_names", []))
+        candidates.extend(str(dex).strip().lower() for dex in configured if str(dex).strip())
+        explicit_dexs = [symbol.split(":", 1)[0].lower() for symbol in symbols if ":" in symbol]
+        candidates.extend(explicit_dexs)
+        wanted = {symbol.split(":", 1)[-1].upper() for symbol in symbols}
+        try:
+            dexs = await self.hyperliquid.perp_dexs()
+        except Exception:
+            dexs = []
+        if isinstance(dexs, list):
+            for dex_info in dexs:
+                if not isinstance(dex_info, dict):
+                    continue
+                dex_name = str(dex_info.get("name") or "").strip().lower()
+                if not dex_name:
+                    continue
+                assets = dex_info.get("assetToStreamingOiCap") or []
+                if any(_asset_row_base(row) in wanted for row in assets):
+                    candidates.append(dex_name)
+        candidates.append("xyz")
+        out: list[str] = []
+        for dex in candidates:
+            if dex and dex not in out:
+                out.append(dex)
+        return out
+
     async def _canonical_market_coin(self, coin: str) -> str:
         cleaned = coin.strip()
         if not cleaned:
@@ -501,6 +645,28 @@ class AgentTools:
             if self.repository:
                 await self.repository.record_tool_call(name, "error", input_json=input_json, output_json={"error": type(exc).__name__}, latency_ms=int((time.perf_counter() - started) * 1000))
             raise
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _query_matches_canonical(query: str, canonical: str) -> bool:
+    query_upper = query.upper()
+    canonical_upper = canonical.upper()
+    base = canonical_upper.split(":", 1)[-1]
+    return query_upper == canonical_upper or query_upper == base
+
+
+def _asset_row_base(row: Any) -> str:
+    if not isinstance(row, (list, tuple)) or not row:
+        return ""
+    return str(row[0]).split(":", 1)[-1].upper()
 
 
 def _mid_for_resolved(mids: dict[str, Any], resolved_coin: str, query_symbol: str) -> Any:

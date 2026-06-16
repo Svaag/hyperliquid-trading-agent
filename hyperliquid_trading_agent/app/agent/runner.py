@@ -203,14 +203,33 @@ class TradingAgentRunner:
         tradfi_available = getattr(self.tools, "tradfi", None) is not None
         wants_equity = tradfi_available and (wants_tradfi or (stock_tickers and not coins) or any(t.upper() in ["AAPL", "NVDA", "MSFT", "TSLA", "SPY", "QQQ", "IWM", "AMZN", "GOOGL", "META"] for t in stock_tickers))
 
-        if wants_market or coins:
-            results.append(await self.tools.get_market_snapshot(coins or ["BTC", "ETH", "SOL"], include_l2=include_l2))
+        resolution_data: dict[str, Any] | None = None
+        hl_symbols = coins
+        tradfi_symbols = stock_tickers if wants_equity else []
+        should_resolve = bool(wants_market or wants_tradfi or wants_funding or wants_candles or coins or stock_tickers)
+        if should_resolve and callable(getattr(self.tools, "resolve_market_intent", None)):
+            resolution = await self.tools.resolve_market_intent(prompt)
+            results.append(resolution)
+            if isinstance(resolution.data, dict):
+                resolution_data = resolution.data
+                hl_symbols = [str(item) for item in resolution_data.get("hyperliquid_symbols", [])]
+                tradfi_symbols = [str(item) for item in resolution_data.get("tradfi_symbols", [])]
+
+        if wants_market or hl_symbols:
+            if resolution_data is not None:
+                market_symbols = hl_symbols
+            else:
+                market_symbols = hl_symbols or coins or (["BTC", "ETH", "SOL"] if not tradfi_symbols else [])
+            if market_symbols:
+                results.append(await self.tools.get_market_snapshot(market_symbols, include_l2=include_l2))
         if wants_funding:
-            for coin in coins or ["BTC"]:
+            funding_symbols = hl_symbols if resolution_data is not None else (hl_symbols or coins or ["BTC"])
+            for coin in funding_symbols:
                 results.append(await self.tools.get_funding_context(coin))
         if wants_candles:
             interval = _infer_interval(prompt)
-            for coin in coins or ["BTC"]:
+            candle_symbols = hl_symbols if resolution_data is not None else (hl_symbols or coins or ["BTC"])
+            for coin in candle_symbols:
                 results.append(await self.tools.get_candles(coin, interval=interval, lookback_hours=_infer_lookback_hours(interval)))
         if addresses:
             for address in addresses[:2]:
@@ -233,16 +252,18 @@ class TradingAgentRunner:
                     )
                 )
         # TradFi / equity tools
-        if wants_equity and stock_tickers:
-            results.append(await self.tools.get_market_snapshot_tradfi(stock_tickers[:10]))
-        if wants_equity and any(term in lowered for term in ["option", "call", "put", "flow", "greeks"]):
-            for ticker in stock_tickers[:3]:
+        resolved_wants_equity = bool(tradfi_symbols) or wants_equity
+        if resolved_wants_equity and tradfi_symbols:
+            results.append(await self.tools.get_market_snapshot_tradfi(tradfi_symbols[:10]))
+        options_flow_enabled = bool(getattr(self.settings, "options_flow_effective_enabled", False)) if self.settings is not None else False
+        if resolved_wants_equity and options_flow_enabled and any(term in lowered for term in ["option", "call", "put", "flow", "greeks"]):
+            for ticker in tradfi_symbols[:3]:
                 results.append(await self.tools.analyze_options_flow(ticker))
-        if wants_equity and any(term in lowered for term in ["earning", "dividend", "split", "corporate"]):
-            for ticker in stock_tickers[:3]:
+        if resolved_wants_equity and any(term in lowered for term in ["earning", "dividend", "split", "corporate"]):
+            for ticker in tradfi_symbols[:3]:
                 results.append(await self.tools.get_corporate_actions(ticker))
-        if wants_equity and any(term in lowered for term in ["compare", "vs", "versus", "side by side"]):
-            results.append(await self.tools.compare_stocks(stock_tickers[:8]))
+        if resolved_wants_equity and any(term in lowered for term in ["compare", "vs", "versus", "side by side"]):
+            results.append(await self.tools.compare_stocks(tradfi_symbols[:8]))
         if any(term in lowered for term in ["sector", "heatmap"]):
             results.append(await self.tools.sector_heatmap())
         if any(term in lowered for term in ["screen", "screener"]):
@@ -384,9 +405,14 @@ def _fallback_answer(prompt: str, tool_results: list[ToolResult], model_error: s
     market_lines: list[str] = []
     paper_lines: list[str] = []
     other_tools: list[str] = []
+    resolver_lines: list[str] = []
 
     for result in tool_results:
-        if result.tool == "get_market_snapshot":
+        if result.tool == "resolve_market_intent" and isinstance(result.data, dict):
+            ambiguous = result.data.get("ambiguous_queries") or []
+            if ambiguous:
+                resolver_lines.append("Ambiguous symbols: " + ", ".join(str(item) for item in ambiguous) + "; venue labels matter.")
+        elif result.tool == "get_market_snapshot":
             assets = result.data.get("assets", {}) if isinstance(result.data, dict) else {}
             for coin, data in list(assets.items())[:5]:
                 if not isinstance(data, dict):
@@ -441,6 +467,7 @@ def _fallback_answer(prompt: str, tool_results: list[ToolResult], model_error: s
     else:
         lines.append("- No live market data was pulled. Mention a coin like BTC, ETH, or SOL for a quick snapshot.")
 
+    lines.extend(f"- {line}" for line in resolver_lines)
     lines.extend(f"- {line}" for line in paper_lines)
     if other_tools:
         lines.append("- Additional checks: " + ", ".join(sorted(set(other_tools))) + ".")
