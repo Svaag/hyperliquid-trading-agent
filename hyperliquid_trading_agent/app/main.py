@@ -34,6 +34,7 @@ from hyperliquid_trading_agent.app.config import Settings, load_settings
 from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.db.session import create_engine, create_sessionmaker
 from hyperliquid_trading_agent.app.discord_bot import DiscordTradingBot
+from hyperliquid_trading_agent.app.engine.monitor import EngineValidationMonitorService
 from hyperliquid_trading_agent.app.engine.routes import register_engine_routes
 from hyperliquid_trading_agent.app.engine.service import InstitutionalEngineService
 from hyperliquid_trading_agent.app.governance.decision_context import DecisionContextRecorder
@@ -235,12 +236,14 @@ async def lifespan(app: FastAPI):
     )
     bot = DiscordTradingBot(settings=settings, runner=runner, tracking_service=tracking_service, autonomy_service=autonomy_service)
     tracking_service.alert_sink = DiscordAlertSink(bot)
-    autonomy_service.alert_sink = DiscordAutonomyAlertSink(bot)
-    report_service.alert_sink = autonomy_service.alert_sink
+    autonomy_alert_sink = DiscordAutonomyAlertSink(bot)
+    autonomy_service.alert_sink = autonomy_alert_sink
+    report_service.alert_sink = autonomy_alert_sink
 
+    engine_validation_monitor = EngineValidationMonitorService(settings=settings, repository=repository, engine_service=engine_service, alert_sink=autonomy_alert_sink)
     newswire_service = NewswireService(settings=settings, repository=repository)
     newswire_enricher = Enricher(settings=settings, model_gateway=model_gateway)
-    newswire_discord = DiscordNewsPublisher(settings=settings, bus=newswire_service.bus, alert_sink=DiscordAutonomyAlertSink(bot), enricher=newswire_enricher)
+    newswire_discord = DiscordNewsPublisher(settings=settings, bus=newswire_service.bus, alert_sink=autonomy_alert_sink, enricher=newswire_enricher)
     newswire_agent_consumer = AgentNewsConsumer(settings=settings, bus=newswire_service.bus, autonomy_service=autonomy_service, repository=repository, event_evaluation_service=event_evaluation_service)
 
     app.state.engine = engine
@@ -256,6 +259,7 @@ async def lifespan(app: FastAPI):
     app.state.tracking_service = tracking_service
     app.state.autonomy_service = autonomy_service
     app.state.engine_service = engine_service
+    app.state.engine_validation_monitor = engine_validation_monitor
     app.state.evaluation_service = evaluation_service
     app.state.event_evaluation_service = event_evaluation_service
     app.state.memory_service = memory_service
@@ -289,6 +293,7 @@ async def lifespan(app: FastAPI):
     else:
         reason = "test-environment" if settings.environment.lower() == "test" else "DISCORD_BOT_TOKEN-not-set"
         log.info("discord_bot_disabled", reason=reason)
+    await engine_validation_monitor.start()
     if settings.newswire_enabled:
         # Subscribe consumers before adapters start so no early events are missed.
         await newswire_discord.start()
@@ -304,6 +309,7 @@ async def lifespan(app: FastAPI):
             await newswire_service.stop()
             await newswire_discord.stop()
             await newswire_agent_consumer.stop()
+        await engine_validation_monitor.stop()
         await autonomy_service.stop()
         await tracking_service.stop()
         await ws_worker.stop()

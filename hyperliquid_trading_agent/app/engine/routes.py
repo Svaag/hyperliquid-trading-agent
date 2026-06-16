@@ -30,6 +30,8 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
         repository = _repo()
         service = getattr(app.state, "engine_service", None)
         service_status = service.status() if service is not None and callable(getattr(service, "status", None)) else {}
+        monitor = getattr(app.state, "engine_validation_monitor", None)
+        monitor_status = monitor.status() if monitor is not None and callable(getattr(monitor, "status", None)) else {}
         return {
             "enabled": settings.engine_enabled,
             "mode": settings.engine_mode,
@@ -39,6 +41,7 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
             "live_enabled": settings.engine_live_enabled,
             "repository_enabled": getattr(repository, "enabled", False),
             "service": service_status,
+            "validation_monitor": monitor_status,
             "debate": {"enabled": settings.engine_debate_enabled, "max_per_day": settings.engine_debate_max_per_day, "priority_min": settings.engine_debate_priority_min},
             "retention": {
                 "event_days": settings.engine_event_retention_days,

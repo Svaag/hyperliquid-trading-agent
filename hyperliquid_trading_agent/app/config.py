@@ -207,6 +207,13 @@ class Settings(BaseSettings):
     engine_shadow_enabled: bool = True
     engine_paper_enabled: bool = True
     engine_live_enabled: bool = False
+    engine_validation_digest_enabled: bool = True
+    engine_validation_digest_interval_seconds: int = 3600
+    engine_validation_alert_stale_loop_seconds: int = 180
+    engine_validation_risk_reject_spike_count: int = 5
+    engine_validation_missing_data_seconds: int = 300
+    engine_validation_ev_drift_min_samples: int = 10
+    engine_validation_ev_drift_loss_usd: float = -1.0
 
     autonomy_evaluation_enabled: bool = True
     autonomy_event_evaluation_enabled: bool = True

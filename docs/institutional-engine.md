@@ -56,12 +56,23 @@ ENGINE_ENABLED=false
 ENGINE_MODE=paper_shadow
 ENGINE_EXECUTION_MODES=paper,shadow
 ENGINE_LIVE_ENABLED=false
+ENGINE_VALIDATION_DIGEST_ENABLED=true
+ENGINE_VALIDATION_DIGEST_INTERVAL_SECONDS=3600
+ENGINE_VALIDATION_ALERT_STALE_LOOP_SECONDS=180
+ENGINE_VALIDATION_RISK_REJECT_SPIKE_COUNT=5
+ENGINE_VALIDATION_MISSING_DATA_SECONDS=300
 
 NEWSWIRE_GATEWAY_ENABLED=true
 AUTONOMY_LEGACY_NEWS_POLL_ENABLED=false
 NEWS_SIGNAL_GENERATION_ENABLED=true
 NEWS_EVENT_RISK_BLOCKS_ENABLED=true
 ```
+
+## Discord validation digest
+
+When `ENGINE_ENABLED=true`, `ENGINE_VALIDATION_DIGEST_ENABLED=true`, `DISCORD_BOT_TOKEN` is set, and `AUTONOMY_ALERT_CHANNEL_ID` is configured, the app posts scheduled engine validation digests to Discord. The digest summarizes shadow candidates, EV buckets, allocation rate, risk rejects, simulated execution, and PnL attribution by strategy.
+
+Alert conditions include stale engine loop, engine runtime errors, paper intents/reports in shadow-only mode, live mode enabled, risk reject spikes, missing/stale feature or regime data, and EV calibration drift once realized attribution samples exist.
 
 ## Read-only API
 
