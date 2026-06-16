@@ -51,6 +51,7 @@ from hyperliquid_trading_agent.app.metrics import (
     AUTONOMY_SIGNALS_REJECTED,
     NEWSWIRE_EVENTS,
 )
+from hyperliquid_trading_agent.app.tradfi.paper.schemas import EquityRiskControlError, EquityTradeRequest
 
 log = get_logger(__name__)
 
@@ -72,6 +73,11 @@ class AutonomousTradingLoopService:
         memory_service: Any | None = None,
         report_service: Any | None = None,
         tuning_service: Any | None = None,
+        tradfi: Any | None = None,
+        equity_portfolio: Any | None = None,
+        equity_signal_generator: Any | None = None,
+        options_flow: Any | None = None,
+        flow_enricher: Any | None = None,
     ):
         self.settings = settings
         self.repository = repository
@@ -84,6 +90,11 @@ class AutonomousTradingLoopService:
         self.memory_service = memory_service
         self.report_service = report_service
         self.tuning_service = tuning_service
+        self.tradfi = tradfi
+        self.equity_portfolio = equity_portfolio
+        self.equity_signal_generator = equity_signal_generator
+        self.options_flow = options_flow
+        self.flow_enricher = flow_enricher
         self.universe_resolver = MarketUniverseResolver(settings, hyperliquid)
         self.reducer = MarketMapReducer()
         self.newswire = AutonomyNewswire(settings, news)
@@ -98,11 +109,14 @@ class AutonomousTradingLoopService:
         self.universe: list[MarketAsset] = []
         self.signals: dict[str, TradeSignal] = {}
         self.news_events: dict[str, NewsEvent] = {}
+        self.equity_signals: dict[str, TradeSignal] = {}
+        self.equity_flow_events: dict[str, Any] = {}
         self._task: asyncio.Task | None = None
         self._subscription_id: str | None = None
         self._last_deep_scan_ms = 0
         self._last_news_ms = 0
         self._last_portfolio_snapshot_ms = 0
+        self._last_equity_scan_ms = 0
         self._model_call_timestamps: list[float] = []
 
     async def start(self) -> None:
@@ -136,6 +150,7 @@ class AutonomousTradingLoopService:
 
     def status(self) -> dict[str, Any]:
         snapshot = self.portfolio.latest_snapshot()
+        equity_snapshot = self.equity_portfolio.snapshots[-1] if self.equity_portfolio is not None and self.equity_portfolio.snapshots else None
         return {
             "enabled": self.settings.autonomy_enabled,
             "running": self.running,
@@ -151,6 +166,15 @@ class AutonomousTradingLoopService:
             "last_error": self.last_error,
             "paper_portfolio_id": self.portfolio.portfolio.id if self.portfolio.portfolio else None,
             "portfolio_equity_usd": snapshot.equity_usd if snapshot else None,
+            "equity": {
+                "enabled": self.settings.autonomy_equity_enabled,
+                "effective_enabled": self.settings.autonomy_equity_effective_enabled and self.tradfi is not None,
+                "universe_symbols": self.settings.autonomy_equity_symbols,
+                "signals_today": self.equity_signals_today(),
+                "open_positions": len([p for p in self.equity_portfolio.positions.values() if p.status == "open"]) if self.equity_portfolio is not None else 0,
+                "portfolio_equity_usd": equity_snapshot.equity_usd if equity_snapshot else None,
+                "last_scan_at_ms": self._last_equity_scan_ms or None,
+            },
             "evaluation": self.evaluation_service.status() if self.evaluation_service is not None and callable(getattr(self.evaluation_service, "status", None)) else {},
             "memory": self.memory_service.status() if self.memory_service is not None and callable(getattr(self.memory_service, "status", None)) else {},
             "reports": self.report_service.status() if self.report_service is not None and callable(getattr(self.report_service, "status", None)) else {},
@@ -161,6 +185,10 @@ class AutonomousTradingLoopService:
     def signals_today(self) -> int:
         today = datetime.now(UTC).date()
         return sum(1 for signal in self.signals.values() if datetime.fromtimestamp(signal.created_at_ms / 1000, tz=UTC).date() == today)
+
+    def equity_signals_today(self) -> int:
+        today = datetime.now(UTC).date()
+        return sum(1 for signal in self.equity_signals.values() if datetime.fromtimestamp(signal.created_at_ms / 1000, tz=UTC).date() == today)
 
     async def pause(self, actor: str = "api") -> None:
         self.paused = True
@@ -176,6 +204,8 @@ class AutonomousTradingLoopService:
     async def approve_signal(self, signal_id: str, actor: str, mid: float | None = None) -> dict[str, Any]:
         signal = await self._get_signal(signal_id)
         if signal is None:
+            if signal_id in self.equity_signals:
+                return await self.approve_equity_signal(signal_id, actor=actor)
             raise KeyError("signal not found")
         if signal.status not in {"candidate", "posted", "flip_requested"}:
             raise RiskControlError(f"signal status {signal.status} cannot be approved")
@@ -317,6 +347,8 @@ class AutonomousTradingLoopService:
     async def reject_signal(self, signal_id: str, actor: str, reason: str = "") -> TradeSignal:
         signal = await self._get_signal(signal_id)
         if signal is None:
+            if signal_id in self.equity_signals:
+                return await self.reject_equity_signal(signal_id, actor=actor, reason=reason)
             raise KeyError("signal not found")
         updated = signal.model_copy(update={"status": "rejected"})
         self.signals[updated.id] = updated
@@ -375,7 +407,7 @@ class AutonomousTradingLoopService:
                 await self.resume(actor=user_id or "discord")
                 return "Autonomy resumed."
             if command.action == "signal" and command.signal_id:
-                signal = await self._get_signal(command.signal_id)
+                signal = await self._get_signal(command.signal_id) or self.equity_signals.get(command.signal_id)
                 return format_signal_detail(signal) if signal else "Signal not found."
             if command.action == "signals":
                 return format_signals(self.list_signals())
@@ -424,12 +456,12 @@ class AutonomousTradingLoopService:
                 return format_tuning_proposal(item)
             if command.action == "apply_tuning_proposal":
                 return "Tuning proposals are observe-and-recommend only in this phase. Apply manually after review. No runtime strategy settings were changed."
-        except RiskControlError as exc:
+        except (RiskControlError, EquityRiskControlError) as exc:
             return (
                 f"Autonomy command blocked by risk control: {exc}. "
                 f"Single-name exposure cap "
-                f"`{self.settings.autonomy_paper_max_single_name_exposure_pct}%` and gross leverage cap "
-                f"`{self.settings.autonomy_paper_max_gross_leverage}x`. No live trade was placed."
+                f"crypto cap `{self.settings.autonomy_paper_max_single_name_exposure_pct}%` / `{self.settings.autonomy_paper_max_gross_leverage}x`, "
+                f"equity cap `{self.settings.autonomy_equity_paper_max_single_name_exposure_pct}%` / `{self.settings.autonomy_equity_paper_max_gross_leverage}x`. No live trade was placed."
             )
         except Exception as exc:
             return f"Autonomy command failed: {type(exc).__name__}: {exc}. No live trade was placed."
@@ -440,6 +472,67 @@ class AutonomousTradingLoopService:
         if status:
             items = [item for item in items if item.status == status]
         return sorted(items, key=lambda item: item.created_at_ms, reverse=True)
+
+    def list_equity_signals(self, status: str | None = None) -> list[TradeSignal]:
+        items = list(self.equity_signals.values())
+        if status:
+            items = [item for item in items if item.status == status]
+        return sorted(items, key=lambda item: item.created_at_ms, reverse=True)
+
+    async def approve_equity_signal(self, signal_id: str, actor: str) -> dict[str, Any]:
+        signal = self.equity_signals.get(signal_id)
+        if signal is None:
+            raise KeyError("equity signal not found")
+        if self.equity_portfolio is None:
+            raise EquityRiskControlError("equity paper portfolio is not configured")
+        if signal.status not in {"candidate", "posted"}:
+            raise EquityRiskControlError(f"equity signal status {signal.status} cannot be approved")
+        now = _now_ms()
+        if signal.expires_at_ms <= now:
+            updated_expired = signal.model_copy(update={"status": "expired"})
+            self.equity_signals[updated_expired.id] = updated_expired
+            raise EquityRiskControlError("equity signal is expired")
+        request = EquityTradeRequest(
+            symbol=signal.symbol,
+            side=signal.side,
+            entry=signal.entry,
+            stop=signal.stop,
+            take_profit=signal.take_profit,
+            account_equity_usd=(self.equity_portfolio.snapshots[-1].equity_usd if self.equity_portfolio.snapshots else self.equity_portfolio.portfolio.equity_usd),
+            risk_pct=self.settings.autonomy_equity_paper_risk_pct_per_trade,
+            signal_id=signal.id,
+            thesis=signal.thesis,
+        )
+        order = await self.equity_portfolio.place_order(request)
+        fill = next((item for item in self.equity_portfolio.fills.values() if item.order_id == order.id), None)
+        position = next((item for item in self.equity_portfolio.positions.values() if item.signal_id == signal.id and item.status == "open"), None)
+        if position is None:
+            position = next((item for item in self.equity_portfolio.positions.values() if item.symbol == signal.symbol and item.side == signal.side and item.status == "open"), None)
+        snapshot = self.equity_portfolio.snapshot()
+        updated = signal.model_copy(update={"status": "paper_ordered", "metadata": {**(signal.metadata or {}), "approved_by": actor, "asset_class": "equity"}})
+        self.equity_signals[updated.id] = updated
+        await self._record_event(
+            "equity_signal_approved_paper_ordered",
+            actor=actor,
+            symbol=signal.symbol,
+            payload={"signal_id": signal.id, "order_id": order.id, "position_id": position.id if position else None, "exchange_actions": []},
+        )
+        return {
+            "signal": updated.model_dump(mode="json"),
+            "order": order.model_dump(mode="json"),
+            "fill": fill.model_dump(mode="json") if fill else None,
+            "position": position.model_dump(mode="json") if position else None,
+            "snapshot": snapshot.model_dump(mode="json"),
+        }
+
+    async def reject_equity_signal(self, signal_id: str, actor: str, reason: str = "") -> TradeSignal:
+        signal = self.equity_signals.get(signal_id)
+        if signal is None:
+            raise KeyError("equity signal not found")
+        updated = signal.model_copy(update={"status": "rejected", "metadata": {**(signal.metadata or {}), "rejected_by": actor, "reject_reason": reason, "asset_class": "equity"}})
+        self.equity_signals[updated.id] = updated
+        await self._record_event("equity_signal_rejected", actor=actor, symbol=signal.symbol, payload={"signal_id": signal.id, "reason": reason, "exchange_actions": []})
+        return updated
 
     async def _run(self) -> None:
         while self.running:
@@ -484,6 +577,8 @@ class AutonomousTradingLoopService:
         self.reducer.apply_paper_positions(self.portfolio.open_positions(), timestamp_ms=ts)
         await self._persist_market_observations()
         await self._generate_and_post_signals(ts)
+        if self.settings.autonomy_equity_effective_enabled and self.tradfi is not None:
+            await self._run_equity_iteration(ts)
         if self.evaluation_service is not None:
             await self.evaluation_service.mark_due(ts)
             await self.evaluation_service.expire_overdue_signals(ts)
@@ -498,6 +593,99 @@ class AutonomousTradingLoopService:
             self._last_portfolio_snapshot_ms = ts
         self.last_iteration_at_ms = ts
         AUTONOMY_LOOP_ITERATIONS.labels(result="ok").inc()
+
+    async def _run_equity_iteration(self, timestamp_ms: int) -> None:
+        if self.tradfi is None or self.equity_signal_generator is None or self.equity_portfolio is None:
+            return
+        min_interval_ms = max(5, self.settings.autonomy_equity_loop_interval_seconds) * 1000
+        if self._last_equity_scan_ms and timestamp_ms - self._last_equity_scan_ms < min_interval_ms:
+            return
+        symbols = self.settings.autonomy_equity_symbols[: self.settings.autonomy_equity_max_tracked_assets]
+        if not symbols:
+            return
+        self._expire_equity_signals(timestamp_ms)
+        try:
+            snapshots = await self.tradfi.get_snapshots(symbols)
+        except Exception as exc:
+            self.last_error = type(exc).__name__
+            log.warning("equity_snapshot_scan_failed", error=type(exc).__name__)
+            return
+        try:
+            corporate_actions = await self.tradfi.get_corporate_actions(symbols)
+        except Exception as exc:
+            corporate_actions = {}
+            log.warning("equity_corp_actions_scan_failed", error=type(exc).__name__)
+        for symbol in symbols:
+            snap = snapshots.get(symbol.upper())
+            if snap is None:
+                continue
+            flow_events: list[Any] = []
+            if self.settings.options_flow_effective_enabled and self.options_flow is not None:
+                try:
+                    chain = await self.tradfi.get_options_chain(symbol)
+                    flow_events = self.options_flow.detect(chain)
+                    if self.flow_enricher is not None:
+                        for event in flow_events[:2]:
+                            enrichment = await self.flow_enricher.maybe_enrich(event)
+                            if enrichment:
+                                event.enrichment = enrichment
+                    await self._persist_equity_flow_events(flow_events)
+                except Exception as exc:
+                    log.warning("equity_options_flow_scan_failed", symbol=symbol, error=type(exc).__name__)
+            candidates = self.equity_signal_generator.generate_from_snapshot(
+                symbol.upper(),
+                snap,
+                corporate_actions=[item.model_dump(mode="json") for item in corporate_actions.get(symbol.upper(), [])],
+                flow_events=flow_events,
+                signals_today=self.equity_signals_today(),
+                timestamp_ms=timestamp_ms,
+            )
+            for signal in candidates:
+                if self._is_duplicate_equity_signal(signal, timestamp_ms):
+                    continue
+                signal = signal.model_copy(update={"metadata": {**(signal.metadata or {}), "asset_class": "equity", "paper_only": True}})
+                self.equity_signals[signal.id] = signal
+                AUTONOMY_SIGNALS_CREATED.labels(signal_type=signal.signal_type).inc()
+                await self._record_event("equity_signal_created", symbol=signal.symbol, payload={"signal_id": signal.id, "score": signal.score, "exchange_actions": []})
+                await self._post_equity_signal(signal)
+        try:
+            await self.equity_portfolio.update_marks()
+            self.equity_portfolio.snapshot()
+        except Exception as exc:
+            log.warning("equity_portfolio_mark_failed", error=type(exc).__name__)
+        self._last_equity_scan_ms = timestamp_ms
+
+    def _expire_equity_signals(self, timestamp_ms: int) -> None:
+        for signal in list(self.equity_signals.values()):
+            if signal.status in {"candidate", "posted"} and signal.expires_at_ms <= timestamp_ms:
+                self.equity_signals[signal.id] = signal.model_copy(update={"status": "expired"})
+
+    def _is_duplicate_equity_signal(self, signal: TradeSignal, timestamp_ms: int) -> bool:
+        for existing in self.equity_signals.values():
+            if existing.status not in {"candidate", "posted", "paper_ordered"}:
+                continue
+            if existing.expires_at_ms <= timestamp_ms:
+                continue
+            if existing.symbol == signal.symbol and existing.side == signal.side and existing.signal_type == signal.signal_type:
+                return True
+        return False
+
+    async def _post_equity_signal(self, signal: TradeSignal) -> None:
+        if not self.settings.autonomy_alert_channel_configured or self.alert_sink is None:
+            return
+        message_id = await self.alert_sink.send(self.settings.autonomy_alert_channel_id, format_signal_alert(signal))
+        posted = signal.model_copy(update={"status": "posted", "discord_channel_id": self.settings.autonomy_alert_channel_id, "discord_message_id": message_id})
+        self.equity_signals[posted.id] = posted
+        AUTONOMY_SIGNALS_POSTED.inc()
+        await self._record_event("equity_signal_posted", symbol=posted.symbol, payload={"signal_id": posted.id, "discord_message_id": message_id, "exchange_actions": []})
+
+    async def _persist_equity_flow_events(self, events: list[Any]) -> None:
+        if self.repository is None or not getattr(self.repository, "enabled", False):
+            return
+        for event in events:
+            data = event.model_dump(mode="json") if callable(getattr(event, "model_dump", None)) else dict(event)
+            data.setdefault("id", f"flow_{uuid4().hex}")
+            await self.repository.record_equity_options_flow_event(data)
 
     async def _ensure_universe(self, timestamp_ms: int) -> None:
         if self.universe and timestamp_ms - self._last_deep_scan_ms < self.settings.autonomy_deep_scan_interval_seconds * 1000:

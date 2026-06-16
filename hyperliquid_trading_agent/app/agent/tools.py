@@ -12,6 +12,8 @@ from hyperliquid_trading_agent.app.metrics import TOOL_CALLS
 from hyperliquid_trading_agent.app.news.service import NewsService
 from hyperliquid_trading_agent.app.paper.schemas import PaperTradeRequest
 from hyperliquid_trading_agent.app.paper.simulator import PaperTradeSimulator
+from hyperliquid_trading_agent.app.tradfi.client import TradFiClient
+from hyperliquid_trading_agent.app.tradfi.options_flow import OptionsFlowDetector
 
 
 @dataclass(frozen=True)
@@ -36,12 +38,16 @@ class AgentTools:
         repository: Repository | None = None,
         docs: HyperliquidDocs | None = None,
         paper: PaperTradeSimulator | None = None,
+        tradfi: TradFiClient | None = None,
+        options_flow: OptionsFlowDetector | None = None,
     ):
         self.hyperliquid = hyperliquid
         self.news = news
         self.repository = repository
         self.docs = docs or HyperliquidDocs()
         self.paper = paper or PaperTradeSimulator()
+        self.tradfi = tradfi
+        self.options_flow = options_flow
 
     async def get_market_snapshot(self, coins: list[str], intervals: list[str] | None = None, include_l2: bool = False) -> ToolResult:
         async def run() -> dict[str, Any]:
@@ -167,6 +173,217 @@ class AgentTools:
             return plan_dict
 
         return await self._run_tool("simulate_paper_trade", request.model_dump(), run, "local:paper-simulator")
+
+    # --- TradFi tools -----------------------------------------------------------
+
+    async def get_stock_quote(self, symbol: str) -> ToolResult:
+        async def run() -> Any:
+            if self.tradfi is None:
+                return {"error": "tradfi_not_available"}
+            quote = await self.tradfi.get_latest_quote(symbol)
+            trade = await self.tradfi.get_latest_trade(symbol)
+            return {
+                "symbol": symbol.upper(),
+                "quote": quote.model_dump(mode="json") if quote else None,
+                "last_trade": trade.model_dump(mode="json") if trade else None,
+            }
+        return await self._run_tool("get_stock_quote", {"symbol": symbol}, run, "tradfi:alpaca")
+
+    async def get_stock_bars(self, symbol: str, timeframe: str = "1d", lookback_hours: int = 120) -> ToolResult:
+        async def run() -> Any:
+            if self.tradfi is None:
+                return {"error": "tradfi_not_available"}
+            bars = await self.tradfi.get_bars(symbol, timeframe=timeframe, lookback_hours=lookback_hours)
+            return {
+                "symbol": symbol.upper(),
+                "timeframe": timeframe,
+                "bars": [b.model_dump(mode="json") for b in bars],
+                "count": len(bars),
+            }
+        return await self._run_tool("get_stock_bars", {"symbol": symbol, "timeframe": timeframe, "lookback_hours": lookback_hours}, run, "tradfi:alpaca")
+
+    async def get_options_chain(self, underlying: str, expiration: str | None = None) -> ToolResult:
+        async def run() -> Any:
+            if self.tradfi is None:
+                return {"error": "tradfi_not_available"}
+            from datetime import date
+            exp_date = date.fromisoformat(expiration) if expiration else None
+            chain = await self.tradfi.get_options_chain(underlying, expiration=exp_date)
+            return {
+                "underlying": chain.underlying,
+                "underlying_price": chain.underlying_price,
+                "expiration": str(chain.expiration_date) if chain.expiration_date else None,
+                "contracts_count": len(chain.contracts),
+                "calls": [c.model_dump(mode="json") for c in chain.calls[:20]],
+                "puts": [c.model_dump(mode="json") for c in chain.puts[:20]],
+            }
+        return await self._run_tool("get_options_chain", {"underlying": underlying, "expiration": expiration}, run, "tradfi:alpaca")
+
+    async def get_earnings_calendar(self, symbol: str | None = None) -> ToolResult:
+        async def run() -> Any:
+            if self.tradfi is None:
+                return {"error": "tradfi_not_available"}
+            if not symbol:
+                return {"note": "earnings_calendar_requires_symbol", "hint": "Use get_corporate_actions or search_market_news for earnings data"}
+            actions = await self.tradfi.get_corporate_actions([symbol])
+            return {
+                "symbol": symbol.upper(),
+                "corporate_actions": {k: [a.model_dump(mode="json") for a in v] for k, v in actions.items()},
+                "note": "Check for upcoming ex_dividend and earnings dates in corporate actions. For full earnings calendar, use search_market_news.",
+            }
+        return await self._run_tool("get_earnings_calendar", {"symbol": symbol}, run, "tradfi:alpaca")
+
+    async def get_corporate_actions(self, symbol: str) -> ToolResult:
+        async def run() -> Any:
+            if self.tradfi is None:
+                return {"error": "tradfi_not_available"}
+            actions = await self.tradfi.get_corporate_actions([symbol])
+            return {
+                "symbol": symbol.upper(),
+                "actions": [a.model_dump(mode="json") for a in actions.get(symbol.upper(), [])],
+                "count": len(actions.get(symbol.upper(), [])),
+            }
+        return await self._run_tool("get_corporate_actions", {"symbol": symbol}, run, "tradfi:alpaca")
+
+    async def get_market_snapshot_tradfi(self, symbols: list[str]) -> ToolResult:
+        async def run() -> Any:
+            if self.tradfi is None:
+                return {"error": "tradfi_not_available"}
+            snaps = await self.tradfi.get_snapshots(symbols)
+            return {
+                sym: snap.model_dump(mode="json") for sym, snap in snaps.items()
+            }
+        return await self._run_tool("get_market_snapshot_tradfi", {"symbols": symbols}, run, "tradfi:alpaca")
+
+    # --- Analysis tools ---------------------------------------------------------
+
+    async def analyze_options_flow(self, symbol: str) -> ToolResult:
+        async def run() -> Any:
+            if self.tradfi is None or self.options_flow is None:
+                return {"error": "tradfi_or_options_flow_not_available"}
+            chain = await self.tradfi.get_options_chain(symbol)
+            if not chain.contracts:
+                return {"symbol": symbol.upper(), "flow_events": [], "note": "No options data available"}
+            events = self.options_flow.detect(chain)
+            return {
+                "symbol": symbol.upper(),
+                "underlying_price": chain.underlying_price,
+                "total_contracts_scanned": len(chain.contracts),
+                "flow_events": [e.model_dump(mode="json") for e in events[:10]],
+                "count": len(events),
+            }
+        return await self._run_tool("analyze_options_flow", {"symbol": symbol}, run, "tradfi:alpaca")
+
+    async def compare_stocks(self, symbols: list[str]) -> ToolResult:
+        async def run() -> Any:
+            if self.tradfi is None:
+                return {"error": "tradfi_not_available"}
+            snaps = await self.tradfi.get_snapshots(symbols)
+            comparison = {}
+            for sym in symbols:
+                snap = snaps.get(sym.upper())
+                if snap is None:
+                    comparison[sym.upper()] = {"error": "not_found"}
+                    continue
+                comparison[sym.upper()] = {
+                    "price": snap.daily_bar.close if snap.daily_bar else None,
+                    "change_pct": snap.change_pct,
+                    "volume": snap.daily_bar.volume if snap.daily_bar else None,
+                    "bid": snap.latest_quote.bid_price if snap.latest_quote else None,
+                    "ask": snap.latest_quote.ask_price if snap.latest_quote else None,
+                }
+            return comparison
+        return await self._run_tool("compare_stocks", {"symbols": symbols}, run, "tradfi:alpaca")
+
+    async def sector_heatmap(self, sector: str | None = None) -> ToolResult:
+        async def run() -> Any:
+            if self.tradfi is None:
+                return {"error": "tradfi_not_available"}
+            # Key sector ETFs as proxies
+            sector_etfs = {
+                "technology": "XLK", "financials": "XLF", "healthcare": "XLV",
+                "energy": "XLE", "consumer": "XLY", "industrials": "XLI",
+                "materials": "XLB", "utilities": "XLU", "real_estate": "XLRE",
+                "communication": "XLC", "broad": "SPY",
+            }
+            to_snapshot = list(sector_etfs.values()) if sector is None else [sector_etfs.get(sector.lower(), "SPY")]
+            snaps = await self.tradfi.get_snapshots(to_snapshot)
+            result = {}
+            for name, etf in sector_etfs.items():
+                if sector and name != sector.lower():
+                    continue
+                snap = snaps.get(etf.upper())
+                if snap:
+                    result[name] = {
+                        "etf": etf, "price": snap.daily_bar.close if snap.daily_bar else None,
+                        "change_pct": snap.change_pct,
+                    }
+            return result
+        return await self._run_tool("sector_heatmap", {"sector": sector}, run, "tradfi:alpaca")
+
+    async def stock_screener(self, criteria: str = "") -> ToolResult:
+        async def run() -> Any:
+            if self.tradfi is None:
+                return {"error": "tradfi_not_available"}
+            # Simple screener: snapshot a set of popular tickers based on criteria keywords.
+            # The LLM is expected to interpret the results, not the tool.
+            # Add some common stock tickers for screening
+            common_stocks = ["AAPL", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "BRK.B", "JPM", "V", "JNJ", "WMT", "PG", "MA", "UNH", "HD", "BAC", "DIS", "ADBE", "NFLX", "CRM", "AMD", "INTC", "QCOM", "TXN"]
+            # Filter by sector keywords if any
+            criteria_lower = criteria.lower()
+            if "tech" in criteria_lower or "semiconductor" in criteria_lower:
+                to_check = ["AAPL", "NVDA", "MSFT", "AMD", "INTC", "QCOM", "TXN", "ADBE", "CRM", "NFLX"]
+            elif "finance" in criteria_lower or "bank" in criteria_lower:
+                to_check = ["JPM", "BAC", "V", "MA", "GS", "MS", "C", "WFC"]
+            elif "health" in criteria_lower or "pharma" in criteria_lower:
+                to_check = ["JNJ", "UNH", "PFE", "MRK", "ABBV", "LLY"]
+            else:
+                to_check = common_stocks[:10]
+            snaps = await self.tradfi.get_snapshots(to_check)
+            results = []
+            for sym in to_check:
+                snap = snaps.get(sym.upper())
+                if snap is None:
+                    continue
+                results.append({
+                    "symbol": sym,
+                    "price": snap.daily_bar.close if snap.daily_bar else None,
+                    "change_pct": snap.change_pct,
+                    "volume": snap.daily_bar.volume if snap.daily_bar else None,
+                })
+            return {"criteria": criteria, "results": sorted(results, key=lambda r: r.get("volume") or 0, reverse=True)}
+        return await self._run_tool("stock_screener", {"criteria": criteria}, run, "tradfi:alpaca")
+
+    async def estimate_option_greeks(self, symbol: str, strike: float, expiration: str, option_type: str) -> ToolResult:
+        async def run() -> Any:
+            if self.tradfi is None:
+                return {"error": "tradfi_not_available"}
+            from datetime import date
+            exp_date = date.fromisoformat(expiration)
+            chain = await self.tradfi.get_options_chain(symbol, expiration=exp_date, strike_min=strike - 5, strike_max=strike + 5)
+            # Find the nearest matching contract
+            best = None
+            for c in chain.contracts:
+                if c.option_type == option_type.lower() and c.strike_price == strike:
+                    best = c
+                    break
+            if best is None and chain.contracts:
+                # Find closest strike
+                best = min(chain.contracts, key=lambda c: abs(c.strike_price - strike))
+            if best is None:
+                return {"symbol": symbol.upper(), "strike": strike, "error": "no_matching_contract"}
+            return {
+                "symbol": best.symbol,
+                "underlying": best.underlying,
+                "strike": best.strike_price,
+                "expiration": str(best.expiration_date),
+                "option_type": best.option_type,
+                "bid": best.bid, "ask": best.ask, "last": best.last_price,
+                "delta": best.delta, "gamma": best.gamma, "theta": best.theta,
+                "vega": best.vega, "rho": best.rho,
+                "implied_volatility": best.implied_volatility,
+            }
+        return await self._run_tool("estimate_option_greeks", {"symbol": symbol, "strike": strike, "expiration": expiration, "option_type": option_type}, run, "tradfi:alpaca")
 
     async def _run_tool(self, name: str, input_json: dict[str, Any], func, source: str) -> ToolResult:
         started = time.perf_counter()

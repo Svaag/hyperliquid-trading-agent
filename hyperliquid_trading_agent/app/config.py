@@ -248,6 +248,37 @@ class Settings(BaseSettings):
     x_cashtags: str = "BTC,ETH,HYPE,SOL"
     x_poll_seconds: int = 30
 
+    # --- TradFi (equities & options via Alpaca Data API) -----------------------
+    tradfi_enabled: bool = False
+    alpaca_trading_enabled: bool = False  # gated like HYPERLIQUID_EXCHANGE_ENABLED
+    alpaca_data_feed: Literal["iex", "sip", "delayed_sip"] = "iex"  # IEX = free
+
+    # Equity-specific autonomy (separate from crypto)
+    autonomy_equity_enabled: bool = False
+    autonomy_equity_universe: str = ""  # e.g. AAPL,NVDA,MSFT,SPY,QQQ
+    autonomy_equity_max_tracked_assets: int = 20
+    autonomy_equity_max_signals_per_day: int = 5
+    autonomy_equity_min_signal_score: float = 75.0
+    autonomy_equity_signal_ttl_minutes: int = 60
+    autonomy_equity_loop_interval_seconds: int = 30
+    autonomy_equity_deep_scan_interval_seconds: int = 300
+
+    # Equity paper portfolio (separate from crypto paper)
+    autonomy_equity_paper_initial_equity_usd: float = 100_000.0
+    autonomy_equity_paper_risk_pct_per_trade: float = 0.25
+    autonomy_equity_paper_max_gross_leverage: float = 2.0
+    autonomy_equity_paper_max_single_name_exposure_pct: float = 15.0
+    autonomy_equity_paper_taker_fee_bps: float = 2.0
+    autonomy_equity_paper_maker_fee_bps: float = 0.5
+    autonomy_equity_paper_default_slippage_bps: float = 1.0
+
+    # Options flow detection
+    options_flow_enabled: bool = False
+    options_flow_min_volume_oi_ratio: float = 3.0
+    options_flow_min_premium: float = 1_000_000.0
+    options_flow_llm_enrich_enabled: bool = True
+    options_flow_llm_enrich_max_calls_per_hour: int = 10
+
     debate_analyst_model_chain: str = DEFAULT_DEBATE_ROLE_MODEL_CHAINS["analyst"]
     debate_quant_model_chain: str = DEFAULT_DEBATE_ROLE_MODEL_CHAINS["quant"]
     debate_research_model_chain: str = DEFAULT_DEBATE_ROLE_MODEL_CHAINS["research"]
@@ -267,6 +298,13 @@ class Settings(BaseSettings):
     newsapi_api_key: str = ""
     perplexity_api_key: str = ""
     x_bearer_token: str = ""
+
+    @field_validator("alpaca_trading_enabled")
+    @classmethod
+    def live_alpaca_trading_must_remain_disabled(cls, value: bool) -> bool:
+        if value:
+            raise ValueError("ALPACA_TRADING_ENABLED must remain false for the MVP")
+        return value
 
     @field_validator("hyperliquid_exchange_enabled")
     @classmethod
@@ -397,6 +435,34 @@ class Settings(BaseSettings):
             if token.isalpha() and 2 <= len(token) <= 6:
                 universe.add(token)
         return sorted(universe)
+
+    @property
+    def autonomy_equity_symbols(self) -> list[str]:
+        return [s.upper() for s in _csv(self.autonomy_equity_universe)]
+
+    @property
+    def autonomy_equity_effective_enabled(self) -> bool:
+        return self.tradfi_enabled and self.autonomy_equity_enabled
+
+    @property
+    def options_flow_effective_enabled(self) -> bool:
+        return self.tradfi_enabled and self.options_flow_enabled
+
+    def tradfi_config_warnings(self) -> list[str]:
+        warnings: list[str] = []
+        if self.tradfi_enabled and not (self.alpaca_api_key and self.alpaca_api_secret):
+            warnings.append("TRADFI_ENABLED requires ALPACA_API_KEY and ALPACA_API_SECRET")
+        if self.autonomy_equity_enabled and not self.tradfi_enabled:
+            warnings.append("AUTONOMY_EQUITY_ENABLED requires TRADFI_ENABLED=true")
+        if self.autonomy_equity_enabled and not self.autonomy_equity_symbols:
+            warnings.append("AUTONOMY_EQUITY_UNIVERSE is empty")
+        if self.options_flow_enabled and not self.tradfi_enabled:
+            warnings.append("OPTIONS_FLOW_ENABLED requires TRADFI_ENABLED=true")
+        if self.autonomy_equity_paper_max_gross_leverage > 3.0:
+            warnings.append("AUTONOMY_EQUITY_PAPER_MAX_GROSS_LEVERAGE should not exceed 3.0 for equities")
+        if self.autonomy_equity_paper_max_single_name_exposure_pct > 25.0:
+            warnings.append("AUTONOMY_EQUITY_PAPER_MAX_SINGLE_NAME_EXPOSURE_PCT should not exceed 25%")
+        return warnings
 
     def newswire_config_warnings(self) -> list[str]:
         warnings: list[str] = []

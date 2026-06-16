@@ -193,10 +193,15 @@ class TradingAgentRunner:
         include_l2 = any(term in lowered for term in ["order book", "book", "depth", "bid", "ask", "liquidity"])
         wants_market = any(term in lowered for term in ["trade", "market", "price", "read", "setup", "long", "short", "funding", "liquidation", "book"])
         wants_news = any(term in lowered for term in ["news", "macro", "fed", "fomc", "cpi", "ppi", "rates", "headline", "cycle", "economy"])
-        wants_docs = any(term in lowered for term in ["hyperliquid", "api", "docs", "margin", "funding", "order", "tick", "lot", "liquidation"])
+        wants_docs = any(term in lowered for term in ["hyperliquid", "api", "docs", "margin", "order", "tick", "lot", "liquidation"])
         wants_funding = "funding" in lowered
         wants_candles = any(term in lowered for term in ["chart", "candle", "trend", "1h", "4h", "daily"])
         wants_paper = any(term in lowered for term in ["paper", "simulate", "position size", "risk 1", "risk:"])
+        # TradFi / equity signals
+        wants_tradfi = any(term in lowered for term in ["stock", "equity", "option", "call", "put", "earnings", "dividend", "split", "sector", "heatmap", "screen", "comp", "compare", "flow", "greeks", "iv", "implied volatility"])
+        stock_tickers = _extract_stock_tickers(prompt)
+        tradfi_available = getattr(self.tools, "tradfi", None) is not None
+        wants_equity = tradfi_available and (wants_tradfi or (stock_tickers and not coins) or any(t.upper() in ["AAPL", "NVDA", "MSFT", "TSLA", "SPY", "QQQ", "IWM", "AMZN", "GOOGL", "META"] for t in stock_tickers))
 
         if wants_market or coins:
             results.append(await self.tools.get_market_snapshot(coins or ["BTC", "ETH", "SOL"], include_l2=include_l2))
@@ -227,6 +232,21 @@ class TradingAgentRunner:
                         market_snapshot=market_snapshot,
                     )
                 )
+        # TradFi / equity tools
+        if wants_equity and stock_tickers:
+            results.append(await self.tools.get_market_snapshot_tradfi(stock_tickers[:10]))
+        if wants_equity and any(term in lowered for term in ["option", "call", "put", "flow", "greeks"]):
+            for ticker in stock_tickers[:3]:
+                results.append(await self.tools.analyze_options_flow(ticker))
+        if wants_equity and any(term in lowered for term in ["earning", "dividend", "split", "corporate"]):
+            for ticker in stock_tickers[:3]:
+                results.append(await self.tools.get_corporate_actions(ticker))
+        if wants_equity and any(term in lowered for term in ["compare", "vs", "versus", "side by side"]):
+            results.append(await self.tools.compare_stocks(stock_tickers[:8]))
+        if any(term in lowered for term in ["sector", "heatmap"]):
+            results.append(await self.tools.sector_heatmap())
+        if any(term in lowered for term in ["screen", "screener"]):
+            results.append(await self.tools.stock_screener(prompt[:200]))
         return results
 
     async def _audit(self, event_type: str, context: AgentContext, payload: dict[str, Any]) -> None:
@@ -273,6 +293,35 @@ def extract_coins(text: str) -> list[str]:
     if "ethereum" in lowered:
         coins.append("ETH")
     return sorted(set(coins))
+
+
+# Common stock tickers for detection (not exhaustive — catch-all regex below catches the rest).
+_STOCK_CACHE: set[str] = {"AAPL","NVDA","MSFT","AMZN","GOOGL","META","TSLA","BRK.B","JPM","V","JNJ","WMT","PG","MA","UNH","HD","BAC","DIS","ADBE","NFLX","CRM","AMD","INTC","QCOM","TXN","SPY","QQQ","IWM","DIA","XLV","XLF","XLE","XLY","XLI","XLC","XLK","XLU","XLRE","XLB","SMH","SOXX","ARKK","GLD","SLV","USO","UNG"}
+
+
+def _extract_stock_tickers(text: str) -> list[str]:
+    """Extract likely stock tickers from text. Excludes known crypto coins."""
+    lowered = text.lower()
+    # Find all-caps tokens and dollar-prefixed tokens
+    tickers = set()
+    for match in re.finditer(r"\$?\b([A-Z]{1,5})\b", text):
+        token = match.group(1).upper()
+        # Skip known crypto coins
+        if token in COMMON_COINS:
+            continue
+        # Skip common words that look like tickers
+        if token in {"THE", "AND", "FOR", "ALL", "NEW", "NOW", "TOP", "LOW", "HIGH", "BIG", "BUY", "SELL", "LONG", "SHORT", "RISK", "NOTE", "CALL", "PUT"}:
+            continue
+        tickers.add(token)
+    # Also catch known stocks by name
+    name_map = {"apple": "AAPL", "nvidia": "NVDA", "microsoft": "MSFT", "amazon": "AMZN",
+                "google": "GOOGL", "alphabet": "GOOGL", "meta": "META", "facebook": "META",
+                "tesla": "TSLA", "netflix": "NFLX", "amd": "AMD", "intel": "INTC",
+                "spy": "SPY", "qqq": "QQQ", "iwm": "IWM", "dow": "DIA"}
+    for name, ticker in name_map.items():
+        if name in lowered:
+            tickers.add(ticker)
+    return sorted(tickers)[:15]
 
 
 def _parse_paper_trade(prompt: str, coins: list[str]) -> PaperTradeRequest | None:
@@ -354,6 +403,22 @@ def _fallback_answer(prompt: str, tool_results: list[ToolResult], model_error: s
                     pieces.append(f"funding {funding}")
                 if oi is not None:
                     pieces.append(f"OI {oi}")
+                market_lines.append(", ".join(pieces))
+        elif result.tool == "get_market_snapshot_tradfi" and isinstance(result.data, dict):
+            for symbol, snap in list(result.data.items())[:5]:
+                if not isinstance(snap, dict):
+                    continue
+                daily = snap.get("daily_bar") or {}
+                quote = snap.get("latest_quote") or {}
+                price = daily.get("close") or snap.get("previous_close")
+                bid = quote.get("bid_price")
+                ask = quote.get("ask_price")
+                change = snap.get("change_pct")
+                pieces = [f"{symbol}: price {price if price is not None else 'unknown'}"]
+                if change is not None:
+                    pieces.append(f"day {change:+.2f}%")
+                if bid is not None and ask is not None:
+                    pieces.append(f"bid/ask {bid}/{ask}")
                 market_lines.append(", ".join(pieces))
         elif result.tool == "simulate_paper_trade" and isinstance(result.data, dict):
             paper_lines.append(

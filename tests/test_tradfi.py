@@ -1,0 +1,362 @@
+"""Tests for app/tradfi/ — schemas, client, provider, options flow, paper simulation."""
+
+from __future__ import annotations
+
+from datetime import date, datetime, timezone
+
+import pytest
+from pydantic import ValidationError
+
+from hyperliquid_trading_agent.app.autonomy.equity_features import detect_technical_breakout_equity
+from hyperliquid_trading_agent.app.tradfi.base import TradFiProvider
+from hyperliquid_trading_agent.app.tradfi.client import TradFiClient
+from hyperliquid_trading_agent.app.tradfi.options_flow import FlowEnricher, OptionsFlowDetector
+from hyperliquid_trading_agent.app.tradfi.paper.schemas import (
+    EquityPaperPortfolio,
+    EquityRiskControlError,
+    EquityTradeRequest,
+)
+from hyperliquid_trading_agent.app.tradfi.paper.simulator import EquityPaperSimulator
+from hyperliquid_trading_agent.app.tradfi.schemas import (
+    Bar,
+    CalendarEvent,
+    CorporateAction,
+    OptionContract,
+    OptionsChain,
+    OptionsFlowEvent,
+    StockQuote,
+    StockSnapshot,
+    StockTrade,
+)
+
+# --- Schemas ------------------------------------------------------------------
+
+
+def test_stock_quote_serialization():
+    quote = StockQuote(symbol="AAPL", bid_price=195.50, ask_price=195.55, ask_size=100, bid_size=200)
+    assert quote.model_dump(mode="json")["symbol"] == "AAPL"
+    assert quote.model_dump(mode="json")["bid_price"] == 195.50
+
+
+def test_bar_serialization():
+    bar = Bar(symbol="NVDA", timestamp=datetime.now(timezone.utc), open=110.0, high=112.0, low=109.5, close=111.0, volume=50000000.0, timeframe="1Day")
+    data = bar.model_dump(mode="json")
+    assert data["symbol"] == "NVDA"
+    assert data["close"] == 111.0
+
+
+def test_corporate_action_serialization():
+    ca = CorporateAction(id="ca1", symbol="MSFT", action_type="cash_dividend", ex_date=date(2026, 6, 20), dividend_rate=0.75)
+    data = ca.model_dump(mode="json")
+    assert data["dividend_rate"] == 0.75
+
+
+def test_option_contract_serialization():
+    c = OptionContract(
+        symbol="AAPL260619C00200000",
+        underlying="AAPL",
+        strike_price=200.0,
+        expiration_date=date(2026, 6, 19),
+        option_type="call",
+        delta=0.55,
+        gamma=0.03,
+        implied_volatility=0.25,
+    )
+    data = c.model_dump(mode="json")
+    assert data["delta"] == 0.55
+
+
+def test_options_chain_properties():
+    chain = OptionsChain(
+        underlying="AAPL",
+        underlying_price=195.0,
+        contracts=[
+            OptionContract(symbol="AAPL260619C00200000", underlying="AAPL", strike_price=200.0, expiration_date=date(2026, 6, 19), option_type="call"),
+            OptionContract(symbol="AAPL260619P00190000", underlying="AAPL", strike_price=190.0, expiration_date=date(2026, 6, 19), option_type="put"),
+        ],
+    )
+    assert len(chain.calls) == 1
+    assert len(chain.puts) == 1
+
+
+def test_options_flow_event_scoring():
+    e = OptionsFlowEvent(symbol="AAPL", detected_at=datetime.now(timezone.utc), volume_oi_ratio=8.5, premium_estimate=5_000_000.0, flow_type="call_buy", urgency_score=75.0)
+    assert e.urgency_score == 75.0
+    data = e.model_dump(mode="json")
+    assert data["flow_type"] == "call_buy"
+
+
+# --- Client -------------------------------------------------------------------
+
+
+class _FakeProvider(TradFiProvider):
+    name = "fake"
+
+    async def get_latest_quote(self, symbol: str) -> StockQuote | None:
+        return StockQuote(symbol=symbol.upper(), bid_price=100.0, ask_price=100.1)
+
+    async def get_latest_trade(self, symbol: str) -> StockTrade | None:
+        return StockTrade(symbol=symbol.upper(), price=100.05, size=100, timestamp=datetime.now(timezone.utc))
+
+    async def get_snapshots(self, symbols: list[str]) -> dict[str, StockSnapshot]:
+        return {s.upper(): StockSnapshot(symbol=s.upper(), previous_close=99.0, change_pct=1.0) for s in symbols}
+
+    async def get_bars(self, symbol: str, timeframe: str, start: datetime, end: datetime, limit: int | None = None) -> list[Bar]:
+        return [Bar(symbol=symbol.upper(), timestamp=start, open=100.0, high=101.0, low=99.0, close=100.5, volume=1000000.0, timeframe=timeframe)]
+
+    async def get_corporate_actions(self, symbols: list[str], start=None, end=None, limit=None) -> dict[str, list[CorporateAction]]:
+        return {}
+
+    async def get_options_chain(self, underlying: str, expiration=None, strike_min=None, strike_max=None) -> OptionsChain:
+        return OptionsChain(underlying=underlying.upper(), underlying_price=100.0)
+
+    async def get_option_snapshot(self, option_symbol: str) -> OptionContract | None:
+        return None
+
+    async def get_calendar(self, start, end, event_types=None) -> list[CalendarEvent]:
+        return [CalendarEvent(date=start, event_type="trading_day")]
+
+
+def test_tradfi_client_cache_hit():
+    async def run():
+        provider = _FakeProvider()
+        client = TradFiClient(provider, cache_ttl_quote_seconds=60)
+        quote1 = await client.get_latest_quote("AAPL")
+        quote2 = await client.get_latest_quote("AAPL")
+        assert quote1 is quote2  # same cached object
+        assert quote1.bid_price == 100.0
+    import anyio
+    anyio.run(run)
+
+
+def test_tradfi_client_bars():
+    async def run():
+        provider = _FakeProvider()
+        client = TradFiClient(provider)
+        bars = await client.get_bars("NVDA", timeframe="1d", lookback_hours=24)
+        assert len(bars) == 1
+        assert bars[0].symbol == "NVDA"
+    import anyio
+    anyio.run(run)
+
+
+def test_tradfi_client_calendar():
+    async def run():
+        provider = _FakeProvider()
+        client = TradFiClient(provider)
+        events = await client.get_calendar(date(2026, 6, 16), date(2026, 6, 20))
+        assert len(events) == 1
+        assert events[0].event_type == "trading_day"
+    import anyio
+    anyio.run(run)
+
+
+# --- Options Flow Detector ----------------------------------------------------
+
+
+def _make_chain(underlying_price: float) -> OptionsChain:
+    contracts = []
+    for opt_type in ("call", "put"):
+        for strike in [95.0, 100.0, 105.0]:
+            contracts.append(
+                OptionContract(
+                    symbol=f"FAKE{int(strike)}{'C' if opt_type == 'call' else 'P'}",
+                    underlying="FAKE",
+                    strike_price=strike,
+                    expiration_date=date(2026, 7, 18),
+                    option_type=opt_type,  # type: ignore[arg-type]
+                    bid=1.0,
+                    ask=1.2,
+                    last_price=1.1,
+                    volume=100,
+                    open_interest=500,
+                    implied_volatility=0.3,
+                )
+            )
+    # Add an unusual contract with elevated volume/OI
+    contracts.append(
+        OptionContract(
+            symbol="FAKE100C_unusual",
+            underlying="FAKE",
+            strike_price=100.0,
+            expiration_date=date(2026, 7, 18),
+            option_type="call",
+            bid=2.0,
+            ask=2.2,
+            last_price=2.1,
+            volume=5000,
+            open_interest=500,
+            implied_volatility=0.35,
+        )
+    )
+    return OptionsChain(underlying="FAKE", underlying_price=underlying_price, contracts=contracts)
+
+
+def test_options_flow_detector_default_thresholds():
+    detector = OptionsFlowDetector(min_volume_oi_ratio=3.0, min_premium=500_000.0)
+    chain = _make_chain(100.0)
+    events = detector.detect(chain)
+    # The unusual contract has vol/OI = 5000/500 = 10x, premium = 5000*2.1*100 = 1,050,000
+    assert len(events) >= 1
+    assert events[0].volume_oi_ratio > 3.0
+
+
+def test_options_flow_detector_no_events_below_threshold():
+    detector = OptionsFlowDetector(min_volume_oi_ratio=20.0, min_premium=50_000_000.0)
+    chain = _make_chain(100.0)
+    events = detector.detect(chain)
+    assert len(events) == 0
+
+
+def test_options_flow_detector_classifies_call_buy():
+    detector = OptionsFlowDetector()
+    chain = _make_chain(100.0)
+    events = detector.detect(chain)
+    call_events = [e for e in events if e.flow_type == "call_buy"]
+    assert len(call_events) >= 1
+
+
+def test_flow_enricher_disabled_without_gateway():
+    enricher = FlowEnricher(model_gateway=None)
+    assert not enricher.enabled
+
+
+# --- Paper Simulator ----------------------------------------------------------
+
+
+def test_equity_portfolio_initial_state():
+    portfolio = EquityPaperPortfolio(initial_equity_usd=100_000.0)
+    assert portfolio.equity_usd == 100_000.0
+    assert portfolio.cash_usd == 100_000.0
+
+
+async def test_equity_paper_place_order():
+    simulator = EquityPaperSimulator(initial_equity_usd=100_000.0, risk_pct_per_trade=1.0, max_single_name_exposure_pct=0.5)
+    request = EquityTradeRequest(symbol="AAPL", side="long", entry=195.0, stop=190.0, take_profit=205.0, account_equity_usd=100_000.0, risk_pct=0.5, quantity=100)
+    order = await simulator.place_order(request)
+    assert order.status == "filled"
+    assert order.filled_px == pytest.approx(195.0195)
+    assert simulator.portfolio.cash_usd == pytest.approx(100_000.0 - (100 * order.filled_px * simulator.taker_fee_bps / 10_000))
+    assert len(simulator.positions) >= 1
+    position = next(iter(simulator.positions.values()))
+    assert position.symbol == "AAPL"
+    assert position.side == "long"
+
+
+async def test_equity_paper_risk_control_leverage():
+    simulator = EquityPaperSimulator(initial_equity_usd=10_000.0, max_gross_leverage=1.5)
+    # A $20k position on $10k equity would be 2x leverage
+    request = EquityTradeRequest(symbol="NVDA", side="long", entry=500.0, stop=450.0, account_equity_usd=10_000.0, quantity=40)  # 40 * 500 = 20k
+    with pytest.raises(EquityRiskControlError, match="leverage"):
+        await simulator.place_order(request)
+
+
+async def test_equity_paper_close_position():
+    simulator = EquityPaperSimulator(initial_equity_usd=100_000.0, max_single_name_exposure_pct=0.5)
+    request = EquityTradeRequest(symbol="MSFT", side="long", entry=400.0, stop=390.0, account_equity_usd=100_000.0, quantity=100)
+    await simulator.place_order(request)
+    pos = next(p for p in simulator.positions.values() if p.status == "open")
+    closed = await simulator.close_position(pos.id)
+    assert closed is not None
+    assert closed.status == "closed"
+
+
+async def test_equity_paper_accounting_tracks_margin_not_cash_stock_purchase():
+    simulator = EquityPaperSimulator(initial_equity_usd=100_000.0, max_single_name_exposure_pct=0.5, taker_fee_bps=0.0, default_slippage_bps=0.0)
+    request = EquityTradeRequest(symbol="AAPL", side="long", entry=100.0, stop=95.0, account_equity_usd=100_000.0, quantity=100)
+    await simulator.place_order(request)
+    assert simulator.portfolio.cash_usd == pytest.approx(100_000.0)
+    open_snapshot = simulator.snapshot()
+    assert open_snapshot.equity_usd == pytest.approx(100_000.0)
+
+    pos = next(p for p in simulator.positions.values() if p.status == "open")
+    pos.mark_px = 110.0
+    pos.unrealized_pnl_usd = 1_000.0
+    marked_snapshot = simulator.snapshot()
+    assert marked_snapshot.equity_usd == pytest.approx(101_000.0)
+
+    closed = await simulator.close_position(pos.id)
+    assert closed is not None
+    assert simulator.portfolio.cash_usd == pytest.approx(101_000.0)
+    assert simulator.portfolio.realized_pnl_usd == pytest.approx(1_000.0)
+
+
+async def test_equity_paper_update_marks():
+    simulator = EquityPaperSimulator(initial_equity_usd=100_000.0, max_single_name_exposure_pct=0.5)
+    request = EquityTradeRequest(symbol="TSLA", side="long", entry=200.0, stop=190.0, account_equity_usd=100_000.0, quantity=100)
+    await simulator.place_order(request)
+    snapshot = simulator.snapshot()
+    assert snapshot.equity_usd is not None
+    assert snapshot.unrealized_pnl_usd == 0.0  # marks not updated yet
+
+
+# --- Config -------------------------------------------------------------------
+
+
+def test_equity_signal_evidence_sources_are_schema_valid():
+    snap = StockSnapshot(
+        symbol="AAPL",
+        previous_close=100.0,
+        change_pct=4.0,
+        daily_bar=Bar(
+            symbol="AAPL",
+            timestamp=datetime.now(timezone.utc),
+            open=100.0,
+            high=105.0,
+            low=99.0,
+            close=104.0,
+            volume=25_000_000.0,
+            timeframe="1Day",
+        ),
+    )
+    signal = detect_technical_breakout_equity("AAPL", snap, timestamp_ms=1)
+    assert signal is not None
+    assert {item.source for item in signal.evidence} == {"equity"}
+
+
+def test_tradfi_config_warnings(monkeypatch):
+    from hyperliquid_trading_agent.app.config import Settings
+
+    # No keys, but tradfi not enabled: no warnings
+    settings = Settings(tradfi_enabled=False)
+    assert settings.tradfi_config_warnings() == []
+
+    # TradFi enabled without keys
+    settings = Settings(tradfi_enabled=True, alpaca_api_key="", alpaca_api_secret="")
+    warnings = settings.tradfi_config_warnings()
+    assert any("ALPACA_API_KEY" in w for w in warnings)
+
+    # Equity autonomy without tradfi
+    settings = Settings(tradfi_enabled=False, autonomy_equity_enabled=True)
+    warnings = settings.tradfi_config_warnings()
+    assert any("TRADFI_ENABLED" in w for w in warnings)
+
+    # Equity autonomy without universe
+    settings = Settings(tradfi_enabled=True, autonomy_equity_enabled=True, autonomy_equity_universe="")
+    warnings = settings.tradfi_config_warnings()
+    assert any("AUTONOMY_EQUITY_UNIVERSE" in w for w in warnings)
+
+    # Options flow without tradfi
+    settings = Settings(tradfi_enabled=False, options_flow_enabled=True)
+    warnings = settings.tradfi_config_warnings()
+    assert any("TRADFI_ENABLED" in w for w in warnings)
+
+
+def test_alpaca_trading_disabled_validation():
+    from hyperliquid_trading_agent.app.config import Settings
+
+    with pytest.raises(ValidationError, match="ALPACA_TRADING_ENABLED"):
+        Settings(alpaca_trading_enabled=True)
+
+
+def test_tradfi_effective_enabled():
+    from hyperliquid_trading_agent.app.config import Settings
+
+    s = Settings(tradfi_enabled=True, autonomy_equity_enabled=True)
+    assert s.autonomy_equity_effective_enabled is True
+
+    s2 = Settings(tradfi_enabled=False, autonomy_equity_enabled=True)
+    assert s2.autonomy_equity_effective_enabled is False
+
+    s3 = Settings(tradfi_enabled=True, options_flow_enabled=True)
+    assert s3.options_flow_effective_enabled is True

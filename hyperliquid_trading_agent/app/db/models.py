@@ -728,6 +728,125 @@ class OperatorFeedbackRecord(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+# --- TradFi / Equity paper trading tables (0007_tradfi) -------------------------
+
+
+class EquityPaperPortfolioRecord(TimestampMixin, Base):
+    __tablename__ = "equity_paper_portfolios"
+    __table_args__ = (Index("uq_equity_portfolios_name", "name", unique=True),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_id)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    initial_equity_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    cash_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    realized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class EquityPaperOrderRecord(TimestampMixin, Base):
+    __tablename__ = "equity_paper_orders"
+    __table_args__ = (
+        Index("ix_equity_orders_symbol", "symbol"),
+        Index("ix_equity_orders_status", "status"),
+        Index("ix_equity_orders_signal_id", "signal_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    portfolio_id: Mapped[str] = mapped_column(ForeignKey("equity_paper_portfolios.id"), nullable=False)
+    signal_id: Mapped[str | None] = mapped_column(String(64))
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    order_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    requested_px: Mapped[float | None] = mapped_column(Float)
+    filled_px: Mapped[float | None] = mapped_column(Float)
+    stop_px: Mapped[float | None] = mapped_column(Float)
+    take_profit_px: Mapped[float | None] = mapped_column(Float)
+    fee_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    slippage_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    filled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class EquityPaperFillRecord(TimestampMixin, Base):
+    __tablename__ = "equity_paper_fills"
+    __table_args__ = (Index("ix_equity_fills_symbol", "symbol"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    order_id: Mapped[str] = mapped_column(ForeignKey("equity_paper_orders.id"), nullable=False)
+    portfolio_id: Mapped[str] = mapped_column(ForeignKey("equity_paper_portfolios.id"), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    fee_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    slippage_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class EquityPaperPositionRecord(Base):
+    __tablename__ = "equity_paper_positions"
+    __table_args__ = (
+        Index("ix_equity_positions_symbol", "symbol"),
+        Index("ix_equity_positions_status", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    portfolio_id: Mapped[str] = mapped_column(ForeignKey("equity_paper_portfolios.id"), nullable=False)
+    signal_id: Mapped[str | None] = mapped_column(String(64))
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    avg_entry_px: Mapped[float] = mapped_column(Float, nullable=False)
+    mark_px: Mapped[float | None] = mapped_column(Float)
+    stop_px: Mapped[float | None] = mapped_column(Float)
+    take_profit_px: Mapped[float | None] = mapped_column(Float)
+    realized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    unrealized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class EquityPortfolioSnapshotRecord(TimestampMixin, Base):
+    __tablename__ = "equity_portfolio_snapshots"
+    __table_args__ = (Index("ix_equity_snapshots_portfolio_ts", "portfolio_id", "timestamp_ms"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    portfolio_id: Mapped[str] = mapped_column(ForeignKey("equity_paper_portfolios.id"), nullable=False)
+    timestamp_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cash_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    equity_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    gross_exposure_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    net_exposure_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    realized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    unrealized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    total_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class EquityOptionsFlowEventRecord(TimestampMixin, Base):
+    __tablename__ = "equity_options_flow_events"
+    __table_args__ = (Index("ix_equity_flow_symbol_detected", "symbol", "detected_at"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    flow_type: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    volume_oi_ratio: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    premium_estimate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    is_sweep: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    cluster_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    urgency_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    contract_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    enrichment_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+
 class TuningProposalRecord(TimestampMixin, Base):
     __tablename__ = "tuning_proposals"
     __table_args__ = (

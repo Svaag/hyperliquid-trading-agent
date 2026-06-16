@@ -23,6 +23,7 @@ dependencies = [
     "websockets>=14.0",
     "hyperliquid-python-sdk>=0.15.0",
     "langgraph>=1.2.5,<2.0.0",
+    "alpaca-py>=0.40.0",
 ]
 
 [project.optional-dependencies]
