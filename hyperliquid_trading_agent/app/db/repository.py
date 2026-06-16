@@ -18,6 +18,12 @@ from hyperliquid_trading_agent.app.db.models import (
     DecisionRoleOutput,
     DecisionRun,
     DecisionStateSnapshot,
+    EquityOptionsFlowEventRecord,
+    EquityPaperFillRecord,
+    EquityPaperOrderRecord,
+    EquityPaperPortfolioRecord,
+    EquityPaperPositionRecord,
+    EquityPortfolioSnapshotRecord,
     MarketAssetRecord,
     MarketLevelRecord,
     MarketObservation,
@@ -1331,6 +1337,203 @@ class Repository:
             result = await session.execute(stmt)
             return [_portfolio_snapshot_to_dict(item) for item in result.scalars().all()]
 
+    # --- TradFi / equity paper portfolio --------------------------------------
+
+    async def create_or_get_equity_paper_portfolio(self, name: str, initial_equity_usd: float, mode: str = "equity_paper") -> dict[str, Any]:
+        if self.sessionmaker is None:
+            raise RuntimeError("repository disabled")
+        async with self.sessionmaker() as session:
+            result = await session.execute(select(EquityPaperPortfolioRecord).where(EquityPaperPortfolioRecord.name == name))
+            item = result.scalar_one_or_none()
+            if item is None:
+                item = EquityPaperPortfolioRecord(
+                    name=name,
+                    status="active",
+                    initial_equity_usd=initial_equity_usd,
+                    cash_usd=initial_equity_usd,
+                    realized_pnl_usd=0.0,
+                    metadata_json={"mode": mode, "asset_class": "equity"},
+                    updated_at=datetime.now(UTC),
+                )
+                session.add(item)
+                await session.flush()
+            await session.commit()
+            return _equity_paper_portfolio_to_dict(item)
+
+    async def upsert_equity_paper_portfolio(self, portfolio: dict[str, Any]) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            item = await session.get(EquityPaperPortfolioRecord, str(portfolio["id"]))
+            if item is None:
+                item = EquityPaperPortfolioRecord(
+                    id=str(portfolio["id"]),
+                    name=str(portfolio.get("name") or "equity_paper"),
+                    status=str(portfolio.get("status") or "active"),
+                    initial_equity_usd=float(portfolio.get("initial_equity_usd") or 0),
+                    cash_usd=float(portfolio.get("cash_usd") or 0),
+                    realized_pnl_usd=float(portfolio.get("realized_pnl_usd") or 0),
+                    metadata_json=redact_secrets(dict(portfolio.get("metadata") or {})),
+                    updated_at=datetime.now(UTC),
+                )
+                session.add(item)
+            else:
+                item.status = str(portfolio.get("status") or item.status)
+                item.cash_usd = float(portfolio.get("cash_usd") or item.cash_usd)
+                item.realized_pnl_usd = float(portfolio.get("realized_pnl_usd") or item.realized_pnl_usd)
+                item.metadata_json = redact_secrets(dict(portfolio.get("metadata") or item.metadata_json or {}))
+                item.updated_at = datetime.now(UTC)
+            await session.commit()
+
+    async def create_equity_paper_order(self, order: dict[str, Any]) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            item = await session.get(EquityPaperOrderRecord, str(order["id"]))
+            if item is None:
+                item = EquityPaperOrderRecord(
+                    id=str(order["id"]),
+                    portfolio_id=str(order["portfolio_id"]),
+                    signal_id=order.get("signal_id"),
+                    symbol=str(order.get("symbol") or "").upper(),
+                    side=str(order.get("side") or "long"),
+                    order_type=str(order.get("order_type") or "market"),
+                    status=str(order.get("status") or "pending"),
+                    quantity=float(order.get("quantity") or 0),
+                    fee_bps=float(order.get("fee_bps") or 0),
+                    slippage_bps=float(order.get("slippage_bps") or 0),
+                )
+                session.add(item)
+            item.status = str(order.get("status") or item.status)
+            item.requested_px = order.get("requested_px")
+            item.filled_px = order.get("filled_px")
+            item.stop_px = order.get("stop_px")
+            item.take_profit_px = order.get("take_profit_px")
+            item.filled_at = _datetime_from_optional_iso(order.get("filled_at"))
+            item.cancelled_at = _datetime_from_optional_iso(order.get("cancelled_at"))
+            item.metadata_json = redact_secrets(dict(order.get("metadata") or {}))
+            await session.commit()
+
+    async def record_equity_paper_fill(self, fill: dict[str, Any]) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            existing = await session.get(EquityPaperFillRecord, str(fill["id"]))
+            if existing is None:
+                session.add(
+                    EquityPaperFillRecord(
+                        id=str(fill["id"]),
+                        order_id=str(fill["order_id"]),
+                        portfolio_id=str(fill["portfolio_id"]),
+                        symbol=str(fill.get("symbol") or "").upper(),
+                        side=str(fill.get("side") or "long"),
+                        quantity=float(fill.get("quantity") or 0),
+                        price=float(fill.get("price") or 0),
+                        fee_usd=float(fill.get("fee_usd") or 0),
+                        slippage_usd=float(fill.get("slippage_usd") or 0),
+                        metadata_json=redact_secrets(dict(fill.get("metadata") or {})),
+                    )
+                )
+                await session.commit()
+
+    async def upsert_equity_paper_position(self, position: dict[str, Any]) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            item = await session.get(EquityPaperPositionRecord, str(position["id"]))
+            if item is None:
+                item = EquityPaperPositionRecord(
+                    id=str(position["id"]),
+                    portfolio_id=str(position["portfolio_id"]),
+                    signal_id=position.get("signal_id"),
+                    symbol=str(position.get("symbol") or "").upper(),
+                    side=str(position.get("side") or "long"),
+                    status=str(position.get("status") or "open"),
+                    quantity=float(position.get("quantity") or 0),
+                    avg_entry_px=float(position.get("avg_entry_px") or 0),
+                    opened_at=_datetime_from_optional_iso(position.get("opened_at")) or datetime.now(UTC),
+                )
+                session.add(item)
+            item.status = str(position.get("status") or item.status)
+            item.mark_px = position.get("mark_px")
+            item.stop_px = position.get("stop_px")
+            item.take_profit_px = position.get("take_profit_px")
+            item.realized_pnl_usd = float(position.get("realized_pnl_usd") or 0)
+            item.unrealized_pnl_usd = float(position.get("unrealized_pnl_usd") or 0)
+            item.closed_at = _datetime_from_optional_iso(position.get("closed_at"))
+            item.metadata_json = redact_secrets(dict(position.get("metadata") or {}))
+            await session.commit()
+
+    async def record_equity_portfolio_snapshot(self, snapshot: dict[str, Any]) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            existing = await session.get(EquityPortfolioSnapshotRecord, str(snapshot["id"]))
+            if existing is None:
+                session.add(
+                    EquityPortfolioSnapshotRecord(
+                        id=str(snapshot["id"]),
+                        portfolio_id=str(snapshot["portfolio_id"]),
+                        timestamp_ms=int(snapshot.get("timestamp_ms") or 0),
+                        cash_usd=float(snapshot.get("cash_usd") or 0),
+                        equity_usd=float(snapshot.get("equity_usd") or 0),
+                        gross_exposure_usd=float(snapshot.get("gross_exposure_usd") or 0),
+                        net_exposure_usd=float(snapshot.get("net_exposure_usd") or 0),
+                        realized_pnl_usd=float(snapshot.get("realized_pnl_usd") or 0),
+                        unrealized_pnl_usd=float(snapshot.get("unrealized_pnl_usd") or 0),
+                        total_pnl_usd=float(snapshot.get("total_pnl_usd") or 0),
+                        metrics_json=redact_secrets(dict(snapshot.get("metrics") or {})),
+                    )
+                )
+                await session.commit()
+
+    async def list_equity_paper_positions(self, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(EquityPaperPositionRecord).limit(limit)
+            if status:
+                stmt = stmt.where(EquityPaperPositionRecord.status == status)
+            result = await session.execute(stmt)
+            return [_equity_paper_position_to_dict(item) for item in result.scalars().all()]
+
+    async def list_equity_paper_orders(self, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            result = await session.execute(select(EquityPaperOrderRecord).order_by(EquityPaperOrderRecord.created_at.desc()).limit(limit))
+            return [_equity_paper_order_to_dict(item) for item in result.scalars().all()]
+
+    async def list_equity_paper_fills(self, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            result = await session.execute(select(EquityPaperFillRecord).order_by(EquityPaperFillRecord.created_at.desc()).limit(limit))
+            return [_equity_paper_fill_to_dict(item) for item in result.scalars().all()]
+
+    async def record_equity_options_flow_event(self, event: dict[str, Any]) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            existing = await session.get(EquityOptionsFlowEventRecord, str(event["id"]))
+            if existing is None:
+                session.add(
+                    EquityOptionsFlowEventRecord(
+                        id=str(event["id"]),
+                        symbol=str(event.get("symbol") or "").upper(),
+                        detected_at=_datetime_from_optional_iso(event.get("detected_at")) or datetime.now(UTC),
+                        flow_type=str(event.get("flow_type") or "unknown"),
+                        volume_oi_ratio=float(event.get("volume_oi_ratio") or 0),
+                        premium_estimate=float(event.get("premium_estimate") or 0),
+                        is_sweep=bool(event.get("is_sweep") or False),
+                        cluster_score=float(event.get("cluster_score") or 0),
+                        urgency_score=float(event.get("urgency_score") or 0),
+                        contract_json=redact_secrets(dict(event.get("contract") or {})),
+                        enrichment_json=redact_secrets(dict(event.get("enrichment") or {})),
+                    )
+                )
+                await session.commit()
+
     async def _tracker_to_dict(self, session: AsyncSession, tracker: PositionTracker) -> dict[str, Any]:
         levels_result = await session.execute(select(TrackedLevel).where(TrackedLevel.tracker_id == tracker.id).order_by(TrackedLevel.created_at.asc()))
         events_result = await session.execute(select(TrackingEvent).where(TrackingEvent.tracker_id == tracker.id).order_by(TrackingEvent.created_at.desc()).limit(20))
@@ -1532,6 +1735,18 @@ def _datetime_from_optional_ms(value: Any) -> datetime | None:
     try:
         return _datetime_from_ms(int(value))
     except (TypeError, ValueError, OSError):
+        return None
+
+
+def _datetime_from_optional_iso(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    except (TypeError, ValueError):
         return None
 
 
@@ -1748,6 +1963,80 @@ def _portfolio_snapshot_to_dict(item: PortfolioSnapshotRecord) -> dict[str, Any]
         "sharpe": item.sharpe,
         "metrics": item.metrics_json,
         "created_at": item.created_at.isoformat() if item.created_at else None,
+    }
+
+
+def _equity_paper_portfolio_to_dict(item: EquityPaperPortfolioRecord) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "name": item.name,
+        "status": item.status,
+        "initial_equity_usd": item.initial_equity_usd,
+        "cash_usd": item.cash_usd,
+        "realized_pnl_usd": item.realized_pnl_usd,
+        "metadata": item.metadata_json,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+    }
+
+
+def _equity_paper_order_to_dict(item: EquityPaperOrderRecord) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "portfolio_id": item.portfolio_id,
+        "signal_id": item.signal_id,
+        "symbol": item.symbol,
+        "side": item.side,
+        "order_type": item.order_type,
+        "status": item.status,
+        "quantity": item.quantity,
+        "requested_px": item.requested_px,
+        "filled_px": item.filled_px,
+        "stop_px": item.stop_px,
+        "take_profit_px": item.take_profit_px,
+        "fee_bps": item.fee_bps,
+        "slippage_bps": item.slippage_bps,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "filled_at": item.filled_at.isoformat() if item.filled_at else None,
+        "cancelled_at": item.cancelled_at.isoformat() if item.cancelled_at else None,
+        "metadata": item.metadata_json,
+    }
+
+
+def _equity_paper_fill_to_dict(item: EquityPaperFillRecord) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "order_id": item.order_id,
+        "portfolio_id": item.portfolio_id,
+        "symbol": item.symbol,
+        "side": item.side,
+        "quantity": item.quantity,
+        "price": item.price,
+        "fee_usd": item.fee_usd,
+        "slippage_usd": item.slippage_usd,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "metadata": item.metadata_json,
+    }
+
+
+def _equity_paper_position_to_dict(item: EquityPaperPositionRecord) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "portfolio_id": item.portfolio_id,
+        "signal_id": item.signal_id,
+        "symbol": item.symbol,
+        "side": item.side,
+        "status": item.status,
+        "quantity": item.quantity,
+        "avg_entry_px": item.avg_entry_px,
+        "mark_px": item.mark_px,
+        "stop_px": item.stop_px,
+        "take_profit_px": item.take_profit_px,
+        "realized_pnl_usd": item.realized_pnl_usd,
+        "unrealized_pnl_usd": item.unrealized_pnl_usd,
+        "opened_at": item.opened_at.isoformat() if item.opened_at else None,
+        "closed_at": item.closed_at.isoformat() if item.closed_at else None,
+        "metadata": item.metadata_json,
     }
 
 

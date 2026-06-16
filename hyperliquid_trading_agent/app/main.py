@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import time
 from contextlib import asynccontextmanager
+from datetime import date, timedelta
 from typing import Any, cast
 from uuid import uuid4
 
 import uvicorn
+from alpaca.data.enums import DataFeed
 from fastapi import FastAPI, Header, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
@@ -20,6 +22,7 @@ from hyperliquid_trading_agent.app.agent.model_gateway import ModelGateway
 from hyperliquid_trading_agent.app.agent.runner import AgentContext, TradingAgentRunner
 from hyperliquid_trading_agent.app.agent.tools import AgentTools
 from hyperliquid_trading_agent.app.autonomy.discord import DiscordAutonomyAlertSink
+from hyperliquid_trading_agent.app.autonomy.equity_features import EquitySignalGenerator
 from hyperliquid_trading_agent.app.autonomy.evaluation import SignalEvaluationService
 from hyperliquid_trading_agent.app.autonomy.memory import MemoryService
 from hyperliquid_trading_agent.app.autonomy.reports import AutonomyReportService
@@ -43,6 +46,10 @@ from hyperliquid_trading_agent.app.newswire.gateway import register_newswire_rou
 from hyperliquid_trading_agent.app.newswire.service import NewswireService
 from hyperliquid_trading_agent.app.tracking.alerts import DiscordAlertSink
 from hyperliquid_trading_agent.app.tracking.service import PositionTrackingService
+from hyperliquid_trading_agent.app.tradfi.alpaca_provider import AlpacaTradFiProvider
+from hyperliquid_trading_agent.app.tradfi.client import TradFiClient
+from hyperliquid_trading_agent.app.tradfi.options_flow import FlowEnricher, OptionsFlowDetector
+from hyperliquid_trading_agent.app.tradfi.paper.simulator import EquityPaperSimulator
 
 log = get_logger(__name__)
 
@@ -93,8 +100,63 @@ async def lifespan(app: FastAPI):
     hyperliquid = HyperliquidClient(settings=settings)
     sdk_info = None if settings.high_stakes_info_provider == "rest_only" else SDKInfoClient(settings=settings)
     news = NewsService(settings=settings, repository=repository)
-    tools = AgentTools(hyperliquid=hyperliquid, news=news, repository=repository)
     model_gateway = ModelGateway(settings=settings)
+
+    tradfi_client: TradFiClient | None = None
+    options_flow_detector: OptionsFlowDetector | None = None
+    flow_enricher: FlowEnricher | None = None
+    equity_paper: EquityPaperSimulator | None = None
+    equity_signal_generator: EquitySignalGenerator | None = None
+    if settings.tradfi_enabled:
+        if settings.alpaca_api_key and settings.alpaca_api_secret:
+            try:
+                provider = AlpacaTradFiProvider(
+                    api_key=settings.alpaca_api_key,
+                    api_secret=settings.alpaca_api_secret,
+                    feed=DataFeed(settings.alpaca_data_feed),
+                )
+                tradfi_client = TradFiClient(provider)
+                await tradfi_client.start()
+                log.info("tradfi_client_started", provider=provider.name, feed=settings.alpaca_data_feed)
+            except Exception as exc:
+                log.warning("tradfi_client_start_failed", error=type(exc).__name__)
+        else:
+            log.warning("tradfi_disabled_missing_alpaca_keys")
+    if tradfi_client is not None:
+        options_flow_detector = OptionsFlowDetector(
+            min_volume_oi_ratio=settings.options_flow_min_volume_oi_ratio,
+            min_premium=settings.options_flow_min_premium,
+        )
+        if settings.options_flow_llm_enrich_enabled:
+            flow_enricher = FlowEnricher(
+                model_gateway=model_gateway,
+                max_calls_per_hour=settings.options_flow_llm_enrich_max_calls_per_hour,
+            )
+        equity_paper = EquityPaperSimulator(
+            initial_equity_usd=settings.autonomy_equity_paper_initial_equity_usd,
+            risk_pct_per_trade=settings.autonomy_equity_paper_risk_pct_per_trade,
+            max_gross_leverage=settings.autonomy_equity_paper_max_gross_leverage,
+            max_single_name_exposure_pct=settings.autonomy_equity_paper_max_single_name_exposure_pct,
+            taker_fee_bps=settings.autonomy_equity_paper_taker_fee_bps,
+            maker_fee_bps=settings.autonomy_equity_paper_maker_fee_bps,
+            default_slippage_bps=settings.autonomy_equity_paper_default_slippage_bps,
+            tradfi_client=tradfi_client,
+            repository=repository,
+        )
+        equity_signal_generator = EquitySignalGenerator(
+            min_signal_score=settings.autonomy_equity_min_signal_score,
+            max_signals_per_day=settings.autonomy_equity_max_signals_per_day,
+            signal_ttl_minutes=settings.autonomy_equity_signal_ttl_minutes,
+            flow_detector=options_flow_detector,
+        )
+
+    tools = AgentTools(
+        hyperliquid=hyperliquid,
+        news=news,
+        repository=repository,
+        tradfi=tradfi_client,
+        options_flow=options_flow_detector,
+    )
     memory_service = MemoryService(settings=settings, repository=repository)
     evaluation_service = SignalEvaluationService(settings=settings, repository=repository, memory_service=memory_service)
     tuning_service = TuningProposalService(settings=settings, repository=repository, memory_service=memory_service)
@@ -120,6 +182,11 @@ async def lifespan(app: FastAPI):
         memory_service=memory_service,
         report_service=report_service,
         tuning_service=tuning_service,
+        tradfi=tradfi_client,
+        equity_portfolio=equity_paper,
+        equity_signal_generator=equity_signal_generator,
+        options_flow=options_flow_detector,
+        flow_enricher=flow_enricher,
     )
     report_service.portfolio_service = autonomy_service.portfolio
     high_stakes_graph = HighStakesDebateGraph(
@@ -162,6 +229,11 @@ async def lifespan(app: FastAPI):
     app.state.report_service = report_service
     app.state.tuning_service = tuning_service
     app.state.newswire_service = newswire_service
+    app.state.tradfi_client = tradfi_client
+    app.state.options_flow_detector = options_flow_detector
+    app.state.flow_enricher = flow_enricher
+    app.state.equity_paper = equity_paper
+    app.state.equity_signal_generator = equity_signal_generator
 
     bot_task: asyncio.Task | None = None
     ws_task: asyncio.Task | None = None
@@ -201,6 +273,8 @@ async def lifespan(app: FastAPI):
         await ws_worker.stop()
         if sdk_info is not None:
             await sdk_info.close()
+        if tradfi_client is not None:
+            await tradfi_client.close()
         await hyperliquid.close()
         await engine.dispose()
         for task in [bot_task, autonomy_task, tracking_task, ws_task]:
@@ -255,6 +329,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ready_checks["autonomy"] = "degraded:learning_loop"
             else:
                 ready_checks["autonomy"] = "ok"
+        if settings.tradfi_enabled:
+            if settings.tradfi_config_warnings():
+                ready_checks["tradfi"] = "degraded:config"
+            elif getattr(app.state, "tradfi_client", None) is None:
+                ready_checks["tradfi"] = "degraded:client_unavailable"
+            else:
+                ready_checks["tradfi"] = "ok"
         return {"status": "ready", "checks": ready_checks}
 
     @app.get("/health/config")
@@ -269,6 +350,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "models": [{"model": item.model, "provider": item.provider, "missing": item.missing_reason} for item in attempts],
             "position_tracking": _tracking_config_status(app),
             "autonomy": _autonomy_config_status(app),
+            "tradfi": _tradfi_config_status(app),
             "high_stakes": {
                 "enabled": settings.high_stakes_debate_enabled,
                 "activation_policy": settings.high_stakes_activation_policy,
@@ -562,6 +644,171 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def autonomy_fills(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
         fills = list(app.state.autonomy_service.portfolio.fills.values())
+        return {"items": [item.model_dump(mode="json") for item in fills], "count": len(fills)}
+
+    @app.get("/tradfi/status")
+    async def tradfi_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        return _tradfi_config_status(app)
+
+    @app.get("/tradfi/quote/{symbol}")
+    async def tradfi_quote(symbol: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        client = _require_tradfi_client(app)
+        quote = await client.get_latest_quote(symbol)
+        trade = await client.get_latest_trade(symbol)
+        return {
+            "symbol": symbol.upper(),
+            "quote": quote.model_dump(mode="json") if quote else None,
+            "latest_trade": trade.model_dump(mode="json") if trade else None,
+        }
+
+    @app.get("/tradfi/snapshots")
+    async def tradfi_snapshots(symbols: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        client = _require_tradfi_client(app)
+        symbol_list = [item.strip().upper() for item in symbols.split(",") if item.strip()]
+        if not symbol_list:
+            raise HTTPException(status_code=400, detail="symbols query parameter is required")
+        snaps = await client.get_snapshots(symbol_list[:50])
+        return {"items": {sym: snap.model_dump(mode="json") for sym, snap in snaps.items()}, "count": len(snaps)}
+
+    @app.get("/tradfi/bars/{symbol}")
+    async def tradfi_bars(
+        symbol: str,
+        timeframe: str = "1d",
+        lookback_hours: int = 120,
+        limit: int | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        client = _require_tradfi_client(app)
+        bars = await client.get_bars(symbol, timeframe=timeframe, lookback_hours=lookback_hours, limit=limit)
+        return {"symbol": symbol.upper(), "timeframe": timeframe, "items": [bar.model_dump(mode="json") for bar in bars], "count": len(bars)}
+
+    @app.get("/tradfi/corporate-actions/{symbol}")
+    async def tradfi_corporate_actions(
+        symbol: str,
+        start: str | None = None,
+        end: str | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        client = _require_tradfi_client(app)
+        actions = await client.get_corporate_actions([symbol], start=_parse_optional_date(start), end=_parse_optional_date(end))
+        items = actions.get(symbol.upper(), [])
+        return {"symbol": symbol.upper(), "items": [item.model_dump(mode="json") for item in items], "count": len(items)}
+
+    @app.get("/tradfi/calendar")
+    async def tradfi_calendar(
+        start: str | None = None,
+        end: str | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        client = _require_tradfi_client(app)
+        start_date = _parse_optional_date(start) or date.today()
+        end_date = _parse_optional_date(end) or (start_date + timedelta(days=30))
+        events = await client.get_calendar(start_date, end_date)
+        return {"items": [event.model_dump(mode="json") for event in events], "count": len(events)}
+
+    @app.get("/tradfi/options/{symbol}/chain")
+    async def tradfi_options_chain(
+        symbol: str,
+        expiration: str | None = None,
+        strike_min: float | None = None,
+        strike_max: float | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        client = _require_tradfi_client(app)
+        chain = await client.get_options_chain(symbol, expiration=_parse_optional_date(expiration), strike_min=strike_min, strike_max=strike_max)
+        return chain.model_dump(mode="json")
+
+    @app.get("/tradfi/options/{symbol}/flow")
+    async def tradfi_options_flow(symbol: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        client = _require_tradfi_client(app)
+        detector = getattr(app.state, "options_flow_detector", None)
+        if detector is None:
+            raise HTTPException(status_code=409, detail="options flow detector is not configured")
+        chain = await client.get_options_chain(symbol)
+        events = detector.detect(chain)
+        enricher = getattr(app.state, "flow_enricher", None)
+        if enricher is not None:
+            for event in events[:3]:
+                enrichment = await enricher.maybe_enrich(event)
+                if enrichment:
+                    event.enrichment = enrichment
+        return {
+            "symbol": symbol.upper(),
+            "underlying_price": chain.underlying_price,
+            "contracts_scanned": len(chain.contracts),
+            "items": [event.model_dump(mode="json") for event in events],
+            "count": len(events),
+        }
+
+    @app.get("/autonomy/equity/signals")
+    async def autonomy_equity_signals(status: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = [item.model_dump(mode="json") for item in app.state.autonomy_service.list_equity_signals(status=status)]
+        return {"items": items, "count": len(items)}
+
+    @app.post("/autonomy/equity/signals/{signal_id}/approve")
+    async def approve_autonomy_equity_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        try:
+            return await app.state.autonomy_service.approve_equity_signal(signal_id, actor=(request.actor if request else "api"))
+        except KeyError:
+            raise HTTPException(status_code=404, detail="equity signal not found") from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    @app.post("/autonomy/equity/signals/{signal_id}/reject")
+    async def reject_autonomy_equity_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        try:
+            signal = await app.state.autonomy_service.reject_equity_signal(signal_id, actor=(request.actor if request else "api"), reason=(request.reason if request else "api"))
+        except KeyError:
+            raise HTTPException(status_code=404, detail="equity signal not found") from None
+        return signal.model_dump(mode="json")
+
+    @app.get("/autonomy/equity/portfolio")
+    async def autonomy_equity_portfolio(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        equity_paper = getattr(app.state.autonomy_service, "equity_portfolio", None)
+        if equity_paper is None:
+            raise HTTPException(status_code=409, detail="equity paper portfolio is not configured")
+        latest = equity_paper.snapshots[-1] if equity_paper.snapshots else equity_paper.snapshot()
+        return {"portfolio": equity_paper.portfolio.model_dump(mode="json"), "latest_snapshot": latest.model_dump(mode="json")}
+
+    @app.get("/autonomy/equity/positions")
+    async def autonomy_equity_positions(status: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        equity_paper = getattr(app.state.autonomy_service, "equity_portfolio", None)
+        if equity_paper is None:
+            raise HTTPException(status_code=409, detail="equity paper portfolio is not configured")
+        positions = list(equity_paper.positions.values())
+        if status:
+            positions = [item for item in positions if item.status == status]
+        return {"items": [item.model_dump(mode="json") for item in positions], "count": len(positions)}
+
+    @app.get("/autonomy/equity/orders")
+    async def autonomy_equity_orders(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        equity_paper = getattr(app.state.autonomy_service, "equity_portfolio", None)
+        if equity_paper is None:
+            raise HTTPException(status_code=409, detail="equity paper portfolio is not configured")
+        orders = list(equity_paper.orders.values())
+        return {"items": [item.model_dump(mode="json") for item in orders], "count": len(orders)}
+
+    @app.get("/autonomy/equity/fills")
+    async def autonomy_equity_fills(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        equity_paper = getattr(app.state.autonomy_service, "equity_portfolio", None)
+        if equity_paper is None:
+            raise HTTPException(status_code=409, detail="equity paper portfolio is not configured")
+        fills = list(equity_paper.fills.values())
         return {"items": [item.model_dump(mode="json") for item in fills], "count": len(fills)}
 
     @app.get("/autonomy/news")
@@ -906,6 +1153,39 @@ def _autonomy_config_status(app: FastAPI) -> dict[str, Any]:
     }
 
 
+def _tradfi_config_status(app: FastAPI) -> dict[str, Any]:
+    settings: Settings = app.state.settings
+    tradfi_client = getattr(app.state, "tradfi_client", None)
+    equity_paper = getattr(app.state, "equity_paper", None)
+    return {
+        "enabled": settings.tradfi_enabled,
+        "provider": "alpaca",
+        "data_feed": settings.alpaca_data_feed,
+        "client": tradfi_client.status() if tradfi_client is not None else {},
+        "alpaca_news_enabled": settings.alpaca_news_enabled,
+        "alpaca_trading_enabled": settings.alpaca_trading_enabled,
+        "paper_only": True,
+        "live_trading_enabled": False,
+        "equity_autonomy": {
+            "enabled": settings.autonomy_equity_enabled,
+            "effective_enabled": settings.autonomy_equity_effective_enabled,
+            "universe": settings.autonomy_equity_symbols,
+            "max_signals_per_day": settings.autonomy_equity_max_signals_per_day,
+            "min_signal_score": settings.autonomy_equity_min_signal_score,
+        },
+        "equity_paper": equity_paper.status() if equity_paper is not None else {},
+        "options_flow": {
+            "enabled": settings.options_flow_enabled,
+            "effective_enabled": settings.options_flow_effective_enabled,
+            "min_volume_oi_ratio": settings.options_flow_min_volume_oi_ratio,
+            "min_premium": settings.options_flow_min_premium,
+            "llm_enrich_enabled": settings.options_flow_llm_enrich_enabled,
+            "llm_max_calls_per_hour": settings.options_flow_llm_enrich_max_calls_per_hour,
+        },
+        "warnings": settings.tradfi_config_warnings(),
+    }
+
+
 def _tracking_config_status(app: FastAPI) -> dict[str, Any]:
     settings: Settings = app.state.settings
     tracking_service = getattr(app.state, "tracking_service", None)
@@ -935,6 +1215,22 @@ async def _set_tracker_status(app: FastAPI, settings: Settings, tracker_id: str,
     await tracking_service.reload_active_trackers()
     updated = await repository.get_position_tracker(tracker_id)
     return {"status": status, "tracker": updated}
+
+
+def _require_tradfi_client(app: FastAPI) -> TradFiClient:
+    client = getattr(app.state, "tradfi_client", None)
+    if client is None:
+        raise HTTPException(status_code=409, detail="TradFi client is not configured")
+    return cast(TradFiClient, client)
+
+
+def _parse_optional_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid ISO date: {value}") from None
 
 
 def _require_agent_api(settings: Settings, authorization: str | None) -> None:

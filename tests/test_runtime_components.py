@@ -44,6 +44,8 @@ class FakeHttpClient:
 
 
 class FakeTools:
+    tradfi = None
+
     async def get_market_snapshot(self, coins, intervals=None, include_l2=False):
         return ToolResult(
             tool="get_market_snapshot",
