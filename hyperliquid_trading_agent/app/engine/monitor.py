@@ -34,6 +34,7 @@ class EngineValidationMonitorService:
         self.engine_service = engine_service
         self.alert_sink = alert_sink
         self._task: asyncio.Task | None = None
+        self.started_at_ms = _now_ms()
         self.last_digest_at_ms: int | None = None
         self.last_error: str | None = None
         self.digest_count = 0
@@ -88,8 +89,8 @@ class EngineValidationMonitorService:
         return {"report": report, "alerts": alerts, "message": message}
 
     async def _run(self) -> None:
-        # Send once shortly after startup so operators can confirm shadow posture.
-        await asyncio.sleep(5)
+        # Send once after the engine has had time to complete at least one loop.
+        await asyncio.sleep(max(15, min(60, self.settings.autonomy_loop_interval_seconds * 2)))
         while True:
             try:
                 await self.run_once(post=True)
@@ -120,13 +121,14 @@ class EngineValidationMonitorService:
         last_run_at = service_status.get("last_run_at_ms")
         stale_after_ms = max(1, self.settings.engine_validation_alert_stale_loop_seconds) * 1000
         if self.settings.engine_enabled and (not last_run_at or now - int(last_run_at) > stale_after_ms):
-            alerts.append(
-                {
-                    "type": "engine_loop_stale",
-                    "severity": "critical",
-                    "detail": f"last_run_at_ms={last_run_at}; stale_after_ms={stale_after_ms}",
-                }
-            )
+            if last_run_at or now - self.started_at_ms > stale_after_ms:
+                alerts.append(
+                    {
+                        "type": "engine_loop_stale",
+                        "severity": "critical",
+                        "detail": f"last_run_at_ms={last_run_at}; stale_after_ms={stale_after_ms}",
+                    }
+                )
         if service_status.get("last_error"):
             alerts.append({"type": "engine_loop_error", "severity": "critical", "detail": str(service_status.get("last_error"))})
 
