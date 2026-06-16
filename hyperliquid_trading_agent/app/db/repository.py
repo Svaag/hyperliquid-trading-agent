@@ -48,6 +48,7 @@ from hyperliquid_trading_agent.app.db.models import (
     PositionTracker,
     PromotionDecisionRecord,
     PromptVersionRecord,
+    ReplayResultRecord,
     ReviewPacketRecord,
     RiskGatewayDecisionRecord,
     RoleLessonRecord,
@@ -1429,6 +1430,46 @@ class Repository:
             await session.commit()
             return item.decision_id
 
+    async def record_replay_result(self, result: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = ReplayResultRecord(
+                replay_id=str(result["replay_id"]),
+                proposal_id=result.get("proposal_id"),
+                decision_id=result.get("decision_id"),
+                status=str(result.get("status") or "audit_only"),
+                baseline_metrics_json=redact_secrets(dict(result.get("baseline_metrics") or {})),
+                candidate_metrics_json=redact_secrets(dict(result.get("candidate_metrics") or {})),
+                diffs_json=redact_secrets(dict(result.get("diffs") or {})),
+                caveats_json=[str(item) for item in result.get("caveats") or []],
+                created_at_ms=int(result.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(result.get("metadata") or {})),
+            )
+            session.add(item)
+            await session.commit()
+            return item.replay_id
+
+    async def list_replay_results(self, proposal_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(ReplayResultRecord).order_by(ReplayResultRecord.created_at_ms.desc()).limit(limit)
+            if proposal_id:
+                stmt = stmt.where(ReplayResultRecord.proposal_id == proposal_id)
+            result = await session.execute(stmt)
+            return [_replay_result_to_dict(item) for item in result.scalars().all()]
+
+    async def list_shadow_comparisons(self, proposal_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(ShadowComparisonRecord).order_by(ShadowComparisonRecord.created_at_ms.desc()).limit(limit)
+            if proposal_id:
+                stmt = stmt.where(ShadowComparisonRecord.proposal_id == proposal_id)
+            result = await session.execute(stmt)
+            return [_shadow_comparison_to_dict(item) for item in result.scalars().all()]
+
     async def record_shadow_comparison(self, result: dict[str, Any]) -> str | None:
         if self.sessionmaker is None:
             return None
@@ -2802,6 +2843,35 @@ def _operator_feedback_to_dict(item: OperatorFeedbackRecord) -> dict[str, Any]:
         "target_id": item.target_id,
         "rating": item.rating,
         "note": item.note,
+        "created_at_ms": item.created_at_ms,
+        "metadata": item.metadata_json,
+    }
+
+
+def _replay_result_to_dict(item: ReplayResultRecord) -> dict[str, Any]:
+    return {
+        "replay_id": item.replay_id,
+        "proposal_id": item.proposal_id,
+        "decision_id": item.decision_id,
+        "status": item.status,
+        "baseline_metrics": item.baseline_metrics_json,
+        "candidate_metrics": item.candidate_metrics_json,
+        "diffs": item.diffs_json,
+        "caveats": item.caveats_json,
+        "created_at_ms": item.created_at_ms,
+        "metadata": item.metadata_json,
+    }
+
+
+def _shadow_comparison_to_dict(item: ShadowComparisonRecord) -> dict[str, Any]:
+    return {
+        "comparison_id": item.comparison_id,
+        "proposal_id": item.proposal_id,
+        "status": item.status,
+        "baseline_metrics": item.baseline_metrics_json,
+        "candidate_metrics": item.candidate_metrics_json,
+        "metric_deltas": item.metric_deltas_json,
+        "recommendation": item.recommendation,
         "created_at_ms": item.created_at_ms,
         "metadata": item.metadata_json,
     }

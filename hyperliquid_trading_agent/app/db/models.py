@@ -1082,6 +1082,26 @@ class PromotionDecisionRecord(TimestampMixin, Base):
     created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+class ReplayResultRecord(TimestampMixin, Base):
+    __tablename__ = "replay_results"
+    __table_args__ = (
+        Index("ix_replay_results_proposal", "proposal_id"),
+        Index("ix_replay_results_decision", "decision_id"),
+        Index("ix_replay_results_created_at_ms", "created_at_ms"),
+    )
+
+    replay_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    proposal_id: Mapped[str | None] = mapped_column(String(64))
+    decision_id: Mapped[str | None] = mapped_column(String(96))
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    baseline_metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    candidate_metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    diffs_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    caveats_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class ShadowComparisonRecord(TimestampMixin, Base):
     __tablename__ = "shadow_comparisons"
     __table_args__ = (

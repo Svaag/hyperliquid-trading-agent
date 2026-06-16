@@ -24,6 +24,14 @@ class ReviewWorkflowService:
         diff = await self._load_candidate_diff(proposal_id)
         if diff is None:
             raise KeyError("candidate config diff not found")
+        if not diff.get("evidence"):
+            raise PermissionError("review packet requires linked evidence")
+        replay_result = await self._latest_replay_result(proposal_id)
+        shadow_result = await self._latest_shadow_result(proposal_id)
+        if replay_result is None or shadow_result is None:
+            raise PermissionError("review packet requires replay and shadow evidence")
+        if replay_result.get("status") == "insufficient_data" or shadow_result.get("status") == "insufficient_data":
+            raise PermissionError("review packet requires sufficient replay and shadow evidence")
         rollback = await self.create_rollback_plan(
             target_type="config",
             target_id=proposal_id,
@@ -40,7 +48,9 @@ class ReviewWorkflowService:
             risk_direction=diff.get("risk_direction") or "unknown",
             expected_effect=str(diff.get("expected_effect") or ""),
             known_risks=list(diff.get("known_risks") or []),
-            approval_requirements=["human_approval", "rollback_plan", "same_actor_cannot_approve_own_change"],
+            replay_results=replay_result,
+            shadow_results=shadow_result,
+            approval_requirements=["human_approval", "rollback_plan", "replay_result", "shadow_result", "same_actor_cannot_approve_own_change"],
             rollback_plan_id=rollback.rollback_plan_id,
             created_at_ms=_now_ms(),
         )
@@ -49,6 +59,9 @@ class ReviewWorkflowService:
             record = getattr(self.repository, "upsert_review_packet", None)
             if callable(record):
                 await record(packet.model_dump(mode="json"))
+            set_status = getattr(self.repository, "set_candidate_config_diff_status", None)
+            if callable(set_status):
+                await set_status(proposal_id, "review_ready")
         return packet
 
     async def create_rollback_plan(
@@ -92,8 +105,12 @@ class ReviewWorkflowService:
         rollback_plan_id: str | None = None,
     ) -> PromotionDecision:
         if rollback_plan_id is None:
-            packet = await self.create_review_packet(proposal_id, owner=reviewer)
-            rollback_plan_id = packet.rollback_plan_id
+            if decision == "approved":
+                packet = await self.create_review_packet(proposal_id, owner=reviewer)
+                rollback_plan_id = packet.rollback_plan_id
+            else:
+                rollback = await self.create_rollback_plan(target_type="config", target_id=proposal_id, previous_version_id="no_change", owner=reviewer)
+                rollback_plan_id = rollback.rollback_plan_id
         promotion = PromotionDecision(
             decision_id=f"promote_{uuid4().hex}",
             proposal_id=proposal_id,
@@ -118,6 +135,24 @@ class ReviewWorkflowService:
             if callable(set_status):
                 await set_status(proposal_id, "approved" if decision == "approved" else decision)
         return promotion
+
+    async def _latest_replay_result(self, proposal_id: str) -> dict[str, Any] | None:
+        if not self._repo_enabled():
+            return None
+        list_replays = getattr(self.repository, "list_replay_results", None)
+        if callable(list_replays):
+            items = await list_replays(proposal_id=proposal_id, limit=1)
+            return items[0] if items else None
+        return None
+
+    async def _latest_shadow_result(self, proposal_id: str) -> dict[str, Any] | None:
+        if not self._repo_enabled():
+            return None
+        list_shadow = getattr(self.repository, "list_shadow_comparisons", None)
+        if callable(list_shadow):
+            items = await list_shadow(proposal_id=proposal_id, limit=1)
+            return items[0] if items else None
+        return None
 
     async def _load_candidate_diff(self, proposal_id: str) -> dict[str, Any] | None:
         if not self._repo_enabled():
