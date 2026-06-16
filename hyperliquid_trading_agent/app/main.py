@@ -34,6 +34,10 @@ from hyperliquid_trading_agent.app.config import Settings, load_settings
 from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.db.session import create_engine, create_sessionmaker
 from hyperliquid_trading_agent.app.discord_bot import DiscordTradingBot
+from hyperliquid_trading_agent.app.governance.decision_context import DecisionContextRecorder
+from hyperliquid_trading_agent.app.governance.review import ReviewWorkflowService
+from hyperliquid_trading_agent.app.governance.routes import register_governance_routes
+from hyperliquid_trading_agent.app.governance.shadow import ShadowComparisonService
 from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
 from hyperliquid_trading_agent.app.hyperliquid.sdk_info_client import SDKInfoClient
 from hyperliquid_trading_agent.app.hyperliquid.ws_worker import HyperliquidWebSocketWorker
@@ -100,10 +104,14 @@ async def lifespan(app: FastAPI):
     engine = create_engine(settings)
     sessionmaker = create_sessionmaker(engine)
     repository = Repository(sessionmaker)
+    decision_context_recorder = DecisionContextRecorder(settings=settings, repository=repository, code_version=__version__)
+    await decision_context_recorder.snapshot_startup()
     hyperliquid = HyperliquidClient(settings=settings)
     sdk_info = None if settings.high_stakes_info_provider == "rest_only" else SDKInfoClient(settings=settings)
     news = NewsService(settings=settings, repository=repository)
     model_gateway = ModelGateway(settings=settings)
+    shadow_service = ShadowComparisonService(repository=repository)
+    review_service = ReviewWorkflowService(repository=repository, shadow_service=shadow_service)
 
     tradfi_client: TradFiClient | None = None
     options_flow_detector: OptionsFlowDetector | None = None
@@ -193,6 +201,7 @@ async def lifespan(app: FastAPI):
         equity_signal_generator=equity_signal_generator,
         options_flow=options_flow_detector,
         flow_enricher=flow_enricher,
+        decision_context_recorder=decision_context_recorder,
     )
     report_service.portfolio_service = autonomy_service.portfolio
     report_service.equity_portfolio_service = equity_paper
@@ -202,6 +211,7 @@ async def lifespan(app: FastAPI):
         role_runner=high_stakes_roles,
         repository=repository,
         tracking_service=tracking_service,
+        decision_context_recorder=decision_context_recorder,
     )
     runner = TradingAgentRunner(
         tools=tools,
@@ -222,6 +232,7 @@ async def lifespan(app: FastAPI):
 
     app.state.engine = engine
     app.state.repository = repository
+    app.state.decision_context_recorder = decision_context_recorder
     app.state.hyperliquid = hyperliquid
     app.state.news = news
     app.state.sdk_info = sdk_info
@@ -236,6 +247,8 @@ async def lifespan(app: FastAPI):
     app.state.memory_service = memory_service
     app.state.report_service = report_service
     app.state.tuning_service = tuning_service
+    app.state.shadow_service = shadow_service
+    app.state.review_service = review_service
     app.state.newswire_service = newswire_service
     app.state.tradfi_client = tradfi_client
     app.state.options_flow_detector = options_flow_detector
@@ -299,6 +312,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging(settings.log_level)
     app = FastAPI(title="Hyperliquid Trading Agent", version=__version__, lifespan=lifespan)
     app.state.settings = settings
+
+    register_governance_routes(app, settings, _require_agent_api)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:

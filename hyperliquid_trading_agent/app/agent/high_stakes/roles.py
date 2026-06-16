@@ -131,7 +131,7 @@ class HighStakesRoleRunner:
         signal_type = parsed.get("signal_type") if isinstance(parsed, dict) else None
         market_regime = features.get("risk_regime") if isinstance(features, dict) else None
         try:
-            return await block(role, symbol=symbol, signal_type=signal_type, market_regime=market_regime, max_items=5)
+            return await block(role, symbol=symbol, signal_type=signal_type, market_regime=market_regime, max_items=5, run_id=state.get("run_id"))
         except Exception:
             return ""
 

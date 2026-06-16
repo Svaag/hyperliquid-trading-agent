@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from hyperliquid_trading_agent.app.autonomy.schemas import AlphaEventEvaluation, SignalEvaluation, TuningProposal
 from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.governance.schemas import CandidateConfigDiff
 from hyperliquid_trading_agent.app.metrics import TUNING_PROPOSALS_CREATED
 
 
@@ -99,7 +100,7 @@ class TuningProposalService:
         return None
 
     async def mark_reviewed(self, proposal_id: str) -> None:
-        await self.set_status(proposal_id, "accepted_manually")
+        await self.set_status(proposal_id, "reviewed_no_apply")
 
     async def reject(self, proposal_id: str) -> None:
         await self.set_status(proposal_id, "rejected")
@@ -116,6 +117,7 @@ class TuningProposalService:
             await self.repository.record_autonomy_event("tuning_proposal_status_changed", actor="autonomy_tuning", payload={"proposal_id": proposal_id, "status": status, "exchange_actions": []})
 
     async def _upsert_proposal(self, proposal: TuningProposal) -> TuningProposal:
+        proposal, diff = _proposal_with_candidate_diff(proposal)
         existing = self._find_existing(proposal)
         if existing is not None:
             return existing
@@ -123,7 +125,10 @@ class TuningProposalService:
         TUNING_PROPOSALS_CREATED.labels(proposal_type=proposal.proposal_type).inc()
         if self._repo_enabled():
             await self.repository.upsert_tuning_proposal(proposal.model_dump(mode="json"))
-            await self.repository.record_autonomy_event("tuning_proposal_created", actor="autonomy_tuning", symbol=proposal.affected_scope.get("symbol"), payload={"proposal_id": proposal.id, "proposal_type": proposal.proposal_type, "auto_apply_enabled": False, "exchange_actions": []})
+            upsert_diff = getattr(self.repository, "upsert_candidate_config_diff", None)
+            if callable(upsert_diff):
+                await upsert_diff(diff.model_dump(mode="json"))
+            await self.repository.record_autonomy_event("tuning_proposal_created", actor="autonomy_tuning", symbol=proposal.affected_scope.get("symbol"), payload={"proposal_id": proposal.id, "proposal_type": proposal.proposal_type, "candidate_diff_status": diff.status, "auto_apply_enabled": False, "exchange_actions": []})
         return proposal
 
     def _find_existing(self, proposal: TuningProposal) -> TuningProposal | None:
@@ -136,6 +141,84 @@ class TuningProposalService:
 
     def _repo_enabled(self) -> bool:
         return self.repository is not None and getattr(self.repository, "enabled", False)
+
+
+def _proposal_with_candidate_diff(proposal: TuningProposal) -> tuple[TuningProposal, CandidateConfigDiff]:
+    risk_direction = _risk_direction_for_proposal(proposal)
+    known_risks = proposal.known_risks or _known_risks_from_text(proposal.risk_assessment)
+    validation_required = proposal.validation_required or ["replay", "shadow_run", "human_review"]
+    evidence_links = _evidence_links(proposal)
+    diff = CandidateConfigDiff(
+        proposal_id=proposal.id,
+        strategy_id=proposal.strategy_id or "autonomy_v1",
+        scope=proposal.affected_scope,
+        change_type=proposal.change_type or proposal.proposal_type,
+        current_value=proposal.current_behavior,
+        proposed_value=proposal.proposed_diff,
+        rationale=proposal.summary,
+        evidence=evidence_links or [proposal.id],
+        expected_effect=proposal.expected_impact,
+        known_risks=known_risks,
+        validation_required=validation_required,
+        risk_direction=risk_direction,
+        requires_human_approval=True,
+        auto_apply_allowed=False,
+        created_by="autonomy_tuning",
+        created_at_ms=proposal.created_at_ms,
+        status=proposal.candidate_diff_status or "proposed",
+        metadata={"source_tuning_proposal_id": proposal.id, "exchange_actions": []},
+    )
+    metadata = {**proposal.metadata, "candidate_config_diff": diff.model_dump(mode="json"), "auto_apply_enabled": False}
+    updated = proposal.model_copy(
+        update={
+            "change_type": proposal.change_type or proposal.proposal_type,
+            "risk_direction": risk_direction,
+            "requires_human_approval": True,
+            "validation_required": validation_required,
+            "known_risks": known_risks,
+            "candidate_diff_status": diff.status,
+            "metadata": metadata,
+        }
+    )
+    return updated, diff
+
+
+def _risk_direction_for_proposal(proposal: TuningProposal) -> str:
+    if proposal.risk_direction != "unknown":
+        return proposal.risk_direction
+    if proposal.proposal_type in {"threshold_change", "data_quality_gate"}:
+        return "tightens_risk"
+    if proposal.proposal_type in {"risk_rule_change"}:
+        return "unknown"
+    if proposal.proposal_type in {"weight_change", "universe_change"}:
+        return "unknown"
+    return "neutral"
+
+
+def _known_risks_from_text(value: str) -> list[str]:
+    text = value.strip()
+    return [text] if text else ["Paper/shadow evidence may be regime-specific or overfit."]
+
+
+def _evidence_links(proposal: TuningProposal) -> list[str]:
+    links: list[str] = []
+    links.extend(str(item) for item in proposal.source_signal_ids)
+    links.extend(str(item) for item in proposal.source_lesson_ids)
+    for item in proposal.evidence:
+        if isinstance(item, dict):
+            for key in ("evaluation_id", "signal_id", "event_id", "id"):
+                if item.get(key):
+                    links.append(str(item[key]))
+                    break
+        elif item:
+            links.append(str(item))
+    seen: set[str] = set()
+    out: list[str] = []
+    for link in links:
+        if link and link not in seen:
+            seen.add(link)
+            out.append(link)
+    return out
 
 
 def _threshold_proposal(*, settings: Settings, symbol: str, signal_type: str, items: list[SignalEvaluation], avg_r: float, stop_rate: float) -> TuningProposal:

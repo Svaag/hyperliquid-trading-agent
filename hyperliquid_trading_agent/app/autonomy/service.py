@@ -36,6 +36,7 @@ from hyperliquid_trading_agent.app.autonomy.schemas import (
 from hyperliquid_trading_agent.app.autonomy.signals import SignalEngine, maybe_attach_model_insight
 from hyperliquid_trading_agent.app.autonomy.universe import MarketUniverseResolver
 from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.governance.risk_gateway import RiskGateway
 from hyperliquid_trading_agent.app.hyperliquid.ws_worker import SubscriptionSpec
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.metrics import (
@@ -80,6 +81,8 @@ class AutonomousTradingLoopService:
         equity_signal_generator: Any | None = None,
         options_flow: Any | None = None,
         flow_enricher: Any | None = None,
+        decision_context_recorder: Any | None = None,
+        risk_gateway: RiskGateway | None = None,
     ):
         self.settings = settings
         self.repository = repository
@@ -98,6 +101,8 @@ class AutonomousTradingLoopService:
         self.equity_signal_generator = equity_signal_generator
         self.options_flow = options_flow
         self.flow_enricher = flow_enricher
+        self.decision_context_recorder = decision_context_recorder
+        self.risk_gateway = risk_gateway or RiskGateway(settings=settings, repository=repository, decision_context_recorder=decision_context_recorder)
         self.universe_resolver = MarketUniverseResolver(settings, hyperliquid)
         self.reducer = MarketMapReducer()
         self.newswire = AutonomyNewswire(settings, news)
@@ -226,6 +231,9 @@ class AutonomousTradingLoopService:
         state = self.reducer.snapshot().assets.get(signal.symbol)
         ref_px = mid or (state.mid if state is not None else None) or signal.entry
         await self._persist_signal(signal)
+        risk_decision = await self._check_risk_gateway(signal, ref_px=ref_px, asset_class="crypto")
+        if not risk_decision.allowed:
+            raise RiskControlError(f"risk gateway rejected signal: {risk_decision.violations}")
         try:
             order, fill, position = await self.portfolio.approve_signal(signal, actor, mid=ref_px, timestamp_ms=now)
         except RiskControlError as exc:
@@ -245,7 +253,7 @@ class AutonomousTradingLoopService:
             "signal_approved_paper_ordered",
             actor=actor,
             symbol=signal.symbol,
-            payload={"signal_id": signal.id, "order_id": order.id, "fill_id": fill.id, "position_id": position.id, "exchange_actions": []},
+            payload={"signal_id": signal.id, "order_id": order.id, "fill_id": fill.id, "position_id": position.id, "risk_gateway_decision_id": risk_decision.decision_id, "exchange_actions": []},
         )
         return {"signal": updated.model_dump(mode="json"), "order": order.model_dump(mode="json"), "fill": fill.model_dump(mode="json"), "position": position.model_dump(mode="json")}
 
@@ -321,6 +329,9 @@ class AutonomousTradingLoopService:
         state = self.reducer.snapshot().assets.get(signal.symbol)
         ref_px = mid or (state.mid if state is not None else None) or signal.entry
         await self._persist_signal(signal)
+        risk_decision = await self._check_risk_gateway(signal, ref_px=ref_px, asset_class="crypto")
+        if not risk_decision.allowed:
+            raise RiskControlError(f"risk gateway rejected signal: {risk_decision.violations}")
         order, fill, position = await self.portfolio.approve_signal(signal, actor, mid=ref_px, timestamp_ms=now)
         updated = signal.model_copy(update={"status": "paper_ordered"})
         self.signals[updated.id] = updated
@@ -339,6 +350,7 @@ class AutonomousTradingLoopService:
                 "order_id": order.id,
                 "fill_id": fill.id,
                 "position_id": position.id,
+                "risk_gateway_decision_id": risk_decision.decision_id,
                 "exchange_actions": [],
             },
         )
@@ -515,6 +527,9 @@ class AutonomousTradingLoopService:
             signal_id=signal.id,
             thesis=signal.thesis,
         )
+        risk_decision = await self._check_risk_gateway(signal, ref_px=signal.entry, asset_class="equity")
+        if not risk_decision.allowed:
+            raise EquityRiskControlError(f"risk gateway rejected equity signal: {risk_decision.violations}")
         order = await self.equity_portfolio.place_order(request)
         fill = next((item for item in self.equity_portfolio.fills.values() if item.order_id == order.id), None)
         position = next((item for item in self.equity_portfolio.positions.values() if item.signal_id == signal.id and item.status == "open"), None)
@@ -530,7 +545,7 @@ class AutonomousTradingLoopService:
             "equity_signal_approved_paper_ordered",
             actor=actor,
             symbol=signal.symbol,
-            payload={"signal_id": signal.id, "order_id": order.id, "position_id": position.id if position else None, "exchange_actions": []},
+            payload={"signal_id": signal.id, "order_id": order.id, "position_id": position.id if position else None, "risk_gateway_decision_id": risk_decision.decision_id, "exchange_actions": []},
         )
         return {
             "signal": updated.model_dump(mode="json"),
@@ -676,6 +691,7 @@ class AutonomousTradingLoopService:
                 if self._is_duplicate_equity_signal(signal, timestamp_ms):
                     continue
                 signal = signal.model_copy(update={"metadata": {**(signal.metadata or {}), "asset_class": "equity", "paper_only": True}})
+                signal = await self._attach_decision_context(signal, source_type="equity_signal", timestamp_ms=timestamp_ms)
                 self.equity_signals[signal.id] = signal
                 AUTONOMY_SIGNALS_CREATED.labels(signal_type=signal.signal_type).inc()
                 await self._persist_signal(signal)
@@ -800,6 +816,7 @@ class AutonomousTradingLoopService:
                 enriched = await maybe_attach_model_insight(signal, self.model_gateway, self.settings, memory_service=self.memory_service)
                 self._model_call_timestamps.append(time.monotonic())
                 AUTONOMY_MODEL_INSIGHT_CALLS.labels(result="ok" if enriched.model_insight and enriched.model_insight.get("status") != "unavailable" else "fallback").inc()
+            enriched = await self._attach_decision_context(enriched, source_type="autonomy_signal", timestamp_ms=timestamp_ms)
             self.signals[enriched.id] = enriched
             AUTONOMY_SIGNALS_CREATED.labels(signal_type=enriched.signal_type).inc()
             await self._persist_signal(enriched)
@@ -857,6 +874,62 @@ class AutonomousTradingLoopService:
             levels = [*state.support_levels, *state.resistance_levels, *state.liquidity_levels]
             if levels:
                 await self.repository.upsert_market_levels([item.model_dump(mode="json") for item in levels])
+
+    async def _check_risk_gateway(self, signal: TradeSignal, *, ref_px: float | None, asset_class: str):
+        portfolio_snapshot: dict[str, Any] = {}
+        if asset_class == "equity" and self.equity_portfolio is not None:
+            snapshot = self.equity_portfolio.snapshots[-1] if self.equity_portfolio.snapshots else None
+            portfolio_snapshot = snapshot.model_dump(mode="json") if snapshot is not None else self.equity_portfolio.portfolio.model_dump(mode="json")
+        else:
+            snapshot = self.portfolio.latest_snapshot()
+            portfolio_snapshot = snapshot.model_dump(mode="json") if snapshot is not None else self.portfolio.portfolio.model_dump(mode="json") if self.portfolio.portfolio is not None else {}
+        state = self.reducer.snapshot().assets.get(signal.symbol)
+        market_snapshot = {
+            "ref_px": ref_px,
+            "last_market_data_at_ms": self.last_market_data_at_ms,
+            "asset_timestamp_ms": state.timestamp_ms if state is not None else None,
+            "mid": state.mid if state is not None else None,
+        }
+        return await self.risk_gateway.check_signal(
+            signal,
+            mode="paper",
+            ref_px=ref_px,
+            asset_class=asset_class,
+            portfolio_snapshot=portfolio_snapshot,
+            market_snapshot=market_snapshot,
+        )
+
+    async def _attach_decision_context(
+        self,
+        signal: TradeSignal,
+        *,
+        source_type: str,
+        timestamp_ms: int | None = None,
+    ) -> TradeSignal:
+        if signal.metadata.get("decision_context"):
+            return signal
+        recorder = self.decision_context_recorder
+        if recorder is None:
+            return signal
+        context = recorder.new_decision_context(
+            source_type=source_type,
+            source_id=signal.id,
+            market_snapshot_refs=[f"market_map:{timestamp_ms or signal.created_at_ms}"],
+            data_freshness={
+                "last_market_data_at_ms": self.last_market_data_at_ms,
+                "last_iteration_at_ms": self.last_iteration_at_ms,
+                "signal_created_at_ms": signal.created_at_ms,
+            },
+            metadata={
+                "symbol": signal.symbol,
+                "side": signal.side,
+                "signal_type": signal.signal_type,
+                "asset_class": signal.metadata.get("asset_class", "crypto"),
+                "paper_only": True,
+            },
+        )
+        await recorder.record_decision_context(context, source_type=source_type, source_id=signal.id)
+        return signal.model_copy(update={"metadata": {**signal.metadata, "decision_context": context.model_dump(mode="json")}})
 
     async def _persist_signal(self, signal: TradeSignal, approved_by: str | None = None, rejected_by: str | None = None) -> None:
         if self.repository is None or not getattr(self.repository, "enabled", False):

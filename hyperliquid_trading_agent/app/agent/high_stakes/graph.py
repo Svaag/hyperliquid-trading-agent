@@ -70,12 +70,14 @@ class HighStakesDebateGraph:
         role_runner: HighStakesRoleRunner,
         repository: Repository | None = None,
         tracking_service: PositionTrackingService | None = None,
+        decision_context_recorder: Any | None = None,
     ):
         self.settings = settings
         self.context_builder = context_builder
         self.role_runner = role_runner
         self.repository = repository
         self.tracking_service = tracking_service
+        self.decision_context_recorder = decision_context_recorder
         self._compiled = self._build_graph()
 
     async def run(self, request: TradeProposalRequest, agent_context: dict[str, Any] | None = None) -> TradeProposalResponse:
@@ -163,6 +165,7 @@ class HighStakesDebateGraph:
         judge = fallback_judge(dict(state), reason=reason).model_copy(update={"call_status": "fallback", "data_coverage": state["data_coverage"]})
         state["judge_decision"] = judge
         proposal = self._apply_final_policy(state, _build_proposal(state))
+        proposal = await self._attach_decision_context(state, proposal)
         proposal = await self._auto_arm_tracking(state, proposal, proposal_id=None)
 
         DECISION_RUNS.labels(status=proposal.status).inc()
@@ -363,6 +366,7 @@ class HighStakesDebateGraph:
     async def _finalize(self, state: HighStakesGraphState) -> dict[str, Any]:
         proposal = _build_proposal(state)
         proposal = self._apply_final_policy(state, proposal)
+        proposal = await self._attach_decision_context(state, proposal)
         proposal_id = None
         if self.repository:
             proposal_id = await self.repository.record_trade_proposal(
@@ -392,6 +396,42 @@ class HighStakesDebateGraph:
         updates = {"proposal": proposal, "proposal_id": proposal_id}
         await self._snapshot(_merged_state(state, updates), "finalize")
         return updates
+
+    async def _attach_decision_context(self, state: HighStakesGraphState, proposal: TradeProposal) -> TradeProposal:
+        if proposal.decision_context:
+            return proposal
+        recorder = self.decision_context_recorder
+        if recorder is None:
+            return proposal
+        route = state.get("route")
+        selected_roles = list(getattr(route, "selected_roles", []) or [])
+        style = self.settings.high_stakes_prompt_style
+        prompt_names: list[str] = []
+        for role in selected_roles:
+            prompt_names.extend([
+                f"high_stakes.{role}.{style}.system",
+                f"high_stakes.{role}.{style}.user",
+                f"role_contract.{role}",
+            ])
+        context = recorder.new_decision_context(
+            run_id=state.get("run_id"),
+            source_type="high_stakes_proposal",
+            source_id=None,
+            prompt_names=prompt_names or None,
+            market_snapshot_refs=[f"high_stakes_context:{getattr(state.get('context'), 'timestamp_ms', proposal.created_at_ms)}"],
+            data_freshness={
+                "context_timestamp_ms": getattr(state.get("context"), "timestamp_ms", None),
+                "data_coverage_score": getattr(state.get("data_coverage"), "coverage_score", None),
+            },
+            metadata={
+                "coin": proposal.coin,
+                "side": proposal.side,
+                "status": proposal.status,
+                "paper_only": True,
+            },
+        )
+        await recorder.record_decision_context(context, source_type="high_stakes_proposal", source_id=state.get("run_id"))
+        return proposal.model_copy(update={"decision_context": context.model_dump(mode="json")})
 
     async def _auto_arm_tracking(self, state: HighStakesGraphState, proposal: TradeProposal, proposal_id: str | None) -> TradeProposal:
         if not proposal.tracking_plan:

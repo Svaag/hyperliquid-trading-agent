@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from hyperliquid_trading_agent.app.db.models import (
@@ -13,10 +13,13 @@ from hyperliquid_trading_agent.app.db.models import (
     AutonomyEvent,
     AutonomyNewsEvent,
     CacheItem,
+    CandidateConfigDiffRecord,
     CandidateLessonRecord,
+    ConfigVersionRecord,
     ConversationMessage,
     ConversationThread,
     DailyReportRecord,
+    DecisionContextRecord,
     DecisionRoleOutput,
     DecisionRun,
     DecisionStateSnapshot,
@@ -29,6 +32,7 @@ from hyperliquid_trading_agent.app.db.models import (
     MarketAssetRecord,
     MarketLevelRecord,
     MarketObservation,
+    MemoryInjectionEventRecord,
     MemoryObservationRecord,
     NewsItem,
     NewswireEventRow,
@@ -42,7 +46,13 @@ from hyperliquid_trading_agent.app.db.models import (
     PaperTradeSnapshot,
     PortfolioSnapshotRecord,
     PositionTracker,
+    PromotionDecisionRecord,
+    PromptVersionRecord,
+    ReviewPacketRecord,
+    RiskGatewayDecisionRecord,
     RoleLessonRecord,
+    RollbackPlanRecord,
+    ShadowComparisonRecord,
     ShadowRoleLessonRecord,
     SignalEvaluationMarkRecord,
     SignalEvaluationRecord,
@@ -240,6 +250,180 @@ class Repository:
             session.add(PaperTradeSnapshot(idea_id=idea.id, market_snapshot=market_snapshot or {}))
             await session.commit()
             return idea.id
+
+    async def upsert_config_version(self, version: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                version_id = str(version["id"])
+                scope = str(version.get("scope") or "runtime_settings")
+                await session.execute(
+                    update(ConfigVersionRecord)
+                    .where(ConfigVersionRecord.scope == scope, ConfigVersionRecord.id != version_id)
+                    .values(active=False)
+                )
+                item = await session.get(ConfigVersionRecord, version_id)
+                if item is None:
+                    item = ConfigVersionRecord(
+                        id=version_id,
+                        scope=scope,
+                        version_hash=str(version.get("version_hash") or ""),
+                        created_at_ms=int(version.get("created_at_ms") or 0),
+                    )
+                    session.add(item)
+                item.scope = scope
+                item.version_hash = str(version.get("version_hash") or item.version_hash)
+                item.payload_json = redact_secrets(dict(version.get("payload") or {}))
+                item.code_version = version.get("code_version")
+                item.created_at_ms = int(version.get("created_at_ms") or item.created_at_ms)
+                item.active = bool(version.get("active", True))
+                item.metadata_json = redact_secrets(dict(version.get("metadata") or {}))
+                await session.commit()
+                return item.id
+        except Exception as exc:  # pragma: no cover - governance audit must not block runtime
+            log.warning("config_version_upsert_failed", error=type(exc).__name__)
+            return None
+
+    async def upsert_prompt_version(self, version: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                version_id = str(version["id"])
+                prompt_name = str(version.get("prompt_name") or "unknown")
+                await session.execute(
+                    update(PromptVersionRecord)
+                    .where(PromptVersionRecord.prompt_name == prompt_name, PromptVersionRecord.id != version_id)
+                    .values(active=False)
+                )
+                item = await session.get(PromptVersionRecord, version_id)
+                if item is None:
+                    item = PromptVersionRecord(
+                        id=version_id,
+                        prompt_name=prompt_name,
+                        version_hash=str(version.get("version_hash") or ""),
+                        content_hash=str(version.get("content_hash") or ""),
+                        created_at_ms=int(version.get("created_at_ms") or 0),
+                    )
+                    session.add(item)
+                item.prompt_name = prompt_name
+                item.version_hash = str(version.get("version_hash") or item.version_hash)
+                item.content_hash = str(version.get("content_hash") or item.content_hash)
+                item.payload_json = redact_secrets(dict(version.get("payload") or {}))
+                item.code_version = version.get("code_version")
+                item.created_at_ms = int(version.get("created_at_ms") or item.created_at_ms)
+                item.active = bool(version.get("active", True))
+                item.metadata_json = redact_secrets(dict(version.get("metadata") or {}))
+                await session.commit()
+                return item.id
+        except Exception as exc:  # pragma: no cover
+            log.warning("prompt_version_upsert_failed", error=type(exc).__name__)
+            return None
+
+    async def record_decision_context(
+        self,
+        context: dict[str, Any],
+        *,
+        source_type: str = "unknown",
+        source_id: str | None = None,
+    ) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                context_id = str(context["decision_id"])
+                item = await session.get(DecisionContextRecord, context_id)
+                model_route = dict(context.get("model_route") or {})
+                metadata = dict(context.get("metadata") or {})
+                if item is None:
+                    item = DecisionContextRecord(
+                        id=context_id,
+                        source_type=source_type,
+                        source_id=source_id or metadata.get("source_id"),
+                        run_id=context.get("run_id"),
+                        config_version_id=str(context.get("config_version_id") or ""),
+                        risk_config_version_id=str(context.get("risk_config_version_id") or ""),
+                        created_at_ms=int(context.get("created_at_ms") or 0),
+                    )
+                    session.add(item)
+                item.source_type = source_type or str(metadata.get("source_type") or "unknown")
+                item.source_id = source_id or metadata.get("source_id")
+                item.run_id = context.get("run_id")
+                item.config_version_id = str(context.get("config_version_id") or item.config_version_id)
+                item.risk_config_version_id = str(context.get("risk_config_version_id") or item.risk_config_version_id)
+                item.model_route_version_id = model_route.get("version_id")
+                item.prompt_version_ids_json = list(context.get("prompt_version_ids") or [])
+                item.injected_memory_ids_json = list(context.get("injected_memory_ids") or [])
+                item.market_snapshot_refs_json = list(context.get("market_snapshot_refs") or [])
+                item.data_freshness_json = redact_secrets(dict(context.get("data_freshness") or {}))
+                item.code_version = context.get("code_version")
+                item.created_at_ms = int(context.get("created_at_ms") or item.created_at_ms)
+                item.context_json = redact_secrets(dict(context))
+                item.metadata_json = redact_secrets(metadata)
+                await session.commit()
+                return item.id
+        except Exception as exc:  # pragma: no cover
+            log.warning("decision_context_record_failed", source_type=source_type, error=type(exc).__name__)
+            return None
+
+    async def get_decision_context(self, decision_id: str) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                item = await session.get(DecisionContextRecord, decision_id)
+                return _decision_context_to_dict(item) if item is not None else None
+        except Exception as exc:  # pragma: no cover
+            log.warning("decision_context_get_failed", decision_id=decision_id, error=type(exc).__name__)
+            return None
+
+    async def record_risk_gateway_decision(self, decision: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                item = RiskGatewayDecisionRecord(
+                    decision_id=str(decision["decision_id"]),
+                    intent_id=str(decision.get("intent_id") or ""),
+                    mode=str(decision.get("mode") or "paper"),
+                    decision=str(decision.get("decision") or "reject"),
+                    violations_json=redact_secrets(list(decision.get("violations") or [])),
+                    limits_snapshot_json=redact_secrets(dict(decision.get("limits_snapshot") or {})),
+                    market_snapshot_json=redact_secrets(dict(decision.get("market_snapshot") or {})),
+                    portfolio_snapshot_json=redact_secrets(dict(decision.get("portfolio_snapshot") or {})),
+                    config_version_id=decision.get("config_version_id"),
+                    created_at_ms=int(decision.get("created_at_ms") or 0),
+                    metadata_json=redact_secrets(dict(decision.get("metadata") or {})),
+                )
+                session.add(item)
+                await session.commit()
+                return item.decision_id
+        except Exception as exc:  # pragma: no cover
+            log.warning("risk_gateway_decision_record_failed", intent_id=decision.get("intent_id"), error=type(exc).__name__)
+            return None
+
+    async def record_memory_injection_event(self, event: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                item = MemoryInjectionEventRecord(
+                    run_id=event.get("run_id"),
+                    role=str(event.get("role") or "unknown"),
+                    context_type=str(event.get("context_type") or "unknown"),
+                    memory_ids_json=list(event.get("memory_ids") or []),
+                    blocked_memory_ids_json=list(event.get("blocked_memory_ids") or []),
+                    policy_decision_json=redact_secrets(dict(event.get("policy_decision") or {})),
+                    created_at_ms=int(event.get("created_at_ms") or 0),
+                    metadata_json=redact_secrets(dict(event.get("metadata") or {})),
+                )
+                session.add(item)
+                await session.commit()
+                return item.id
+        except Exception as exc:  # pragma: no cover
+            log.warning("memory_injection_event_record_failed", role=event.get("role"), error=type(exc).__name__)
+            return None
 
     async def create_decision_run(
         self,
@@ -1175,6 +1359,144 @@ class Repository:
             result = await session.execute(stmt)
             return [_operator_feedback_to_dict(item) for item in result.scalars().all()]
 
+    async def upsert_rollback_plan(self, plan: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(RollbackPlanRecord, str(plan["rollback_plan_id"]))
+            if item is None:
+                item = RollbackPlanRecord(
+                    rollback_plan_id=str(plan["rollback_plan_id"]),
+                    target_type=str(plan.get("target_type") or "config"),
+                    target_id=str(plan.get("target_id") or ""),
+                    previous_version_id=str(plan.get("previous_version_id") or ""),
+                    owner=str(plan.get("owner") or ""),
+                    created_at_ms=int(plan.get("created_at_ms") or 0),
+                )
+                session.add(item)
+            item.rollback_steps_json = [str(item) for item in plan.get("rollback_steps") or []]
+            item.verification_steps_json = [str(item) for item in plan.get("verification_steps") or []]
+            await session.commit()
+            return item.rollback_plan_id
+
+    async def upsert_review_packet(self, packet: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(ReviewPacketRecord, str(packet["review_packet_id"]))
+            if item is None:
+                item = ReviewPacketRecord(
+                    review_packet_id=str(packet["review_packet_id"]),
+                    proposal_id=str(packet.get("proposal_id") or ""),
+                    risk_direction=str(packet.get("risk_direction") or "unknown"),
+                    rollback_plan_id=str(packet.get("rollback_plan_id") or ""),
+                    created_at_ms=int(packet.get("created_at_ms") or 0),
+                )
+                session.add(item)
+            item.evidence_links_json = [str(item) for item in packet.get("evidence_links") or []]
+            item.affected_strategies_json = [str(item) for item in packet.get("affected_strategies") or []]
+            item.affected_symbols_json = [str(item) for item in packet.get("affected_symbols") or []]
+            item.affected_venues_json = [str(item) for item in packet.get("affected_venues") or []]
+            item.expected_effect = str(packet.get("expected_effect") or "")
+            item.known_risks_json = [str(item) for item in packet.get("known_risks") or []]
+            item.replay_results_json = redact_secrets(packet.get("replay_results")) if packet.get("replay_results") is not None else None
+            item.shadow_results_json = redact_secrets(packet.get("shadow_results")) if packet.get("shadow_results") is not None else None
+            item.reviewer_findings_json = redact_secrets(list(packet.get("reviewer_findings") or []))
+            item.approval_requirements_json = [str(item) for item in packet.get("approval_requirements") or []]
+            await session.commit()
+            return item.review_packet_id
+
+    async def upsert_promotion_decision(self, decision: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = PromotionDecisionRecord(
+                decision_id=str(decision["decision_id"]),
+                proposal_id=str(decision.get("proposal_id") or ""),
+                reviewer=str(decision.get("reviewer") or ""),
+                decision=str(decision.get("decision") or "needs_more_evidence"),
+                rationale=str(decision.get("rationale") or ""),
+                evidence_reviewed_json=[str(item) for item in decision.get("evidence_reviewed") or []],
+                tests_reviewed_json=[str(item) for item in decision.get("tests_reviewed") or []],
+                proposer_actor=str(decision.get("proposer_actor") or ""),
+                approver_actor=str(decision.get("approver_actor") or ""),
+                change_control_id=str(decision.get("change_control_id") or ""),
+                approved_contexts_json=[str(item) for item in decision.get("approved_contexts") or []],
+                rollback_plan_id=str(decision.get("rollback_plan_id") or ""),
+                created_at_ms=int(decision.get("created_at_ms") or 0),
+            )
+            session.add(item)
+            await session.commit()
+            return item.decision_id
+
+    async def record_shadow_comparison(self, result: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = ShadowComparisonRecord(
+                comparison_id=str(result["comparison_id"]),
+                proposal_id=str(result.get("proposal_id") or ""),
+                status=str(result.get("status") or "audit_only"),
+                baseline_metrics_json=redact_secrets(dict(result.get("baseline_metrics") or {})),
+                candidate_metrics_json=redact_secrets(dict(result.get("candidate_metrics") or {})),
+                metric_deltas_json=redact_secrets(dict(result.get("metric_deltas") or {})),
+                recommendation=str(result.get("recommendation") or "audit_only"),
+                created_at_ms=int(result.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(result.get("metadata") or {})),
+            )
+            session.add(item)
+            await session.commit()
+            return item.comparison_id
+
+    async def upsert_candidate_config_diff(self, diff: dict[str, Any]) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            item = await session.get(CandidateConfigDiffRecord, str(diff["proposal_id"]))
+            if item is None:
+                item = CandidateConfigDiffRecord(
+                    proposal_id=str(diff["proposal_id"]),
+                    strategy_id=str(diff.get("strategy_id") or "autonomy_v1"),
+                    change_type=str(diff.get("change_type") or "proposal"),
+                    rationale=str(diff.get("rationale") or ""),
+                    risk_direction=str(diff.get("risk_direction") or "unknown"),
+                    created_by=str(diff.get("created_by") or "unknown"),
+                    created_at_ms=int(diff.get("created_at_ms") or 0),
+                    status=str(diff.get("status") or "proposed"),
+                )
+                session.add(item)
+            _apply_candidate_config_diff(item, diff)
+            await session.commit()
+
+    async def list_candidate_config_diffs(self, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(CandidateConfigDiffRecord).order_by(CandidateConfigDiffRecord.created_at_ms.desc()).limit(limit)
+            if status:
+                stmt = stmt.where(CandidateConfigDiffRecord.status == status)
+            result = await session.execute(stmt)
+            return [_candidate_config_diff_to_dict(item) for item in result.scalars().all()]
+
+    async def get_candidate_config_diff(self, proposal_id: str) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(CandidateConfigDiffRecord, proposal_id)
+            return _candidate_config_diff_to_dict(item) if item is not None else None
+
+    async def set_candidate_config_diff_status(self, proposal_id: str, status: str) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            item = await session.get(CandidateConfigDiffRecord, proposal_id)
+            if item is not None:
+                item.status = status
+            proposal = await session.get(TuningProposalRecord, proposal_id)
+            if proposal is not None:
+                proposal.candidate_diff_status = status
+            await session.commit()
+
     async def upsert_tuning_proposal(self, proposal: dict[str, Any]) -> None:
         if self.sessionmaker is None:
             return
@@ -1835,6 +2157,11 @@ def _apply_role_lesson(item: ShadowRoleLessonRecord | RoleLessonRecord, data: di
     item.activated_at_ms = data.get("activated_at_ms")
     item.expires_at_ms = int(data.get("expires_at_ms") or item.expires_at_ms)
     item.last_revalidated_at_ms = data.get("last_revalidated_at_ms")
+    item.memory_status = str(data.get("memory_status") or data.get("metadata", {}).get("memory_status") or item.memory_status)
+    item.allowed_contexts_json = list(data.get("allowed_contexts") or [])
+    item.forbidden_contexts_json = list(data.get("forbidden_contexts") or [])
+    item.promotion_history_json = redact_secrets(list(data.get("promotion_history") or []))
+    item.rollback_target = data.get("rollback_target")
     item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
 
 
@@ -1852,6 +2179,26 @@ def _apply_operator_lesson(item: OperatorOutputLessonRecord, data: dict[str, Any
     item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
 
 
+def _apply_candidate_config_diff(item: CandidateConfigDiffRecord, data: dict[str, Any]) -> None:
+    item.strategy_id = str(data.get("strategy_id") or item.strategy_id)
+    item.scope_json = redact_secrets(dict(data.get("scope") or {}))
+    item.change_type = str(data.get("change_type") or item.change_type)
+    item.current_value_json = redact_secrets(dict(data.get("current_value") or {}))
+    item.proposed_value_json = redact_secrets(dict(data.get("proposed_value") or {}))
+    item.rationale = str(data.get("rationale") or item.rationale)
+    item.evidence_json = [str(item) for item in data.get("evidence") or []]
+    item.expected_effect = str(data.get("expected_effect") or "")
+    item.known_risks_json = [str(item) for item in data.get("known_risks") or []]
+    item.validation_required_json = [str(item) for item in data.get("validation_required") or []]
+    item.risk_direction = str(data.get("risk_direction") or item.risk_direction)
+    item.requires_human_approval = bool(data.get("requires_human_approval", True))
+    item.auto_apply_allowed = bool(data.get("auto_apply_allowed", False))
+    item.created_by = str(data.get("created_by") or item.created_by)
+    item.created_at_ms = int(data.get("created_at_ms") or item.created_at_ms)
+    item.status = str(data.get("status") or item.status)
+    item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
+
+
 def _apply_tuning_proposal(item: TuningProposalRecord, data: dict[str, Any]) -> None:
     item.proposal_type = str(data.get("proposal_type") or item.proposal_type)
     item.status = str(data.get("status") or item.status)
@@ -1863,6 +2210,14 @@ def _apply_tuning_proposal(item: TuningProposalRecord, data: dict[str, Any]) -> 
     item.evidence_json = redact_secrets(list(data.get("evidence") or []))
     item.source_lesson_ids_json = list(data.get("source_lesson_ids") or [])
     item.source_signal_ids_json = list(data.get("source_signal_ids") or [])
+    item.strategy_id = str(data.get("strategy_id") or item.strategy_id)
+    item.change_type = str(data.get("change_type") or item.change_type)
+    item.risk_direction = str(data.get("risk_direction") or item.risk_direction)
+    item.requires_human_approval = bool(data.get("requires_human_approval", True))
+    item.validation_required_json = [str(item) for item in data.get("validation_required") or []]
+    item.known_risks_json = [str(item) for item in data.get("known_risks") or []]
+    item.review_packet_id = data.get("review_packet_id")
+    item.candidate_diff_status = str(data.get("candidate_diff_status") or item.candidate_diff_status)
     item.expected_impact = str(data.get("expected_impact") or "")
     item.risk_assessment = str(data.get("risk_assessment") or "")
     item.blast_radius = str(data.get("blast_radius") or "low")
@@ -1994,6 +2349,26 @@ def _newswire_event_to_dict(item: NewswireEventRow) -> dict[str, Any]:
         "source_score": item.source_score,
         "tradability": item.tradability_json,
         "enrichment": item.enrichment_json,
+        "metadata": item.metadata_json,
+    }
+
+
+def _decision_context_to_dict(item: DecisionContextRecord) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "source_type": item.source_type,
+        "source_id": item.source_id,
+        "run_id": item.run_id,
+        "config_version_id": item.config_version_id,
+        "risk_config_version_id": item.risk_config_version_id,
+        "model_route_version_id": item.model_route_version_id,
+        "prompt_version_ids": item.prompt_version_ids_json,
+        "injected_memory_ids": item.injected_memory_ids_json,
+        "market_snapshot_refs": item.market_snapshot_refs_json,
+        "data_freshness": item.data_freshness_json,
+        "code_version": item.code_version,
+        "created_at_ms": item.created_at_ms,
+        "context": item.context_json,
         "metadata": item.metadata_json,
     }
 
@@ -2392,6 +2767,11 @@ def _role_lesson_to_dict(item: ShadowRoleLessonRecord | RoleLessonRecord) -> dic
         "activated_at_ms": item.activated_at_ms,
         "expires_at_ms": item.expires_at_ms,
         "last_revalidated_at_ms": item.last_revalidated_at_ms,
+        "memory_status": item.memory_status,
+        "allowed_contexts": item.allowed_contexts_json,
+        "forbidden_contexts": item.forbidden_contexts_json,
+        "promotion_history": item.promotion_history_json,
+        "rollback_target": item.rollback_target,
         "metadata": item.metadata_json,
     }
 
@@ -2427,6 +2807,29 @@ def _operator_feedback_to_dict(item: OperatorFeedbackRecord) -> dict[str, Any]:
     }
 
 
+def _candidate_config_diff_to_dict(item: CandidateConfigDiffRecord) -> dict[str, Any]:
+    return {
+        "proposal_id": item.proposal_id,
+        "strategy_id": item.strategy_id,
+        "scope": item.scope_json,
+        "change_type": item.change_type,
+        "current_value": item.current_value_json,
+        "proposed_value": item.proposed_value_json,
+        "rationale": item.rationale,
+        "evidence": item.evidence_json,
+        "expected_effect": item.expected_effect,
+        "known_risks": item.known_risks_json,
+        "validation_required": item.validation_required_json,
+        "risk_direction": item.risk_direction,
+        "requires_human_approval": item.requires_human_approval,
+        "auto_apply_allowed": item.auto_apply_allowed,
+        "created_by": item.created_by,
+        "created_at_ms": item.created_at_ms,
+        "status": item.status,
+        "metadata": item.metadata_json,
+    }
+
+
 def _tuning_proposal_to_dict(item: TuningProposalRecord) -> dict[str, Any]:
     return {
         "id": item.id,
@@ -2440,6 +2843,14 @@ def _tuning_proposal_to_dict(item: TuningProposalRecord) -> dict[str, Any]:
         "evidence": item.evidence_json,
         "source_lesson_ids": item.source_lesson_ids_json,
         "source_signal_ids": item.source_signal_ids_json,
+        "strategy_id": item.strategy_id,
+        "change_type": item.change_type,
+        "risk_direction": item.risk_direction,
+        "requires_human_approval": item.requires_human_approval,
+        "validation_required": item.validation_required_json,
+        "known_risks": item.known_risks_json,
+        "review_packet_id": item.review_packet_id,
+        "candidate_diff_status": item.candidate_diff_status,
         "expected_impact": item.expected_impact,
         "risk_assessment": item.risk_assessment,
         "blast_radius": item.blast_radius,

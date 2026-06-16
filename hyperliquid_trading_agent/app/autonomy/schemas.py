@@ -32,7 +32,8 @@ EvaluationHorizon = Literal["5m", "15m", "1h", "4h", "24h", "72h", "expiry"]
 RoleName = Literal["analyst", "quant", "research", "risk", "treasury", "execution", "adversary", "judge"]
 LessonType = Literal["role_behavior", "signal_quality", "risk_discipline", "operator_output", "data_quality", "incident_warning", "catalyst_quality"]
 LessonValidationStatus = Literal["active", "needs_human_review", "shadow", "archived", "expired", "rejected"]
-TuningProposalStatus = Literal["draft", "proposed", "accepted_manually", "rejected", "expired", "superseded"]
+MemoryLifecycleStatus = Literal["candidate", "validated_advisory", "approved_policy", "deprecated", "reverted"]
+TuningProposalStatus = Literal["draft", "proposed", "accepted_manually", "reviewed_no_apply", "rejected", "expired", "superseded"]
 Sentiment = Literal["bullish", "bearish", "mixed", "unknown"]
 Freshness = Literal["breaking", "fresh", "stale"]
 OrderStatus = Literal["new", "filled", "cancelled", "rejected"]
@@ -515,6 +516,11 @@ class RoleLessonMemory(BaseModel):
     activated_at_ms: int | None = None
     expires_at_ms: int
     last_revalidated_at_ms: int | None = None
+    memory_status: MemoryLifecycleStatus = "validated_advisory"
+    allowed_contexts: list[str] = Field(default_factory=list)
+    forbidden_contexts: list[str] = Field(default_factory=list)
+    promotion_history: list[dict[str, Any]] = Field(default_factory=list)
+    rollback_target: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -557,6 +563,14 @@ class TuningProposal(BaseModel):
     evidence: list[dict[str, Any]] = Field(default_factory=list)
     source_lesson_ids: list[str] = Field(default_factory=list)
     source_signal_ids: list[str] = Field(default_factory=list)
+    strategy_id: str = "autonomy_v1"
+    change_type: str = "proposal"
+    risk_direction: Literal["tightens_risk", "relaxes_risk", "increases_exposure", "decreases_exposure", "neutral", "unknown"] = "unknown"
+    requires_human_approval: bool = True
+    validation_required: list[str] = Field(default_factory=lambda: ["replay", "shadow_run", "human_review"])
+    known_risks: list[str] = Field(default_factory=list)
+    review_packet_id: str | None = None
+    candidate_diff_status: str = "proposed"
     expected_impact: str
     risk_assessment: str
     blast_radius: Literal["low", "medium", "high"] = "low"

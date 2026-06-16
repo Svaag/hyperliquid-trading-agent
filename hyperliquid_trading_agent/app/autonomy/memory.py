@@ -14,6 +14,11 @@ from hyperliquid_trading_agent.app.autonomy.schemas import (
     SignalEvaluation,
 )
 from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.governance.policy import (
+    MemoryPolicyEngine,
+    default_allowed_contexts,
+    default_forbidden_contexts,
+)
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.metrics import (
     CANDIDATE_LESSONS_CREATED,
@@ -44,6 +49,7 @@ class MemoryService:
         self.shadow_role_lessons: dict[str, RoleLessonMemory] = {}
         self.role_lessons: dict[str, RoleLessonMemory] = {}
         self.operator_lessons: dict[str, OperatorOutputLessonMemory] = {}
+        self.policy = MemoryPolicyEngine()
         self.archived_lessons = 0
         self.last_promotion_at_ms: int | None = None
         self.last_error: str | None = None
@@ -258,13 +264,34 @@ class MemoryService:
         lessons.sort(key=lambda item: (item.confidence, item.sample_size, item.created_at_ms), reverse=True)
         return lessons[:max_items]
 
-    async def memory_block_for_role(self, role: str, *, symbol: str | None = None, signal_type: str | None = None, market_regime: str | None = None, max_items: int = 5) -> str:
+    async def memory_block_for_role(
+        self,
+        role: str,
+        *,
+        symbol: str | None = None,
+        signal_type: str | None = None,
+        market_regime: str | None = None,
+        max_items: int = 5,
+        run_id: str | None = None,
+        context_type: str | None = None,
+    ) -> str:
         lessons = await self.retrieve(role=role, symbol=symbol, signal_type=signal_type, market_regime=market_regime, max_items=max_items)
-        lessons = [lesson for lesson in lessons if _lesson_injection_allowed_for_role(lesson, role, self.settings)]
-        if not lessons:
+        decisions = [self.policy.can_inject(lesson, role=role, context_type=context_type, mode="paper") for lesson in lessons]
+        allowed_ids = {decision.memory_id for decision in decisions if decision.allowed and _role_prompt_list_allows(decision.status, role, self.settings)}
+        blocked_ids = [decision.memory_id for decision in decisions if decision.memory_id not in allowed_ids]
+        allowed_lessons = [lesson for lesson in lessons if lesson.id in allowed_ids]
+        await self._record_memory_injection_event(
+            run_id=run_id,
+            role=role,
+            context_type=context_type or self.policy.context_for_role(role),
+            allowed_ids=[lesson.id for lesson in allowed_lessons],
+            blocked_ids=blocked_ids,
+            decisions=[decision.model_dump() for decision in decisions],
+        )
+        if not allowed_lessons:
             return ""
-        lines = ["Relevant validated role memories:"]
-        for lesson in lessons:
+        lines = ["Relevant validated role memories (advisory context only):"]
+        for lesson in allowed_lessons:
             scope = ",".join(f"{key}={value}" for key, value in lesson.scope.items() if value)
             lines.append(f"- [{lesson.role}:{scope or 'general'}] {lesson.instruction} confidence={lesson.confidence:.2f} sample={lesson.sample_size} expires_at_ms={lesson.expires_at_ms}")
         return "\n".join(lines)[:1500]
@@ -369,9 +396,11 @@ class MemoryService:
             raise PermissionError("change_control_id required before risk/execution/treasury memory can become injectable")
         status = "active"
         metadata = {
+            "memory_status": "approved_policy",
             "change_control_id": change_control_id,
-            "approved_for_role_injection_roles": approved_for_role_injection_roles or [],
+            "approved_for_role_injection_roles": approved_for_role_injection_roles or ([target_role] if target_role else []),
             "reviewer": reviewer,
+            "promotion_decision": "manual_candidate_promotion",
         }
         lesson = self._role_lesson_from_candidate(candidate, status=status, now_ms=_now_ms(), metadata=metadata)
         if lesson is None:
@@ -410,6 +439,20 @@ class MemoryService:
         if role not in ROLE_ORDER:
             role = "judge"
         ttl_days = self.settings.autonomy_memory_incident_ttl_days if candidate.lesson_type == "incident_warning" else self.settings.autonomy_memory_role_ttl_days
+        metadata = {**(metadata or {})}
+        memory_status = _memory_status_for_lesson_status(status, metadata)
+        allowed_contexts = default_allowed_contexts(memory_status, role=role, metadata=metadata)
+        forbidden_contexts = default_forbidden_contexts(memory_status)
+        promotion_history = []
+        if metadata.get("change_control_id") or metadata.get("reviewer"):
+            promotion_history.append(
+                {
+                    "reviewer": metadata.get("reviewer"),
+                    "change_control_id": metadata.get("change_control_id"),
+                    "memory_status": memory_status,
+                    "created_at_ms": now_ms,
+                }
+            )
         return RoleLessonMemory(
             id=f"mem_{uuid4().hex}",
             role=role,  # type: ignore[arg-type]
@@ -432,7 +475,12 @@ class MemoryService:
             created_at_ms=now_ms,
             activated_at_ms=now_ms if status == "active" else None,
             expires_at_ms=now_ms + ttl_days * 86_400_000,
-            metadata={"source": "evidence_gated_memory_pipeline", **(metadata or {}), "exchange_actions": []},
+            memory_status=memory_status,  # type: ignore[arg-type]
+            allowed_contexts=allowed_contexts,
+            forbidden_contexts=forbidden_contexts,
+            promotion_history=promotion_history,
+            rollback_target=metadata.get("rollback_target"),
+            metadata={"source": "evidence_gated_memory_pipeline", **metadata, "memory_status": memory_status, "exchange_actions": []},
         )
 
     async def _persist_shadow_lesson(self, lesson: RoleLessonMemory) -> None:
@@ -449,6 +497,34 @@ class MemoryService:
         if self._repo_enabled():
             await self.repository.upsert_operator_output_lesson(lesson.model_dump(mode="json"))
             await self.repository.record_autonomy_event("operator_output_lesson_promoted", actor="autonomy_memory", payload={"lesson_id": lesson.id, "exchange_actions": []})
+
+    async def _record_memory_injection_event(
+        self,
+        *,
+        run_id: str | None,
+        role: str,
+        context_type: str,
+        allowed_ids: list[str],
+        blocked_ids: list[str],
+        decisions: list[dict[str, Any]],
+    ) -> None:
+        if not self._repo_enabled():
+            return
+        record = getattr(self.repository, "record_memory_injection_event", None)
+        if not callable(record):
+            return
+        await record(
+            {
+                "run_id": run_id,
+                "role": role,
+                "context_type": context_type,
+                "memory_ids": allowed_ids,
+                "blocked_memory_ids": blocked_ids,
+                "policy_decision": {"decisions": decisions},
+                "created_at_ms": _now_ms(),
+                "metadata": {"exchange_actions": []},
+            }
+        )
 
     def _repo_enabled(self) -> bool:
         return self.repository is not None and getattr(self.repository, "enabled", False)
@@ -663,20 +739,37 @@ def _default_role_for_lesson(lesson_type: str) -> str:
 
 
 def _role_memory_injection_allowed(role: str, settings: Settings) -> bool:
+    return role.lower().strip().replace("-", "_") in set(settings.autonomy_memory_prompt_role_list)
+
+
+def _role_prompt_list_allows(status: str, role: str, settings: Settings) -> bool:
     role_key = role.lower().strip().replace("-", "_")
-    sensitive_roles = {"risk", "execution", "treasury"}
-    return role_key in set(settings.autonomy_memory_prompt_role_list) and not (
-        settings.autonomy_memory_require_change_control_for_risk_execution and role_key in sensitive_roles
-    )
+    if role_key in set(settings.autonomy_memory_prompt_role_list):
+        return True
+    # Explicitly approved policy memories may enter their approved role even if
+    # the broad prompt-role list excludes that role.
+    return status == "approved_policy"
 
 
 def _lesson_injection_allowed_for_role(lesson: RoleLessonMemory, role: str, settings: Settings) -> bool:
-    role_key = role.lower().strip().replace("-", "_")
-    sensitive_roles = {"risk", "execution", "treasury"}
-    approved_roles = {str(item).lower() for item in lesson.metadata.get("approved_for_role_injection_roles", [])}
-    if settings.autonomy_memory_require_change_control_for_risk_execution and role_key in sensitive_roles:
-        return bool(lesson.metadata.get("change_control_id") and role_key in approved_roles)
-    return role_key in set(settings.autonomy_memory_prompt_role_list)
+    policy = MemoryPolicyEngine()
+    decision = policy.can_inject(lesson, role=role, mode="paper")
+    return decision.allowed and _role_prompt_list_allows(decision.status, role, settings)
+
+
+def _memory_status_for_lesson_status(status: str, metadata: dict[str, Any]) -> str:
+    explicit = metadata.get("memory_status")
+    if explicit in {"candidate", "validated_advisory", "approved_policy", "deprecated", "reverted"}:
+        return str(explicit)
+    if status == "shadow":
+        return "validated_advisory"
+    if status == "active" and metadata.get("change_control_id"):
+        return "approved_policy"
+    if status == "active":
+        return "validated_advisory"
+    if status in {"archived", "expired", "rejected"}:
+        return "deprecated"
+    return "candidate"
 
 
 def _scope_score(scope: dict[str, Any], *, symbol: str | None, signal_type: str | None, market_regime: str | None) -> int:
