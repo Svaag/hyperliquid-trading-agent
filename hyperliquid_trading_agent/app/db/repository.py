@@ -404,6 +404,20 @@ class Repository:
             log.warning("risk_gateway_decision_record_failed", intent_id=decision.get("intent_id"), error=type(exc).__name__)
             return None
 
+    async def list_risk_gateway_decisions(self, limit: int = 100, decision: str | None = None) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        try:
+            async with self.sessionmaker() as session:
+                stmt = select(RiskGatewayDecisionRecord).order_by(RiskGatewayDecisionRecord.created_at_ms.desc()).limit(limit)
+                if decision:
+                    stmt = stmt.where(RiskGatewayDecisionRecord.decision == decision)
+                result = await session.execute(stmt)
+                return [_risk_gateway_decision_to_dict(item) for item in result.scalars().all()]
+        except Exception as exc:  # pragma: no cover
+            log.warning("risk_gateway_decisions_list_failed", error=type(exc).__name__)
+            return []
+
     async def record_memory_injection_event(self, event: dict[str, Any]) -> str | None:
         if self.sessionmaker is None:
             return None
@@ -425,6 +439,20 @@ class Repository:
         except Exception as exc:  # pragma: no cover
             log.warning("memory_injection_event_record_failed", role=event.get("role"), error=type(exc).__name__)
             return None
+
+    async def list_memory_injection_events(self, limit: int = 100, role: str | None = None) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        try:
+            async with self.sessionmaker() as session:
+                stmt = select(MemoryInjectionEventRecord).order_by(MemoryInjectionEventRecord.created_at_ms.desc()).limit(limit)
+                if role:
+                    stmt = stmt.where(MemoryInjectionEventRecord.role == role)
+                result = await session.execute(stmt)
+                return [_memory_injection_event_to_dict(item) for item in result.scalars().all()]
+        except Exception as exc:  # pragma: no cover
+            log.warning("memory_injection_events_list_failed", error=type(exc).__name__)
+            return []
 
     async def create_decision_run(
         self,
@@ -1406,6 +1434,16 @@ class Repository:
             item.approval_requirements_json = [str(item) for item in packet.get("approval_requirements") or []]
             await session.commit()
             return item.review_packet_id
+
+    async def list_review_packets(self, proposal_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(ReviewPacketRecord).order_by(ReviewPacketRecord.created_at_ms.desc()).limit(limit)
+            if proposal_id:
+                stmt = stmt.where(ReviewPacketRecord.proposal_id == proposal_id)
+            result = await session.execute(stmt)
+            return [_review_packet_to_dict(item) for item in result.scalars().all()]
 
     async def upsert_promotion_decision(self, decision: dict[str, Any]) -> str | None:
         if self.sessionmaker is None:
@@ -2394,6 +2432,36 @@ def _newswire_event_to_dict(item: NewswireEventRow) -> dict[str, Any]:
     }
 
 
+def _risk_gateway_decision_to_dict(item: RiskGatewayDecisionRecord) -> dict[str, Any]:
+    return {
+        "decision_id": item.decision_id,
+        "intent_id": item.intent_id,
+        "mode": item.mode,
+        "decision": item.decision,
+        "violations": item.violations_json,
+        "limits_snapshot": item.limits_snapshot_json,
+        "market_snapshot": item.market_snapshot_json,
+        "portfolio_snapshot": item.portfolio_snapshot_json,
+        "config_version_id": item.config_version_id,
+        "created_at_ms": item.created_at_ms,
+        "metadata": item.metadata_json,
+    }
+
+
+def _memory_injection_event_to_dict(item: MemoryInjectionEventRecord) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "run_id": item.run_id,
+        "role": item.role,
+        "context_type": item.context_type,
+        "memory_ids": item.memory_ids_json,
+        "blocked_memory_ids": item.blocked_memory_ids_json,
+        "policy_decision": item.policy_decision_json,
+        "created_at_ms": item.created_at_ms,
+        "metadata": item.metadata_json,
+    }
+
+
 def _decision_context_to_dict(item: DecisionContextRecord) -> dict[str, Any]:
     return {
         "id": item.id,
@@ -2845,6 +2913,26 @@ def _operator_feedback_to_dict(item: OperatorFeedbackRecord) -> dict[str, Any]:
         "note": item.note,
         "created_at_ms": item.created_at_ms,
         "metadata": item.metadata_json,
+    }
+
+
+def _review_packet_to_dict(item: ReviewPacketRecord) -> dict[str, Any]:
+    return {
+        "review_packet_id": item.review_packet_id,
+        "proposal_id": item.proposal_id,
+        "evidence_links": item.evidence_links_json,
+        "affected_strategies": item.affected_strategies_json,
+        "affected_symbols": item.affected_symbols_json,
+        "affected_venues": item.affected_venues_json,
+        "risk_direction": item.risk_direction,
+        "expected_effect": item.expected_effect,
+        "known_risks": item.known_risks_json,
+        "replay_results": item.replay_results_json,
+        "shadow_results": item.shadow_results_json,
+        "reviewer_findings": item.reviewer_findings_json,
+        "approval_requirements": item.approval_requirements_json,
+        "rollback_plan_id": item.rollback_plan_id,
+        "created_at_ms": item.created_at_ms,
     }
 
 

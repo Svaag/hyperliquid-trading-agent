@@ -14,6 +14,15 @@ def main() -> None:
     parser.add_argument("--token", default=os.getenv("AGENT_API_BEARER_TOKEN", ""))
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list-proposals")
+    sub.add_parser("list-review-ready")
+    replays = sub.add_parser("list-replays")
+    replays.add_argument("--proposal-id", default=None)
+    shadows = sub.add_parser("list-shadows")
+    shadows.add_argument("--proposal-id", default=None)
+    packets = sub.add_parser("list-review-packets")
+    packets.add_argument("--proposal-id", default=None)
+    sub.add_parser("dashboard-data")
+    sub.add_parser("dashboard-url")
     show = sub.add_parser("show-proposal")
     show.add_argument("proposal_id")
     replay = sub.add_parser("run-replay")
@@ -42,6 +51,21 @@ def main() -> None:
 def _dispatch(client: httpx.Client, args: argparse.Namespace) -> Any:
     if args.command == "list-proposals":
         return client.get("/governance/proposals").raise_for_status_or_json()
+    if args.command == "list-review-ready":
+        return client.get("/governance/proposals/review-ready").raise_for_status_or_json()
+    if args.command == "list-replays":
+        params = {"proposal_id": args.proposal_id} if args.proposal_id else None
+        return client.get("/governance/replay-results", params=params).raise_for_status_or_json()
+    if args.command == "list-shadows":
+        params = {"proposal_id": args.proposal_id} if args.proposal_id else None
+        return client.get("/governance/shadow-comparisons", params=params).raise_for_status_or_json()
+    if args.command == "list-review-packets":
+        params = {"proposal_id": args.proposal_id} if args.proposal_id else None
+        return client.get("/governance/review-packets", params=params).raise_for_status_or_json()
+    if args.command == "dashboard-data":
+        return client.get("/governance/dashboard/data").raise_for_status_or_json()
+    if args.command == "dashboard-url":
+        return {"url": str(client.base_url).rstrip("/") + "/governance/dashboard"}
     if args.command == "show-proposal":
         return client.get(f"/governance/proposals/{args.proposal_id}").raise_for_status_or_json()
     if args.command == "run-replay":
