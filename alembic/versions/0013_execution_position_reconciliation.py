@@ -1,7 +1,7 @@
 """Add paper/shadow execution, position thesis, reconciliation, and attribution.
 
-Revision ID: 0013_execution_position_reconciliation
-Revises: 0012_candidate_ev_allocation_debate
+Revision ID: 0013_exec_pos_recon
+Revises: 0012_candidate_ev_alloc
 """
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0013_execution_position_reconciliation"
-down_revision = "0012_candidate_ev_allocation_debate"
+revision = "0013_exec_pos_recon"
+down_revision = "0012_candidate_ev_alloc"
 branch_labels = None
 depends_on = None
 

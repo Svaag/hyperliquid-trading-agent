@@ -1,7 +1,7 @@
 """Add engine model registry and retention audit tables.
 
 Revision ID: 0014_model_registry_retention
-Revises: 0013_execution_position_reconciliation
+Revises: 0013_exec_pos_recon
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0014_model_registry_retention"
-down_revision = "0013_execution_position_reconciliation"
+down_revision = "0013_exec_pos_recon"
 branch_labels = None
 depends_on = None
 

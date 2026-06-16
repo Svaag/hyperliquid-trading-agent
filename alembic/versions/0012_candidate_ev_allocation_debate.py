@@ -1,6 +1,6 @@
 """Add engine candidates, EV, allocation, and debate records.
 
-Revision ID: 0012_candidate_ev_allocation_debate
+Revision ID: 0012_candidate_ev_alloc
 Revises: 0011_engine_event_feature_store
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0012_candidate_ev_allocation_debate"
+revision = "0012_candidate_ev_alloc"
 down_revision = "0011_engine_event_feature_store"
 branch_labels = None
 depends_on = None
