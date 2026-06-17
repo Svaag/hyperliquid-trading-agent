@@ -12,7 +12,7 @@ from hyperliquid_trading_agent.app.agent.high_stakes.formatting import format_tr
 from hyperliquid_trading_agent.app.agent.high_stakes.graph import HighStakesDebateGraph
 from hyperliquid_trading_agent.app.agent.high_stakes.prompts import ROLES, role_system_prompt
 from hyperliquid_trading_agent.app.agent.high_stakes.roles import HighStakesRoleRunner, RoleCallResult
-from hyperliquid_trading_agent.app.agent.high_stakes.routing import route_high_stakes
+from hyperliquid_trading_agent.app.agent.high_stakes.routing import extract_route_coins, route_high_stakes
 from hyperliquid_trading_agent.app.agent.high_stakes.schemas import (
     CritiqueResolution,
     DataCoverage,
@@ -296,6 +296,14 @@ def test_parse_trade_setup_handles_position_hold_language():
     assert setup["stop"] == 15.50
 
 
+def test_route_coin_extraction_ignores_error_log_tokens():
+    coins = extract_route_coins("SPCX review failed with Invalid JSON: EOF while parsing and HTTPStatusError")
+
+    assert "SPCX" in coins
+    assert "EOF" not in coins
+    assert "JSON" not in coins
+
+
 def test_debate_participation_shows_fallback_reason_and_latency():
     proposal = TradeProposal(
         status="manual_review_required",
@@ -329,6 +337,19 @@ def test_general_proposal_format_omits_empty_sections():
     assert "Treasury" not in content
     assert "Adversary" not in content
     assert "No endpoint coverage summary" not in content
+
+
+def test_debate_participation_humanizes_structured_json_fallback():
+    proposal = TradeProposal(
+        status="manual_review_required",
+        judge_summary="Review degraded.",
+        debate_participation=[{"role": "judge", "status": "fallback", "fallback_reason": "invalid_structured_json", "latency_ms": 52100}],
+    )
+
+    content = format_trade_proposal(proposal)
+
+    assert "malformed structured output" in content
+    assert "invalid_structured_json" not in content
 
 
 def test_compact_position_review_hides_model_fallback_noise():

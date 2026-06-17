@@ -374,6 +374,8 @@ def _first_coin(features: dict[str, Any]) -> str | None:
 def _coin_from_result(data: Any, result: dict[str, Any]) -> str:
     if isinstance(data, list) and data and isinstance(data[0], dict) and data[0].get("s"):
         return str(data[0]["s"])
+    if isinstance(data, dict) and data.get("coin"):
+        return str(data["coin"])
     input_candidate = result.get("input_json")
     input_json: dict[str, Any] = input_candidate if isinstance(input_candidate, dict) else {}
     return str(input_json.get("coin", "UNKNOWN"))

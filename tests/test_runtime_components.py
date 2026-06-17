@@ -278,6 +278,17 @@ async def test_model_gateway_attempt_timeout_falls_through_to_next_model(monkeyp
     assert timeouts[0] > timeouts[1]
 
 
+def test_structured_parser_accepts_partial_json_object():
+    from hyperliquid_trading_agent.app.agent.high_stakes.schemas import JudgeDecision
+    from hyperliquid_trading_agent.app.agent.model_gateway import _parse_structured_content
+
+    parsed = _parse_structured_content('{"status":"manual_review_required","summary":"ok","final_rationale":["a","b"', JudgeDecision)
+
+    assert parsed.status == "manual_review_required"
+    assert parsed.summary == "ok"
+    assert parsed.final_rationale == ["a", "b"]
+
+
 def test_front_loaded_timeouts_front_loads_primary():
     from hyperliquid_trading_agent.app.agent.model_gateway import _front_loaded_timeouts
 

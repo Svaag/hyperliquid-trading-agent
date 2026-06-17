@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
+from pydantic_core import from_json
 
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.logging import get_logger
@@ -326,13 +327,34 @@ def _parse_structured_content(content: str, response_model: type[StructuredModel
     text = content.strip()
     if not text:
         raise ValueError("empty structured model response")
-    try:
-        return response_model.model_validate_json(text)
-    except (ValueError, ValidationError):
-        extracted = _extract_first_json_object(text)
-        if extracted is None:
-            raise
-        return response_model.model_validate_json(extracted)
+    last_error: Exception | None = None
+    for candidate in _structured_json_candidates(text):
+        try:
+            return response_model.model_validate_json(candidate)
+        except (ValueError, ValidationError) as exc:
+            last_error = exc
+        try:
+            partial = from_json(candidate, allow_partial=True)
+            if isinstance(partial, dict):
+                return response_model.model_validate(partial)
+        except (ValueError, ValidationError) as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise ValueError("no JSON object found in structured model response")
+
+
+def _structured_json_candidates(text: str) -> list[str]:
+    candidates = [text]
+    extracted = _extract_first_json_object(text)
+    if extracted and extracted not in candidates:
+        candidates.append(extracted)
+    start = text.find("{")
+    if start > 0:
+        suffix = text[start:]
+        if suffix not in candidates:
+            candidates.append(suffix)
+    return candidates
 
 
 def _extract_first_json_object(text: str) -> str | None:

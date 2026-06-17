@@ -120,7 +120,9 @@ class AgentTools:
 
     async def get_candles(self, coin: str, interval: str = "1h", lookback_hours: int = 24) -> ToolResult:
         async def run() -> Any:
-            resolved_coin = await self._canonical_market_coin(coin)
+            resolved_coin = await self._resolve_market_coin(coin)
+            if resolved_coin is None:
+                return {"coin": coin.upper(), "error": "asset_not_found", "candles": []}
             end = int(time.time() * 1000)
             start = end - lookback_hours * 60 * 60 * 1000
             return await self.hyperliquid.candle_snapshot(resolved_coin, interval, start, end)
@@ -134,7 +136,9 @@ class AgentTools:
 
     async def get_funding_context(self, coin: str) -> ToolResult:
         async def run() -> dict[str, Any]:
-            resolved_coin = await self._canonical_market_coin(coin)
+            resolved_coin = await self._resolve_market_coin(coin)
+            if resolved_coin is None:
+                return {"coin": coin.upper(), "query_symbol": coin.upper(), "error": "asset_not_found", "funding_history_48h": [], "predicted_fundings": []}
             end = int(time.time() * 1000)
             start = end - 48 * 60 * 60 * 1000
             history = await self.hyperliquid.funding_history(resolved_coin, start, end)
@@ -551,10 +555,17 @@ class AgentTools:
         """Return the Hyperliquid coin identifier used by market-data endpoints."""
         return await self._canonical_market_coin(coin)
 
+    async def resolve_market_coin(self, coin: str) -> str | None:
+        return await self._resolve_market_coin(coin)
+
     async def _canonical_market_coin(self, coin: str) -> str:
+        resolved = await self._resolve_market_coin(coin)
+        return resolved or coin.strip().upper()
+
+    async def _resolve_market_coin(self, coin: str) -> str | None:
         cleaned = coin.strip()
         if not cleaned:
-            return coin.upper()
+            return None
         if ":" in cleaned:
             return cleaned
         cached = self._hip3_symbol_cache.get(cleaned.upper())
@@ -570,7 +581,7 @@ class AgentTools:
         if resolved is not None:
             self._hip3_symbol_cache[cleaned.upper()] = resolved.coin
             return resolved.coin
-        return cleaned.upper()
+        return None
 
     async def _resolve_hip3_asset(self, symbol: str) -> tuple[Any | None, dict[str, str], str | None]:
         target = symbol.strip()

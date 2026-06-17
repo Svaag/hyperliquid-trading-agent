@@ -6,6 +6,26 @@ from hyperliquid_trading_agent.app.agent.high_stakes.schemas import HighStakesRo
 
 ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 TOKEN_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,12}\b")
+NON_MARKET_TOKENS = {
+    "API",
+    "EOF",
+    "ERROR",
+    "HTTP",
+    "HTTPS",
+    "INFO",
+    "JSON",
+    "LLM",
+    "POST",
+    "REST",
+    "SDK",
+    "TIMEOUT",
+    "URI",
+    "URL",
+    "USD",
+    "USDC",
+    "USDT",
+}
+
 COMMON_COINS = {
     "BTC",
     "ETH",
@@ -98,15 +118,19 @@ def extract_route_coins(text: str) -> list[str]:
     # Any all-caps token may be a Hyperliquid ticker. Keep the explicit common
     # list for lower/mixed-case extraction, but do not block uppercase symbols
     # just because this allowlist is stale.
-    uppercase_tickers = {match.group(0).upper() for match in TOKEN_RE.finditer(text)}
-    candidates = set(TOKEN_RE.findall(text.upper()))
-    coins = list(uppercase_tickers | {coin for coin in candidates if coin in COMMON_COINS or coin.startswith("@")} )
+    uppercase_tickers = {match.group(0).upper() for match in TOKEN_RE.finditer(text) if not _excluded_route_token(match.group(0))}
+    candidates = {coin for coin in TOKEN_RE.findall(text.upper()) if not _excluded_route_token(coin)}
+    coins = list(uppercase_tickers | {coin for coin in candidates if coin in COMMON_COINS or coin.startswith("@")})
     lowered = text.lower()
     if "bitcoin" in lowered:
         coins.append("BTC")
     if "ethereum" in lowered:
         coins.append("ETH")
     return sorted(set(coins))
+
+
+def _excluded_route_token(token: str) -> bool:
+    return token.strip().upper() in NON_MARKET_TOKENS
 
 
 def _selected_roles(*, activate: bool, research_intent: bool, account_intent: bool, execution_intent: bool) -> list[str]:

@@ -138,13 +138,13 @@ class HighStakesRoleRunner:
     async def _complete_structured_with_timeout(self, *args: Any, **kwargs: Any):
         # Models can hang or return malformed JSON. The gateway front-loads the role budget
         # across the fallback chain and enforces each slice with litellm's native (HTTP-level)
-        # timeout, which actually interrupts an in-flight call — asyncio.wait_for does not, it
-        # just waits for the late result. The outer wait_for here is only a coarse backstop
-        # above the gateway's own per-attempt deadlines.
+        # timeout, which actually interrupts an in-flight call — asyncio.wait_for is only a
+        # coarse cancellation backstop above the gateway's own per-attempt deadlines.
         timeout_seconds = float(kwargs.pop("timeout_seconds", self._default_role_timeout_seconds()))
         kwargs.setdefault("attempt_timeout_budget", timeout_seconds)
+        backstop_slack = min(5.0, max(2.0, timeout_seconds * 0.10))
         return await asyncio.wait_for(
-            self.model_gateway.complete_structured(*args, **kwargs), timeout=timeout_seconds + 15.0
+            self.model_gateway.complete_structured(*args, **kwargs), timeout=timeout_seconds + backstop_slack
         )
 
     def _role_timeout_seconds(self, state: dict[str, Any], role: str) -> float:

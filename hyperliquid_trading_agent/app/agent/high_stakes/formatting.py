@@ -202,6 +202,8 @@ def _short_model(model: str) -> str:
 def _short_reason(reason: str) -> str:
     cleaned = " ".join(reason.replace("openrouter:", "").split())
     cleaned = cleaned.replace("All configured model attempts failed or lacked credentials:", "").strip()
+    if cleaned == "invalid_structured_json":
+        cleaned = "malformed structured output"
     return cleaned if len(cleaned) <= 70 else cleaned[:69].rstrip(" ;,") + "…"
 
 

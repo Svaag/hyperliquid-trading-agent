@@ -404,13 +404,19 @@ class HighStakesContextBuilder:
 
     def _sdk_coin_planned(self, name: str, endpoints: list[str], profile: str, func: Callable[..., Awaitable[Any]], coin: str, *args: Any) -> PlannedCall:
         async def call() -> ToolResult:
-            resolved_coin = await self._canonical_market_coin(coin)
-            data = await func(resolved_coin, *args)
+            resolved_coin = await self._resolve_market_coin(coin)
+            if resolved_coin is None:
+                data = {"coin": coin.upper(), "error": "asset_not_found"}
+            else:
+                data = await func(resolved_coin, *args)
             return ToolResult(tool=name, data=data, source=f"hyperliquid-sdk:Info/{','.join(endpoints)}", timestamp_ms=int(time.time() * 1000), freshness="live_or_recent_cache")
 
         return PlannedCall(name, endpoints, profile, call)
 
-    async def _canonical_market_coin(self, coin: str) -> str:
+    async def _resolve_market_coin(self, coin: str) -> str | None:
+        nullable_resolver = getattr(self.tools, "resolve_market_coin", None)
+        if callable(nullable_resolver):
+            return await nullable_resolver(coin)
         public_resolver = getattr(self.tools, "canonical_market_coin", None)
         if callable(public_resolver):
             return await public_resolver(coin)

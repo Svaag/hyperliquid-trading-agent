@@ -128,6 +128,19 @@ async def test_semantic_candles_and_funding_canonicalize_bare_hip3_symbol():
     assert hyperliquid.funding_coins == ["xyz:SPCX"]
 
 
+async def test_candles_and_funding_do_not_call_api_for_unknown_symbol():
+    hyperliquid = FakeHyperliquidHip3()
+    tools = AgentTools(hyperliquid=hyperliquid, news=FakeNews())  # type: ignore[arg-type]
+
+    candles = await tools.get_candles("EOF", interval="1h", lookback_hours=1)
+    funding = await tools.get_funding_context("EOF")
+
+    assert candles.data["error"] == "asset_not_found"
+    assert funding.data["error"] == "asset_not_found"
+    assert hyperliquid.candle_coins == []
+    assert hyperliquid.funding_coins == []
+
+
 async def test_high_stakes_sdk_verification_canonicalizes_hip3_symbol():
     hyperliquid = FakeHyperliquidHip3()
     tools = AgentTools(hyperliquid=hyperliquid, news=FakeNews())  # type: ignore[arg-type]
