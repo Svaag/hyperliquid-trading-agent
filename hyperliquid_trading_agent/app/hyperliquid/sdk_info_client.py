@@ -39,13 +39,19 @@ class SDKInfoClient:
         info = await self._ensure_info()
         return await asyncio.to_thread(lambda: getattr(info, method)(*args, **kwargs))
 
+    async def _post_info(self, payload: dict[str, Any]) -> Any:
+        info = await self._ensure_info()
+        return await asyncio.to_thread(lambda: info.post("/info", payload))
+
     async def all_mids(self, dex: str = "") -> Any:
         return await self._call("all_mids", dex)
 
     async def meta(self, dex: str = "") -> Any:
         return await self._call("meta", dex)
 
-    async def meta_and_asset_ctxs(self) -> Any:
+    async def meta_and_asset_ctxs(self, dex: str = "") -> Any:
+        if dex:
+            return await self._post_info({"type": "metaAndAssetCtxs", "dex": dex})
         return await self._call("meta_and_asset_ctxs")
 
     async def perp_dexs(self) -> Any:
@@ -82,13 +88,33 @@ class SDKInfoClient:
         return await self._call("user_funding_history", address.lower(), start_time_ms, end_time_ms)
 
     async def funding_history(self, coin: str, start_time_ms: int, end_time_ms: int | None = None) -> Any:
-        return await self._call("funding_history", coin.upper(), start_time_ms, end_time_ms)
+        name = _normalize_coin_name(coin)
+        try:
+            return await self._call("funding_history", name, start_time_ms, end_time_ms)
+        except KeyError:
+            payload: dict[str, Any] = {"type": "fundingHistory", "coin": name, "startTime": start_time_ms}
+            if end_time_ms is not None:
+                payload["endTime"] = end_time_ms
+            return await self._post_info(payload)
 
     async def l2_snapshot(self, coin: str) -> Any:
-        return await self._call("l2_snapshot", coin.upper())
+        name = _normalize_coin_name(coin)
+        try:
+            return await self._call("l2_snapshot", name)
+        except KeyError:
+            return await self._post_info({"type": "l2Book", "coin": name})
 
     async def candles_snapshot(self, coin: str, interval: str, start_time_ms: int, end_time_ms: int) -> Any:
-        return await self._call("candles_snapshot", coin.upper(), interval, start_time_ms, end_time_ms)
+        name = _normalize_coin_name(coin)
+        try:
+            return await self._call("candles_snapshot", name, interval, start_time_ms, end_time_ms)
+        except KeyError:
+            return await self._post_info(
+                {
+                    "type": "candleSnapshot",
+                    "req": {"coin": name, "interval": interval, "startTime": start_time_ms, "endTime": end_time_ms},
+                }
+            )
 
     async def user_fees(self, address: str) -> Any:
         return await self._call("user_fees", address.lower())
@@ -119,3 +145,13 @@ class SDKInfoClient:
 
     async def query_referral_state(self, address: str) -> Any:
         return await self._call("query_referral_state", address.lower())
+
+
+def _normalize_coin_name(coin: str) -> str:
+    text = coin.strip()
+    if not text:
+        return coin.upper()
+    if ":" not in text:
+        return text.upper()
+    dex, base = text.split(":", 1)
+    return f"{dex.strip().lower()}:{base.strip().upper()}"

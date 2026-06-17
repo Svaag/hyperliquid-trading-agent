@@ -116,6 +116,8 @@ def _market_features(data: dict[str, Any]) -> dict[str, Any]:
         ctx_candidate = asset.get("context")
         ctx: dict[str, Any] = ctx_candidate if isinstance(ctx_candidate, dict) else {}
         out[str(coin)] = {
+            "query_symbol": asset.get("query_symbol"),
+            "coin": asset.get("coin", coin),
             "kind": asset.get("kind"),
             "asset_id": asset.get("asset_id"),
             "mid": _float_or_none(asset.get("mid")),

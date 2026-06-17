@@ -707,7 +707,7 @@ def _deterministic_position_rationale(features: dict[str, Any], draft: TradeSetu
     if not draft.coin or draft.entry is None or draft.stop is None:
         return []
     market = features.get("market", {}) if isinstance(features, dict) else {}
-    asset = market.get(draft.coin) if isinstance(market, dict) else None
+    asset = _feature_section_for_coin(market, draft.coin) if isinstance(market, dict) else None
     if not isinstance(asset, dict):
         return []
     mid = asset.get("mid") or asset.get("mark")
@@ -720,7 +720,7 @@ def _deterministic_position_rationale(features: dict[str, Any], draft: TradeSetu
     pnl_pct = ((current - entry) / entry) * 100 if is_long else ((entry - current) / entry) * 100
     stop_distance_pct = (abs(current - stop) / current) * 100 if current else None
     candles_by_coin = features.get("candles", {}) if isinstance(features, dict) else {}
-    candles = candles_by_coin.get(draft.coin, {}) if isinstance(candles_by_coin, dict) else {}
+    candles = _feature_section_for_coin(candles_by_coin, draft.coin) if isinstance(candles_by_coin, dict) else {}
     recent_support = _float_or_none(candles.get("recent_support"))
     recent_resistance = _float_or_none(candles.get("recent_resistance"))
     recent_change_pct = _float_or_none(candles.get("recent_change_pct"))
@@ -845,11 +845,36 @@ def _float_or_none(value: Any) -> float | None:
 
 def _asset_validation(features: dict[str, Any], draft: TradeSetupDraft, risk: dict[str, Any]) -> str:
     market = features.get("market", {}) if isinstance(features, dict) else {}
-    asset = market.get(draft.coin) if draft.coin and isinstance(market, dict) else None
+    asset = _feature_section_for_coin(market, draft.coin) if draft.coin and isinstance(market, dict) else None
     summary = asset_validation_summary(asset, draft.entry, risk.get("size_units"))
     if summary.get("status") == "asset_context_missing":
         return "asset context missing"
     return f"asset_id={summary.get('asset_id')} price_valid={summary.get('price_valid')} size_rounded={summary.get('rounded_size')}"
+
+
+def _feature_section_for_coin(section: Any, coin: str | None) -> dict[str, Any]:
+    if not coin or not isinstance(section, dict):
+        return {}
+    target = str(coin).upper()
+    for key, value in section.items():
+        if isinstance(value, dict) and _coin_matches_feature(target, str(key), value):
+            return value
+    if len(section) == 1:
+        only_value = next(iter(section.values()))
+        return only_value if isinstance(only_value, dict) else {}
+    return {}
+
+
+def _coin_matches_feature(target: str, key: str, value: dict[str, Any]) -> bool:
+    candidates = {key.upper(), key.upper().split(":", 1)[-1]}
+    for field in ["coin", "query_symbol"]:
+        raw = value.get(field)
+        if raw is None:
+            continue
+        text = str(raw).upper()
+        candidates.add(text)
+        candidates.add(text.split(":", 1)[-1])
+    return target in candidates or target.split(":", 1)[-1] in candidates
 
 
 def _error_proposal(message: str, status: str = "error") -> TradeProposal:

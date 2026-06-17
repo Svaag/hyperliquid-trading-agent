@@ -307,9 +307,9 @@ class HighStakesContextBuilder:
             self._sdk_planned("sdk_all_mids", ["allMids"], DataProfile.MARKET_DEEP, self.sdk_info.all_mids),
             self._sdk_planned("sdk_meta_and_asset_ctxs", ["metaAndAssetCtxs"], DataProfile.MARKET_DEEP, self.sdk_info.meta_and_asset_ctxs),
             self._sdk_planned("sdk_spot_meta_and_asset_ctxs", ["spotMetaAndAssetCtxs"], DataProfile.MARKET_DEEP, self.sdk_info.spot_meta_and_asset_ctxs),
-            self._sdk_planned(f"sdk_l2_{coin}", ["l2Book"], DataProfile.MARKET_DEEP, self.sdk_info.l2_snapshot, coin),
-            self._sdk_planned(f"sdk_candles_{coin}", ["candleSnapshot"], DataProfile.MARKET_DEEP, self.sdk_info.candles_snapshot, coin, interval, start, end),
-            self._sdk_planned(f"sdk_funding_{coin}", ["fundingHistory"], DataProfile.MARKET_DEEP, self.sdk_info.funding_history, coin, end - 48 * 60 * 60 * 1000, end),
+            self._sdk_coin_planned(f"sdk_l2_{coin}", ["l2Book"], DataProfile.MARKET_DEEP, self.sdk_info.l2_snapshot, coin),
+            self._sdk_coin_planned(f"sdk_candles_{coin}", ["candleSnapshot"], DataProfile.MARKET_DEEP, self.sdk_info.candles_snapshot, coin, interval, start, end),
+            self._sdk_coin_planned(f"sdk_funding_{coin}", ["fundingHistory"], DataProfile.MARKET_DEEP, self.sdk_info.funding_history, coin, end - 48 * 60 * 60 * 1000, end),
         ]
 
     def _account_calls(self, address: str, *, deep: bool) -> list[PlannedCall]:
@@ -401,6 +401,23 @@ class HighStakesContextBuilder:
             return ToolResult(tool=name, data=data, source=f"hyperliquid-sdk:Info/{','.join(endpoints)}", timestamp_ms=int(time.time() * 1000), freshness="live_or_recent_cache")
 
         return PlannedCall(name, endpoints, profile, call)
+
+    def _sdk_coin_planned(self, name: str, endpoints: list[str], profile: str, func: Callable[..., Awaitable[Any]], coin: str, *args: Any) -> PlannedCall:
+        async def call() -> ToolResult:
+            resolved_coin = await self._canonical_market_coin(coin)
+            data = await func(resolved_coin, *args)
+            return ToolResult(tool=name, data=data, source=f"hyperliquid-sdk:Info/{','.join(endpoints)}", timestamp_ms=int(time.time() * 1000), freshness="live_or_recent_cache")
+
+        return PlannedCall(name, endpoints, profile, call)
+
+    async def _canonical_market_coin(self, coin: str) -> str:
+        public_resolver = getattr(self.tools, "canonical_market_coin", None)
+        if callable(public_resolver):
+            return await public_resolver(coin)
+        private_resolver = getattr(self.tools, "_canonical_market_coin", None)
+        if callable(private_resolver):
+            return await private_resolver(coin)
+        return coin
 
     def _allowed_addresses(self, request: TradeProposalRequest, route: HighStakesRoute) -> list[str]:
         candidates: list[str] = []

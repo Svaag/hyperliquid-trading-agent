@@ -132,7 +132,9 @@ class ModelGateway:
         schema = response_model.model_json_schema()
         structured_system = (
             f"{system_prompt}\n\nReturn one valid JSON object only. "
-            f"Do not wrap it in markdown. It must conform to this JSON schema:\n{json.dumps(schema, default=str)}"
+            "Do not wrap it in markdown. Use the smallest valid object: include required fields and only non-empty optional fields; "
+            "keep arrays to at most 5 concise items unless the schema explicitly requires more. "
+            f"It must conform to this JSON schema:\n{json.dumps(schema, default=str)}"
         )
         response = await self.complete_with_chain(
             prompt,
@@ -327,10 +329,39 @@ def _parse_structured_content(content: str, response_model: type[StructuredModel
     try:
         return response_model.model_validate_json(text)
     except (ValueError, ValidationError):
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if not match:
+        extracted = _extract_first_json_object(text)
+        if extracted is None:
             raise
-        return response_model.model_validate_json(match.group(0))
+        return response_model.model_validate_json(extracted)
+
+
+def _extract_first_json_object(text: str) -> str | None:
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    return match.group(0) if match else None
 
 
 def _join_prompt_and_context(prompt: str, context: dict[str, Any]) -> str:

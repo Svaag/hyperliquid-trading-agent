@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from hyperliquid_trading_agent.app.agent.high_stakes.json_io import compact_context, model_to_jsonable
 from hyperliquid_trading_agent.app.agent.high_stakes.prompts import role_system_prompt, role_user_prompt
@@ -69,7 +69,7 @@ class HighStakesRoleRunner:
                 RoleOpinion,
                 model_chain=self.settings.role_model_chain(role),
                 temperature=0.1,
-                max_tokens=1400,
+                max_tokens=2200,
                 context={"state": compact_context(await self._state_for_role_model(role, state))},
                 timeout_seconds=self._role_timeout_seconds(state, role),
             )
@@ -92,7 +92,7 @@ class HighStakesRoleRunner:
                 JudgeDecision,
                 model_chain=self.settings.role_model_chain("judge"),
                 temperature=0.05,
-                max_tokens=1600,
+                max_tokens=2200,
                 context={"state": compact_context(await self._state_for_role_model("judge", state))},
                 timeout_seconds=self._role_timeout_seconds(state, "judge"),
             )
@@ -324,7 +324,7 @@ def _state_for_model(state: dict[str, Any]) -> dict[str, Any]:
         "prompt": state.get("prompt"),
         "round": state.get("round"),
         "route": state.get("route"),
-        "context": state.get("context"),
+        "context": _context_for_model(state.get("context")),
         "draft": state.get("draft"),
         "role_outputs": state.get("role_outputs"),
         "judge_decision": state.get("judge_decision"),
@@ -337,9 +337,50 @@ def _state_for_model(state: dict[str, Any]) -> dict[str, Any]:
     return model_to_jsonable(allowed)
 
 
+def _context_for_model(context: Any) -> dict[str, Any] | None:
+    if context is None:
+        return None
+    features = getattr(context, "features", {}) or {}
+    if not isinstance(features, dict):
+        features = {}
+    return {
+        "features": _trim_features_for_model(features),
+        "data_profiles": getattr(context, "data_profiles", []),
+        "data_coverage": getattr(context, "data_coverage", None),
+        "warnings": getattr(context, "warnings", []),
+        "tool_summary": list(features.get("tool_summary", []))[:20],
+        "timestamp_ms": getattr(context, "timestamp_ms", None),
+    }
+
+
+def _trim_features_for_model(features: dict[str, Any]) -> dict[str, Any]:
+    trimmed = dict(features)
+    # Tool outputs can contain full books, candle arrays, and account histories. The
+    # deterministic feature layer already distilled those into market/candle/funding/
+    # risk/execution summaries; cap verbose leaf lists so role calls stay fast and
+    # structured JSON is less likely to be truncated.
+    for section in ["account", "fills"]:
+        value = trimmed.get(section)
+        if isinstance(value, dict):
+            trimmed[section] = _cap_nested_lists(value, limit=10)
+    return _cap_nested_lists(trimmed, limit=20)
+
+
+def _cap_nested_lists(value: Any, *, limit: int) -> Any:
+    if isinstance(value, list):
+        return [_cap_nested_lists(item, limit=limit) for item in value[:limit]]
+    if isinstance(value, dict):
+        return {key: _cap_nested_lists(inner, limit=limit) for key, inner in value.items()}
+    return value
+
+
 def _error_reason(exc: Exception) -> str:
     if isinstance(exc, TimeoutError):
         return "timeout"
+    if isinstance(exc, ValidationError):
+        text = " ".join(str(exc).split())
+        if "Invalid JSON" in text:
+            return "invalid_structured_json"
     text = " ".join(str(exc).split())
     if text.startswith("All configured model attempts failed or lacked credentials:"):
         text = text.split(":", 1)[1].strip()

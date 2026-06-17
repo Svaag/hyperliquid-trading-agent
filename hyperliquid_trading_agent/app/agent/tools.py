@@ -547,6 +547,10 @@ class AgentTools:
                 out.append(dex)
         return out
 
+    async def canonical_market_coin(self, coin: str) -> str:
+        """Return the Hyperliquid coin identifier used by market-data endpoints."""
+        return await self._canonical_market_coin(coin)
+
     async def _canonical_market_coin(self, coin: str) -> str:
         cleaned = coin.strip()
         if not cleaned:

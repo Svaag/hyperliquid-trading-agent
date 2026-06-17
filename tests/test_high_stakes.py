@@ -446,6 +446,40 @@ async def test_sdk_info_client_wraps_official_info_without_exchange():
 
 
 @pytest.mark.asyncio
+async def test_sdk_info_client_falls_back_to_raw_info_for_hip3_names():
+    payloads = []
+
+    class FakeInfo:
+        def __init__(self, base_url, skip_ws):
+            self.ws_manager = None
+
+        def l2_snapshot(self, name):
+            raise KeyError(name)
+
+        def candles_snapshot(self, name, interval, start_time_ms, end_time_ms):
+            raise KeyError(name)
+
+        def funding_history(self, name, start_time_ms, end_time_ms=None):
+            raise KeyError(name)
+
+        def post(self, path, payload):
+            payloads.append((path, payload))
+            return {"ok": payload}
+
+    client = SDKInfoClient(Settings(), info_factory=FakeInfo)
+
+    await client.l2_snapshot("xyz:spcx")
+    await client.candles_snapshot("xyz:spcx", "1h", 1, 2)
+    await client.funding_history("xyz:spcx", 1, 2)
+
+    assert payloads == [
+        ("/info", {"type": "l2Book", "coin": "xyz:SPCX"}),
+        ("/info", {"type": "candleSnapshot", "req": {"coin": "xyz:SPCX", "interval": "1h", "startTime": 1, "endTime": 2}}),
+        ("/info", {"type": "fundingHistory", "coin": "xyz:SPCX", "startTime": 1, "endTime": 2}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_runner_routes_high_stakes_ask_path():
     graph = AskFakeGraph()
     runner = TradingAgentRunner(
