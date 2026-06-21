@@ -30,10 +30,13 @@ def format_hip4_digest(
         for item in rejects[:5]:
             lines.append(f"- `{item.get('code', 'unknown')}` {item.get('message', '')}")
     if loop:
+        last_summary = loop.get("last_summary") if isinstance(loop.get("last_summary"), dict) else loop
+        running = loop.get("running", "n/a")
+        cycles = loop.get("cycle_count", "n/a")
         lines.append(
             "Loop: "
-            f"running=`{loop.get('running')}` cycles=`{loop.get('cycle_count')}` "
-            f"last_status=`{(loop.get('last_summary') or {}).get('status', 'unknown')}`"
+            f"running=`{running}` cycles=`{cycles}` "
+            f"last_status=`{(last_summary or {}).get('status', 'unknown')}`"
         )
     if candidates:
         lines.append("Top candidates:")

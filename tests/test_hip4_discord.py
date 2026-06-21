@@ -20,3 +20,20 @@ def test_hip4_digest_includes_degraded_status_and_rejects() -> None:
     assert "stale" in digest.lower()
     assert "stale_book" in digest
     assert "No accepted HIP-4 candidates" in digest
+
+
+def test_hip4_digest_handles_cycle_summary_loop_without_none_values() -> None:
+    digest = format_hip4_digest(
+        status={"enabled": True, "status": "ok", "registry": {"stale": False}},
+        capabilities=None,
+        candidates=[],
+        rejects=[],
+        paper={"balances": {"USDC": "100"}},
+        reason="proactive_cycle",
+        loop={"cycle_id": "cycle_1", "status": "ok", "candidate_count": 0},
+    )
+
+    assert "running=`n/a`" in digest
+    assert "cycles=`n/a`" in digest
+    assert "last_status=`ok`" in digest
+    assert "None" not in digest

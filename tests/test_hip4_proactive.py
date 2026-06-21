@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,7 @@ def _seed_service(settings: Settings) -> Hip4Service:
     payload = json.loads((FIXTURES / "outcome_meta_with_questions.json").read_text())
     service = Hip4Service(settings=settings)
     service.capabilities = build_capability_probe(payload, settings=settings, probed_at_ms=1)
-    service.registry.load_raw(payload, observed_at_ms=1)
+    service.registry.load_raw(payload, observed_at_ms=int(time.time() * 1000))
     service.ws_manager.books = {
         "#1720": parse_l2_book("#1720", json.loads((FIXTURES / "l2_book_side0.json").read_text()), source="fixture"),
         "#1721": parse_l2_book("#1721", json.loads((FIXTURES / "l2_book_side1.json").read_text()), source="fixture"),
@@ -67,3 +68,21 @@ async def test_proactive_loop_is_disabled_by_default() -> None:
 
     assert service.proactive_loop_status()["enabled"] is False
     assert service.proactive_loop_status()["task_active"] is False
+
+
+def test_registry_refresh_due_uses_refresh_cadence_and_staleness() -> None:
+    settings = Settings(
+        environment="test",
+        hip4_enabled=True,
+        hip4_scan_enabled=True,
+        hip4_outcome_meta_refresh_seconds=60,
+        hip4_registry_max_staleness_ms=300_000,
+    )
+    service = Hip4Service(settings=settings)
+    service.registry.last_refresh_at_ms = int(time.time() * 1000)
+
+    assert service._registry_refresh_due() is False
+
+    service.registry.last_refresh_at_ms = int(time.time() * 1000) - 61_000
+
+    assert service._registry_refresh_due() is True

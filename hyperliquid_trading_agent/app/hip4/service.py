@@ -114,7 +114,7 @@ class Hip4Service:
             return []
         if not self.settings.hip4_mode_allows_scan:
             raise PermissionError("HIP-4 mode does not allow scanning")
-        if self.registry.last_refresh_at_ms is None:
+        if self._registry_refresh_due():
             await self.refresh_registry()
         await self._refresh_books_for_scan()
         candidates = self.scanner.scan(outcomes=self.registry.outcomes, questions=self.registry.questions, books=self.ws_manager.books, capabilities=self.capabilities)
@@ -254,6 +254,15 @@ class Hip4Service:
     def _proactive_loop_configured(self) -> bool:
         return self.settings.hip4_enabled and self.settings.hip4_proactive_loop_enabled and self.settings.hip4_scan_enabled and self.settings.hip4_mode_allows_scan
 
+    def _registry_refresh_due(self) -> bool:
+        if self.registry.last_refresh_at_ms is None:
+            return True
+        now_ms = int(time.time() * 1000)
+        refresh_ms = max(1, self.settings.hip4_outcome_meta_refresh_seconds) * 1000
+        max_staleness_ms = max(1, self.settings.hip4_registry_max_staleness_ms)
+        age_ms = now_ms - self.registry.last_refresh_at_ms
+        return age_ms >= min(refresh_ms, max_staleness_ms)
+
     def _proactive_scan_allowed(self) -> bool:
         return self.settings.hip4_enabled and self.settings.hip4_scan_enabled and self.settings.hip4_mode_allows_scan
 
@@ -319,7 +328,9 @@ class Hip4Service:
         if not (digest_due or alert_candidates or has_execution):
             return False
         digest_candidates = alert_candidates or _rank_candidates(candidates)[:5]
-        sent = await self.send_discord_digest(candidates=digest_candidates, reason="proactive_cycle", executions=executions, loop=summary)
+        loop_status = self.proactive_loop_status()
+        loop_status["last_summary"] = summary
+        sent = await self.send_discord_digest(candidates=digest_candidates, reason="proactive_cycle", executions=executions, loop=loop_status)
         if sent:
             self._loop_last_digest_at_ms = now_ms
         return sent
