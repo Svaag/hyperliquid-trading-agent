@@ -77,6 +77,7 @@ class InstitutionalEngineService:
         self.order_intents_created = 0
         self.execution_reports_created = 0
         self.debate_count_today = 0
+        self.last_throttle_summary: dict[str, Any] = {}
 
     def status(self) -> dict[str, Any]:
         return {
@@ -89,6 +90,8 @@ class InstitutionalEngineService:
             "order_intents_created": self.order_intents_created,
             "execution_reports_created": self.execution_reports_created,
             "debate_count_today": self.debate_count_today,
+            "last_throttle_summary": self.last_throttle_summary,
+            "throttles": self.throttles.status(),
         }
 
     async def run_once(self, *, symbols: list[str] | None = None) -> dict[str, Any]:
@@ -196,12 +199,29 @@ class InstitutionalEngineService:
                     await self.positions.open_from_execution(candidate, report)
             book = await self.candidate_book.snapshot(estimates, as_of_ms=ts)
             self.candidates_created += len(all_candidates)
+            self.last_throttle_summary = self._throttle_summary(throttle_events=throttle_events, timestamp_ms=ts)
             self.last_run_at_ms = ts
             self.run_count += 1
-            return {"candidate_book_id": book.candidate_book_id, "candidates": len(all_candidates), "executed": len(executed), "throttle_events": len(throttle_events)}
+            return {"candidate_book_id": book.candidate_book_id, "candidates": len(all_candidates), "executed": len(executed), "throttle_events": len(throttle_events), "throttle_summary": self.last_throttle_summary}
         except Exception as exc:
             self.last_error = type(exc).__name__
             raise
+
+    def _throttle_summary(self, *, throttle_events: list[dict[str, Any]], timestamp_ms: int) -> dict[str, Any]:
+        by_reason: dict[str, int] = {}
+        by_strategy: dict[str, int] = {}
+        for event in throttle_events:
+            reason = str(event.get("reason") or "unknown")
+            strategy = str(event.get("strategy_id") or "unknown")
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+            by_strategy[strategy] = by_strategy.get(strategy, 0) + 1
+        return {
+            "timestamp_ms": timestamp_ms,
+            "event_count": len(throttle_events),
+            "by_reason": by_reason,
+            "by_strategy": by_strategy,
+            "controller": self.throttles.status(),
+        }
 
     async def _safe_all_mids(self) -> dict[str, float]:
         try:

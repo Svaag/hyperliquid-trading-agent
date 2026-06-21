@@ -176,6 +176,7 @@ class AutonomousTradingLoopService:
             "last_market_data_at_ms": self.last_market_data_at_ms,
             "last_iteration_at_ms": self.last_iteration_at_ms,
             "last_error": self.last_error,
+            "signals_run_with_engine_enabled": self.settings.autonomy_signals_run_with_engine_enabled,
             "paper_portfolio_id": self.portfolio.portfolio.id if self.portfolio.portfolio else None,
             "portfolio_equity_usd": snapshot.equity_usd if snapshot else None,
             "equity": {
@@ -587,9 +588,10 @@ class AutonomousTradingLoopService:
         ts = _now_ms()
         if self.settings.engine_enabled and self.engine_service is not None:
             await self.engine_service.run_once(symbols=self.settings.autonomy_core_symbols)
-            self.last_iteration_at_ms = ts
-            AUTONOMY_LOOP_ITERATIONS.labels(result="ok").inc()
-            return
+            if not self.settings.autonomy_signals_run_with_engine_enabled:
+                self.last_iteration_at_ms = ts
+                AUTONOMY_LOOP_ITERATIONS.labels(result="ok").inc()
+                return
         await self._ensure_universe(ts)
         mids = await self._current_mids()
         if mids:

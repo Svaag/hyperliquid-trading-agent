@@ -216,6 +216,7 @@ class Settings(BaseSettings):
     autonomy_hip3_index_aliases: str = "SP500:SPX|SP500|SPY,NASDAQ100:NDX|NASDAQ|QQQ,NIKKEI225:NIKKEI|NKY,KOSPI:KOSPI"
     autonomy_loop_interval_seconds: int = 5
     autonomy_deep_scan_interval_seconds: int = 60
+    autonomy_signals_run_with_engine_enabled: bool = False
     autonomy_l2_refresh_seconds: int = 15
     autonomy_candle_refresh_seconds: int = 60
     autonomy_news_refresh_seconds: int = 60

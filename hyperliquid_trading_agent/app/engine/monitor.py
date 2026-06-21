@@ -252,6 +252,19 @@ def format_engine_validation_digest(
         diffs = latest_replay.get("diffs") or {}
         lines.append(f"**Latest replay:** `{metadata.get('verdict', latest_replay.get('status'))}` variant `{metadata.get('variant_id', '-')}` | EV Δ `{diffs.get('avg_net_ev_delta_bps', 0)}` bps | reject Δ `{diffs.get('risk_reject_rate_delta_pct', 0)}`%")
         lines.append("")
+    throttle_summary = (service_status or {}).get("last_throttle_summary") or {}
+    controller = throttle_summary.get("controller") or (service_status or {}).get("throttles") or {}
+    if controller:
+        lines.append("**Throttles:**")
+        reason_counts = controller.get("reason_counts") or {}
+        recent_share = controller.get("last_recent_share_pct") or {}
+        if reason_counts:
+            lines.append("- Reasons: " + ", ".join(f"`{key}`={value}" for key, value in list(reason_counts.items())[:6]))
+        if recent_share:
+            lines.append("- Recent allocation share: " + ", ".join(f"`{key}`={value}%" for key, value in list(recent_share.items())[:6]))
+        if not reason_counts and not recent_share:
+            lines.append("- No throttle blocks observed in this process yet.")
+        lines.append("")
     lines.append("**Top strategies:**")
     ranked = sorted(by_strategy.items(), key=lambda item: (item[1].get("allocated_count", 0), item[1].get("candidate_count", 0)), reverse=True)
     for strategy, values in ranked[:6]:

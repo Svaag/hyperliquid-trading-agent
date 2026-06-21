@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from typing import Any
 
 from hyperliquid_trading_agent.app.config import Settings
@@ -11,6 +11,29 @@ class StrategyThrottleController:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.cooldowns: dict[str, int] = defaultdict(int)
+        self.events: deque[dict[str, Any]] = deque(maxlen=500)
+        self.reason_counts: Counter[str] = Counter()
+        self.strategy_reason_counts: Counter[str] = Counter()
+        self.last_recent_share_pct: dict[str, float] = {}
+        self.last_decision_at_ms: int | None = None
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "enabled": self.settings.engine_strategy_throttles_enabled,
+            "cooldowns": dict(self.cooldowns),
+            "reason_counts": dict(self.reason_counts),
+            "strategy_reason_counts": dict(self.strategy_reason_counts),
+            "last_recent_share_pct": dict(self.last_recent_share_pct),
+            "last_decision_at_ms": self.last_decision_at_ms,
+            "recent_events": list(self.events)[-20:],
+            "settings": {
+                "max_candidates_per_loop": self.settings.engine_strategy_max_candidates_per_loop,
+                "max_allocations_per_loop": self.settings.engine_strategy_max_allocations_per_loop,
+                "max_allocation_share_pct": self.settings.engine_strategy_max_allocation_share_pct,
+                "lookback_hours": self.settings.engine_strategy_throttle_lookback_hours,
+                "cooldown_loops": self.settings.engine_strategy_throttle_cooldown_loops,
+            },
+        }
 
     async def filter_candidates(
         self,
@@ -32,7 +55,9 @@ class StrategyThrottleController:
             kept.extend(ranked[:limit])
             for candidate in ranked[limit:]:
                 throttled = candidate.model_copy(update={"status": "throttled", "metadata": {**candidate.metadata, "throttle_reason": "max_candidates_per_loop", "exchange_actions": []}})
-                events.append({"type": "candidate_throttled", "strategy_id": strategy_id, "candidate_id": candidate.candidate_id, "reason": "max_candidates_per_loop", "timestamp_ms": timestamp_ms})
+                event = {"type": "candidate_throttled", "strategy_id": strategy_id, "candidate_id": candidate.candidate_id, "reason": "max_candidates_per_loop", "timestamp_ms": timestamp_ms}
+                events.append(event)
+                self._record_event(event)
                 if repository is not None and getattr(repository, "enabled", False):
                     record = getattr(repository, "record_alpha_candidate", None)
                     if callable(record):
@@ -51,32 +76,73 @@ class StrategyThrottleController:
             return True, [], {}
         strategy_id = candidate.strategy_id
         current_count = sum(1 for item in current_loop_allocations if item.status in {"allocate", "reduce", "require_debate"} and _candidate_strategy_hint(item) == strategy_id)
+        self.last_decision_at_ms = timestamp_ms
         if current_count >= self.settings.engine_strategy_max_allocations_per_loop:
-            return False, ["strategy_throttle"], {"throttle_reason": "max_allocations_per_loop", "current_loop_allocations": current_count}
-        recent_share = await self._recent_allocation_share(repository, strategy_id)
-        if recent_share > self.settings.engine_strategy_max_allocation_share_pct:
+            metadata = {"throttle_reason": "max_allocations_per_loop", "current_loop_allocations": current_count}
+            self._record_event({"type": "allocation_throttled", "strategy_id": strategy_id, "reason": "max_allocations_per_loop", "timestamp_ms": timestamp_ms, **metadata})
+            return False, ["strategy_throttle"], metadata
+        recent = await self._recent_allocation_share(repository, strategy_id, now_ms=timestamp_ms)
+        recent_share = recent["share_pct"]
+        self.last_recent_share_pct[strategy_id] = recent_share
+        metadata = {
+            "recent_allocation_share_pct": recent_share,
+            "recent_allocation_count": recent["strategy_count"],
+            "recent_total_allocations": recent["total_count"],
+            "recent_lookback_hours": self.settings.engine_strategy_throttle_lookback_hours,
+        }
+        min_samples = max(2, self.settings.engine_strategy_max_allocations_per_loop * 2)
+        if recent["total_count"] >= min_samples and recent_share > self.settings.engine_strategy_max_allocation_share_pct:
             self.cooldowns[strategy_id] = max(self.cooldowns[strategy_id], self.settings.engine_strategy_throttle_cooldown_loops)
-            return False, ["strategy_throttle"], {"throttle_reason": "recent_allocation_share", "recent_allocation_share_pct": recent_share}
+            blocked = {**metadata, "throttle_reason": "recent_allocation_share"}
+            self._record_event({"type": "allocation_throttled", "strategy_id": strategy_id, "reason": "recent_allocation_share", "timestamp_ms": timestamp_ms, **blocked})
+            return False, ["strategy_throttle"], blocked
         if self.cooldowns.get(strategy_id, 0) > 0:
             self.cooldowns[strategy_id] -= 1
-            return False, ["strategy_throttle"], {"throttle_reason": "cooldown", "remaining_loops": self.cooldowns[strategy_id]}
-        return True, [], {"recent_allocation_share_pct": recent_share}
+            blocked = {**metadata, "throttle_reason": "cooldown", "remaining_loops": self.cooldowns[strategy_id]}
+            self._record_event({"type": "allocation_throttled", "strategy_id": strategy_id, "reason": "cooldown", "timestamp_ms": timestamp_ms, **blocked})
+            return False, ["strategy_throttle"], blocked
+        self._record_event({"type": "allocation_allowed", "strategy_id": strategy_id, "reason": "allowed", "timestamp_ms": timestamp_ms, **metadata})
+        return True, [], metadata
 
-    async def _recent_allocation_share(self, repository: Any, strategy_id: str) -> float:
+    async def _recent_allocation_share(self, repository: Any, strategy_id: str, *, now_ms: int) -> dict[str, Any]:
         if repository is None or not getattr(repository, "enabled", False):
-            return 0.0
-        allocations = await repository.list_allocation_decisions(limit=1000)
-        candidates = await repository.list_alpha_candidates(limit=1000)
-        candidate_strategy = {str(item.get("candidate_id")): str(item.get("strategy_id") or "unknown") for item in candidates}
+            return {"share_pct": 0.0, "strategy_count": 0, "total_count": 0}
+        lookback_ms = max(1, self.settings.engine_strategy_throttle_lookback_hours) * 60 * 60 * 1000
+        start_ms = now_ms - lookback_ms
+        allocations = await repository.list_allocation_decisions(limit=5000)
         counts: Counter[str] = Counter()
         for allocation in allocations:
-            if allocation.get("status") in {"allocate", "reduce", "require_debate"}:
-                counts[candidate_strategy.get(str(allocation.get("candidate_id")), "unknown")] += 1
+            if int(allocation.get("created_at_ms") or 0) < start_ms:
+                continue
+            if allocation.get("status") not in {"allocate", "reduce", "require_debate"}:
+                continue
+            strategy = _allocation_strategy(allocation)
+            if strategy:
+                counts[strategy] += 1
         total = sum(counts.values())
-        return round(counts[strategy_id] / total * 100, 4) if total else 0.0
+        strategy_count = counts[strategy_id]
+        share = round(strategy_count / total * 100, 4) if total else 0.0
+        return {"share_pct": share, "strategy_count": strategy_count, "total_count": total}
+
+    def _record_event(self, event: dict[str, Any]) -> None:
+        reason = str(event.get("reason") or "unknown")
+        strategy = str(event.get("strategy_id") or "unknown")
+        if event.get("type") in {"candidate_throttled", "allocation_throttled"}:
+            self.reason_counts[reason] += 1
+            self.strategy_reason_counts[f"{strategy}:{reason}"] += 1
+        self.events.append(event)
 
 
 def _candidate_strategy_hint(allocation: AllocationDecision) -> str:
-    # AllocationDecision does not carry strategy_id today. The orchestrator attaches
-    # it in metadata for current-loop throttling.
+    # AllocationDecision does not carry strategy_id as a top-level field today.
+    # The orchestrator attaches it in metadata for current-loop throttling.
     return str(allocation.metadata.get("strategy_id") or "unknown")
+
+
+def _allocation_strategy(allocation: dict[str, Any]) -> str:
+    metadata = allocation.get("metadata") or allocation.get("metadata_json") or {}
+    if isinstance(metadata, dict):
+        strategy = metadata.get("strategy_id")
+        if strategy:
+            return str(strategy)
+    return ""
