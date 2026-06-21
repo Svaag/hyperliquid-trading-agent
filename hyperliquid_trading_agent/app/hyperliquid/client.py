@@ -36,6 +36,8 @@ INFO_ENDPOINT_TYPES = {
     "userRateLimit",
     "orderStatus",
     "perpDexs",
+    "outcomeMeta",
+    "settledOutcome",
     "userFees",
     "portfolio",
     "userNonFundingLedgerUpdates",
@@ -189,6 +191,12 @@ class HyperliquidClient:
 
     async def spot_meta_and_asset_ctxs(self) -> list[Any]:
         return await self.post_info({"type": "spotMetaAndAssetCtxs"}, cache_ttl_seconds=self.settings.cache_ttl_market_seconds)
+
+    async def outcome_meta(self) -> dict[str, Any]:
+        return await self.post_info({"type": "outcomeMeta"}, cache_ttl_seconds=self.settings.hip4_outcome_meta_refresh_seconds)
+
+    async def settled_outcome(self, outcome_id: int) -> Any:
+        return await self.post_info({"type": "settledOutcome", "outcome": int(outcome_id)}, cache_ttl_seconds=self.settings.hip4_settlement_refresh_seconds)
 
     async def l2_book(self, coin: str, n_sig_figs: int | None = None, mantissa: int | None = None) -> Any:
         payload: dict[str, Any] = {"type": "l2Book", "coin": coin}

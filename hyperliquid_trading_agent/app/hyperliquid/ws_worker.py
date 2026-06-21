@@ -41,6 +41,8 @@ class SubscriptionSpec:
         subscription_type = self.type
         if subscription_type == "allMids":
             return "allMids"
+        if subscription_type == "outcomeMetaUpdates":
+            return "outcomeMetaUpdates"
         if subscription_type in {"l2Book", "trades", "bbo", "activeAssetCtx"}:
             return f"{subscription_type}:{(self.coin or '').lower()}"
         if subscription_type == "candle":
@@ -255,6 +257,8 @@ def _message_identifier(message: dict[str, Any]) -> str | None:
     data = message.get("data")
     if channel == "allMids":
         return "allMids"
+    if channel == "outcomeMetaUpdates":
+        return "outcomeMetaUpdates"
     if channel in {"l2Book", "bbo", "activeAssetCtx", "activeSpotAssetCtx"} and isinstance(data, dict):
         subscription_channel = "activeAssetCtx" if channel == "activeSpotAssetCtx" else channel
         return f"{subscription_channel}:{str(data.get('coin', '')).lower()}"

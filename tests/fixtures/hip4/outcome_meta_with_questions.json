@@ -1,0 +1,10 @@
+{
+  "outcomes": [
+    {"outcome": 172, "name": "Canada", "description": "Canada wins", "sideSpecs": [{"name": "YES"}, {"name": "NO"}], "quoteToken": "USDC"},
+    {"outcome": 173, "name": "Qatar", "description": "Qatar wins", "sideSpecs": [{"name": "YES"}, {"name": "NO"}], "quoteToken": "USDC"},
+    {"outcome": 174, "name": "Draw", "description": "Draw", "sideSpecs": [{"name": "YES"}, {"name": "NO"}], "quoteToken": "USDC"}
+  ],
+  "questions": [
+    {"question": 32, "name": "Canada vs Qatar", "description": "Match result", "fallbackOutcome": 174, "namedOutcomes": [172, 173], "settledNamedOutcomes": []}
+  ]
+}

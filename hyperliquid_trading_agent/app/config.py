@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
@@ -131,6 +132,53 @@ class Settings(BaseSettings):
     hyperliquid_network: Literal["mainnet", "testnet"] = "mainnet"
     hyperliquid_ws_enabled: bool = False
     hyperliquid_exchange_enabled: bool = False
+
+    hip4_enabled: bool = False
+    hip4_mode: Literal["read_only", "shadow", "paper_shadow"] = "paper_shadow"
+    hip4_scan_enabled: bool = False
+    hip4_paper_execution_enabled: bool = False
+    hip4_manual_ticket_export_enabled: bool = False
+    hip4_question_allowlist: str = ""
+    hip4_max_questions: int = 25
+    hip4_max_hot_questions: int = 10
+    hip4_max_hot_outcome_sides: int = 120
+    hip4_include_partially_settled: bool = False
+    hip4_outcome_meta_refresh_seconds: int = 60
+    hip4_settlement_refresh_seconds: int = 300
+    hip4_registry_max_staleness_ms: int = 300_000
+    hip4_scan_max_book_staleness_ms: int = 10_000
+    hip4_paper_execution_max_book_staleness_ms: int = 5_000
+    hip4_manual_ticket_max_book_staleness_ms: int = 3_000
+    hip4_ws_enabled: bool = True
+    hip4_probe_outcome_meta_ws: bool = False
+    hip4_outcome_meta_ws_probe_timeout_seconds: float = 1.0
+    hip4_docs_scope_status: Literal["verified_not_testnet_only", "testnet_only", "unknown"] = "unknown"
+    hip4_ws_max_subscriptions: int = 150
+    hip4_ws_resnapshot_on_reconnect: bool = True
+    hip4_min_edge_bps: Decimal = Decimal("25")
+    hip4_min_edge_usd: Decimal = Decimal("10")
+    hip4_edge_threshold_mode: Literal["both", "either"] = "both"
+    hip4_min_depth_usd: Decimal = Decimal("250")
+    hip4_max_paper_notional_per_candidate_usd: Decimal = Decimal("10000")
+    hip4_max_paper_daily_notional_usd: Decimal = Decimal("100000")
+    hip4_paper_initial_equity_usd: Decimal = Decimal("100000")
+    hip4_outcome_taker_fee_bps: Decimal = Decimal("0")
+    hip4_outcome_maker_fee_bps: Decimal = Decimal("0")
+    hip4_fee_stress_bps: Decimal = Decimal("10")
+    hip4_allow_inventory_carry: bool = False
+    hip4_allow_inferred_lot_size_for_paper: bool = False
+    hip4_discord_digest_enabled: bool = True
+    hip4_discord_digest_interval_seconds: int = 300
+    hip4_alert_channel_id: str = ""
+    hip4_proactive_loop_enabled: bool = False
+    hip4_proactive_loop_interval_seconds: int = 30
+    hip4_proactive_paper_execution_enabled: bool = False
+    hip4_proactive_max_paper_executions_per_cycle: int = 1
+    hip4_proactive_alert_min_edge_usd: Decimal = Decimal("10")
+    hip4_proactive_alert_min_edge_bps: Decimal = Decimal("25")
+    hip4_proactive_alert_dedupe_seconds: int = 300
+    hip4_proactive_reconcile_interval_seconds: int = 300
+    hip4_proactive_learning_enabled: bool = True
 
     position_tracking_enabled: bool = True
     position_tracking_auto_arm: bool = True
@@ -397,6 +445,13 @@ class Settings(BaseSettings):
             raise ValueError("HYPERLIQUID_EXCHANGE_ENABLED must remain false for the MVP")
         return value
 
+    @field_validator("hip4_scan_enabled", "hip4_paper_execution_enabled", "hip4_manual_ticket_export_enabled")
+    @classmethod
+    def hip4_feature_flags_do_not_enable_live_execution(cls, value: bool) -> bool:
+        # These flags only enable read/paper/manual-instruction features. They must never
+        # imply signing, private keys, /exchange mutation, or live orders.
+        return value
+
     @property
     def hyperliquid_base_url(self) -> str:
         return self.hyperliquid_testnet_url if self.hyperliquid_network == "testnet" else self.hyperliquid_mainnet_url
@@ -440,6 +495,54 @@ class Settings(BaseSettings):
     @property
     def autonomy_core_symbols(self) -> list[str]:
         return [symbol.upper() for symbol in _csv(self.autonomy_core_universe)]
+
+    @property
+    def hip4_question_allowlist_ids(self) -> set[int]:
+        ids: set[int] = set()
+        for item in _csv(self.hip4_question_allowlist):
+            try:
+                ids.add(int(item))
+            except ValueError:
+                continue
+        return ids
+
+    @property
+    def hip4_mode_allows_scan(self) -> bool:
+        return self.hip4_mode in {"shadow", "paper_shadow"}
+
+    @property
+    def hip4_mode_allows_paper(self) -> bool:
+        return self.hip4_mode == "paper_shadow"
+
+    @property
+    def hip4_mode_allows_manual_ticket(self) -> bool:
+        return self.hip4_mode == "paper_shadow"
+
+    @property
+    def hip4_alert_channel_configured(self) -> bool:
+        return bool(str(self.hip4_alert_channel_id).strip())
+
+    def hip4_config_warnings(self) -> list[str]:
+        warnings: list[str] = []
+        if self.hip4_scan_enabled and not self.hip4_mode_allows_scan:
+            warnings.append("HIP4_SCAN_ENABLED is true but HIP4_MODE does not allow scanning")
+        if self.hip4_paper_execution_enabled and not self.hip4_mode_allows_paper:
+            warnings.append("HIP4_PAPER_EXECUTION_ENABLED is true but HIP4_MODE does not allow paper execution")
+        if self.hip4_manual_ticket_export_enabled and not self.hip4_mode_allows_manual_ticket:
+            warnings.append("HIP4_MANUAL_TICKET_EXPORT_ENABLED is true but HIP4_MODE does not allow manual tickets")
+        if self.hip4_proactive_loop_enabled:
+            if not self.hip4_enabled:
+                warnings.append("HIP4_PROACTIVE_LOOP_ENABLED is true but HIP4_ENABLED is false")
+            if not self.hip4_scan_enabled:
+                warnings.append("HIP4_PROACTIVE_LOOP_ENABLED is true but HIP4_SCAN_ENABLED is false")
+            if not self.hip4_mode_allows_scan:
+                warnings.append("HIP4_PROACTIVE_LOOP_ENABLED is true but HIP4_MODE does not allow scanning")
+        if self.hip4_proactive_paper_execution_enabled:
+            if not self.hip4_paper_execution_enabled:
+                warnings.append("HIP4_PROACTIVE_PAPER_EXECUTION_ENABLED is true but HIP4_PAPER_EXECUTION_ENABLED is false")
+            if not self.hip4_mode_allows_paper:
+                warnings.append("HIP4_PROACTIVE_PAPER_EXECUTION_ENABLED is true but HIP4_MODE does not allow paper execution")
+        return warnings
 
     @property
     def autonomy_hip3_dex_names(self) -> list[str]:

@@ -44,6 +44,8 @@ from hyperliquid_trading_agent.app.governance.review import ReviewWorkflowServic
 from hyperliquid_trading_agent.app.governance.risk_gateway import RiskGateway
 from hyperliquid_trading_agent.app.governance.routes import register_governance_routes
 from hyperliquid_trading_agent.app.governance.shadow import ShadowComparisonService
+from hyperliquid_trading_agent.app.hip4.routes import register_hip4_routes
+from hyperliquid_trading_agent.app.hip4.service import Hip4Service
 from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
 from hyperliquid_trading_agent.app.hyperliquid.sdk_info_client import SDKInfoClient
 from hyperliquid_trading_agent.app.hyperliquid.ws_worker import HyperliquidWebSocketWorker
@@ -191,6 +193,7 @@ async def lifespan(app: FastAPI):
     ws_worker = HyperliquidWebSocketWorker(settings=settings)
     tracking_service = PositionTrackingService(settings=settings, repository=repository, ws_worker=ws_worker)
     risk_gateway = RiskGateway(settings=settings, repository=repository, decision_context_recorder=decision_context_recorder)
+    hip4_service = Hip4Service(settings=settings, repository=repository, hyperliquid=hyperliquid, ws_worker=ws_worker, risk_gateway=risk_gateway)
     autonomy_service = AutonomousTradingLoopService(
         settings=settings,
         repository=repository,
@@ -239,6 +242,7 @@ async def lifespan(app: FastAPI):
     bot = DiscordTradingBot(settings=settings, runner=runner, tracking_service=tracking_service, autonomy_service=autonomy_service)
     tracking_service.alert_sink = DiscordAlertSink(bot)
     autonomy_alert_sink = DiscordAutonomyAlertSink(bot)
+    hip4_service.alert_sink = autonomy_alert_sink
     autonomy_service.alert_sink = autonomy_alert_sink
     report_service.alert_sink = autonomy_alert_sink
 
@@ -260,6 +264,7 @@ async def lifespan(app: FastAPI):
     app.state.discord_bot = bot
     app.state.ws_worker = ws_worker
     app.state.tracking_service = tracking_service
+    app.state.hip4_service = hip4_service
     app.state.autonomy_service = autonomy_service
     app.state.engine_service = engine_service
     app.state.engine_validation_monitor = engine_validation_monitor
@@ -282,7 +287,7 @@ async def lifespan(app: FastAPI):
     ws_task: asyncio.Task | None = None
     tracking_task: asyncio.Task | None = None
     autonomy_task: asyncio.Task | None = None
-    if settings.hyperliquid_ws_enabled or settings.position_tracking_enabled or settings.autonomy_enabled:
+    if settings.hyperliquid_ws_enabled or settings.position_tracking_enabled or settings.autonomy_enabled or (settings.hip4_enabled and settings.hip4_ws_enabled):
         ws_task = asyncio.create_task(ws_worker.start(), name="hyperliquid-ws")
         log.info("hyperliquid_ws_task_started")
     if settings.position_tracking_enabled:
@@ -291,6 +296,7 @@ async def lifespan(app: FastAPI):
     if settings.autonomy_enabled:
         autonomy_task = asyncio.create_task(autonomy_service.start(), name="autonomy-service")
         log.info("autonomy_service_task_started")
+    await hip4_service.start()
     if settings.discord_bot_token and settings.environment.lower() != "test":
         bot_task = asyncio.create_task(bot.start(), name="discord-bot")
         log.info("discord_bot_task_started")
@@ -316,6 +322,7 @@ async def lifespan(app: FastAPI):
             await newswire_agent_consumer.stop()
         await engine_pnl_attribution.stop()
         await engine_validation_monitor.stop()
+        await hip4_service.stop()
         await autonomy_service.stop()
         await tracking_service.stop()
         await ws_worker.stop()
@@ -400,6 +407,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "hyperliquid_ws_enabled": settings.hyperliquid_ws_enabled,
             "models": [{"model": item.model, "provider": item.provider, "missing": item.missing_reason} for item in attempts],
             "position_tracking": _tracking_config_status(app),
+            "hip4": _hip4_config_status(app),
             "autonomy": _autonomy_config_status(app),
             "tradfi": _tradfi_config_status(app),
             "engine": {
@@ -1137,6 +1145,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     register_engine_routes(app, settings, _require_agent_api)
+    register_hip4_routes(app, settings, _require_agent_api)
     register_newswire_routes(app)
     return app
 
@@ -1159,6 +1168,32 @@ def _autonomy_learning_degraded(autonomy_status: dict[str, Any], now_ms: int) ->
     if int(memory.get("error_count") or 0) >= 5:
         return True
     return False
+
+
+def _hip4_config_status(app: FastAPI) -> dict[str, Any]:
+    settings: Settings = app.state.settings
+    service = getattr(app.state, "hip4_service", None)
+    service_status = service.status() if service is not None and callable(getattr(service, "status", None)) else {}
+    return {
+        "enabled": settings.hip4_enabled,
+        "mode": settings.hip4_mode,
+        "scan_enabled": settings.hip4_scan_enabled,
+        "paper_execution_enabled": settings.hip4_paper_execution_enabled,
+        "manual_ticket_export_enabled": settings.hip4_manual_ticket_export_enabled,
+        "question_allowlist_count": len(settings.hip4_question_allowlist_ids),
+        "mode_allows_scan": settings.hip4_mode_allows_scan,
+        "mode_allows_paper": settings.hip4_mode_allows_paper,
+        "mode_allows_manual_ticket": settings.hip4_mode_allows_manual_ticket,
+        "warnings": settings.hip4_config_warnings(),
+        "service": service_status,
+        "safety": {
+            "signing_enabled": False,
+            "private_keys_enabled": False,
+            "exchange_mutation_enabled": False,
+            "live_orders_enabled": False,
+            "llm_controlled_execution_enabled": False,
+        },
+    }
 
 
 def _autonomy_config_status(app: FastAPI) -> dict[str, Any]:

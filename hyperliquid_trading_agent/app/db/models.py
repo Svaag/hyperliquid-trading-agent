@@ -1683,3 +1683,210 @@ class WeeklyReportRecord(TimestampMixin, Base):
     discord_channel_id: Mapped[str | None] = mapped_column(String(64))
     discord_message_id: Mapped[str | None] = mapped_column(String(64))
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class Hip4CapabilityProbeRecord(TimestampMixin, Base):
+    __tablename__ = "hip4_capability_probes"
+    __table_args__ = (
+        Index("ix_hip4_capability_probes_network_created", "network", "probed_at_ms"),
+        Index("ix_hip4_capability_probes_schema_hash", "outcome_meta_schema_hash"),
+    )
+
+    probe_id: Mapped[str] = mapped_column(String(96), primary_key=True, default=_id)
+    network: Mapped[str] = mapped_column(String(32), nullable=False)
+    probed_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    outcome_meta_available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    outcome_meta_error: Mapped[str | None] = mapped_column(String(128))
+    outcome_meta_schema_hash: Mapped[str | None] = mapped_column(String(128))
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    degraded_reasons_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
+class Hip4RawPayloadRecord(TimestampMixin, Base):
+    __tablename__ = "hip4_raw_payloads"
+    __table_args__ = (
+        Index("ix_hip4_raw_payloads_source_network", "source", "network"),
+        Index("ix_hip4_raw_payloads_observed", "observed_at_ms"),
+        Index("ix_hip4_raw_payloads_schema_hash", "schema_hash"),
+    )
+
+    payload_id: Mapped[str] = mapped_column(String(96), primary_key=True, default=_id)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    network: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    schema_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    observed_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class Hip4OutcomeSpecRecord(TimestampMixin, Base):
+    __tablename__ = "hip4_outcome_specs"
+    __table_args__ = (
+        Index("ix_hip4_outcome_specs_outcome", "outcome_id"),
+        Index("ix_hip4_outcome_specs_status", "status"),
+        Index("ix_hip4_outcome_specs_as_of", "as_of_ms"),
+    )
+
+    outcome_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    quote_token: Mapped[str | None] = mapped_column(String(64))
+    side0_name: Mapped[str] = mapped_column(String(64), default="YES", nullable=False)
+    side1_name: Mapped[str] = mapped_column(String(64), default="NO", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="open", nullable=False)
+    settle_fraction: Mapped[str | None] = mapped_column(String(96))
+    settlement_details: Mapped[str | None] = mapped_column(Text)
+    raw_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    as_of_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class Hip4QuestionSpecRecord(TimestampMixin, Base):
+    __tablename__ = "hip4_question_specs"
+    __table_args__ = (
+        Index("ix_hip4_question_specs_question", "question_id"),
+        Index("ix_hip4_question_specs_status", "status"),
+        Index("ix_hip4_question_specs_as_of", "as_of_ms"),
+    )
+
+    question_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    fallback_outcome_id: Mapped[int | None] = mapped_column(Integer)
+    named_outcome_ids_json: Mapped[list[int]] = mapped_column(JSON, default=list)
+    settled_named_outcome_ids_json: Mapped[list[int]] = mapped_column(JSON, default=list)
+    outcome_ids_json: Mapped[list[int]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(32), default="open", nullable=False)
+    raw_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    as_of_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class Hip4MarketSnapshotRecord(TimestampMixin, Base):
+    __tablename__ = "hip4_market_snapshots"
+    __table_args__ = (
+        Index("ix_hip4_market_snapshots_question", "question_id"),
+        Index("ix_hip4_market_snapshots_outcome", "outcome_id"),
+        Index("ix_hip4_market_snapshots_as_of", "as_of_ms"),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(String(96), primary_key=True, default=_id)
+    question_id: Mapped[int | None] = mapped_column(Integer)
+    outcome_id: Mapped[int | None] = mapped_column(Integer)
+    coin: Mapped[str] = mapped_column(String(32), nullable=False)
+    side: Mapped[int] = mapped_column(Integer, nullable=False)
+    as_of_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    best_bid: Mapped[str | None] = mapped_column(String(96))
+    best_ask: Mapped[str | None] = mapped_column(String(96))
+    raw_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class Hip4EdgeCandidateRecord(TimestampMixin, Base):
+    __tablename__ = "hip4_edge_candidates"
+    __table_args__ = (
+        Index("ix_hip4_edge_candidates_candidate", "candidate_id"),
+        Index("ix_hip4_edge_candidates_question", "question_id"),
+        Index("ix_hip4_edge_candidates_status", "status"),
+        Index("ix_hip4_edge_candidates_as_of", "as_of_ms"),
+    )
+
+    candidate_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    strategy_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    question_id: Mapped[int | None] = mapped_column(Integer)
+    outcome_ids_json: Mapped[list[int]] = mapped_column(JSON, default=list)
+    as_of_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    size: Mapped[str] = mapped_column(String(96), nullable=False)
+    gross_cost_or_proceeds: Mapped[str] = mapped_column(String(96), nullable=False)
+    expected_net_edge_usd: Mapped[str] = mapped_column(String(96), nullable=False)
+    expected_net_edge_bps: Mapped[str] = mapped_column(String(96), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    candidate_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class Hip4PaperPortfolioRecord(TimestampMixin, Base):
+    __tablename__ = "hip4_paper_portfolios"
+
+    portfolio_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    quote_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    cash: Mapped[str] = mapped_column(String(96), nullable=False)
+    realized_pnl: Mapped[str] = mapped_column(String(96), nullable=False)
+    unrealized_pnl: Mapped[str] = mapped_column(String(96), nullable=False)
+    settlement_pnl: Mapped[str] = mapped_column(String(96), nullable=False)
+    modeled_fees: Mapped[str] = mapped_column(String(96), nullable=False)
+    daily_notional: Mapped[str] = mapped_column(String(96), nullable=False)
+    balances_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class Hip4PaperPositionRecord(TimestampMixin, Base):
+    __tablename__ = "hip4_paper_positions"
+    __table_args__ = (Index("ix_hip4_paper_positions_token", "token"),)
+
+    position_id: Mapped[str] = mapped_column(String(96), primary_key=True, default=_id)
+    portfolio_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    token: Mapped[str] = mapped_column(String(64), nullable=False)
+    balance: Mapped[str] = mapped_column(String(96), nullable=False)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class Hip4PaperActionRecord(TimestampMixin, Base):
+    __tablename__ = "hip4_paper_actions"
+    __table_args__ = (
+        Index("ix_hip4_paper_actions_candidate", "candidate_id"),
+        Index("ix_hip4_paper_actions_action_type", "action_type"),
+        Index("ix_hip4_paper_actions_created", "created_at_ms"),
+    )
+
+    action_id: Mapped[str] = mapped_column(String(96), primary_key=True, default=_id)
+    candidate_id: Mapped[str | None] = mapped_column(String(96))
+    action_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    amount: Mapped[str] = mapped_column(String(96), nullable=False)
+    price: Mapped[str | None] = mapped_column(String(96))
+    action_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class Hip4PaperFillRecord(TimestampMixin, Base):
+    __tablename__ = "hip4_paper_fills"
+    __table_args__ = (
+        Index("ix_hip4_paper_fills_candidate", "candidate_id"),
+        Index("ix_hip4_paper_fills_created", "created_at_ms"),
+    )
+
+    fill_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    coin: Mapped[str] = mapped_column(String(32), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    size: Mapped[str] = mapped_column(String(96), nullable=False)
+    price: Mapped[str] = mapped_column(String(96), nullable=False)
+    notional: Mapped[str] = mapped_column(String(96), nullable=False)
+    fee: Mapped[str] = mapped_column(String(96), nullable=False)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class Hip4ReconciliationRunRecord(TimestampMixin, Base):
+    __tablename__ = "hip4_reconciliation_runs"
+    __table_args__ = (
+        Index("ix_hip4_reconciliation_runs_status", "status"),
+        Index("ix_hip4_reconciliation_runs_created", "created_at_ms"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    discrepancies_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class Hip4SettlementRecord(TimestampMixin, Base):
+    __tablename__ = "hip4_settlements"
+    __table_args__ = (
+        Index("ix_hip4_settlements_outcome", "outcome_id"),
+        Index("ix_hip4_settlements_as_of", "as_of_ms"),
+    )
+
+    settlement_id: Mapped[str] = mapped_column(String(96), primary_key=True, default=_id)
+    outcome_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    settle_fraction: Mapped[str | None] = mapped_column(String(96))
+    details: Mapped[str | None] = mapped_column(Text)
+    raw_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    as_of_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)

@@ -39,6 +39,18 @@ from hyperliquid_trading_agent.app.db.models import (
     FeatureRollupRecord,
     FeatureSchemaVersionRecord,
     FeatureValueRecord,
+    Hip4CapabilityProbeRecord,
+    Hip4EdgeCandidateRecord,
+    Hip4MarketSnapshotRecord,
+    Hip4OutcomeSpecRecord,
+    Hip4PaperActionRecord,
+    Hip4PaperFillRecord,
+    Hip4PaperPortfolioRecord,
+    Hip4PaperPositionRecord,
+    Hip4QuestionSpecRecord,
+    Hip4RawPayloadRecord,
+    Hip4ReconciliationRunRecord,
+    Hip4SettlementRecord,
     KillSwitchEventRecord,
     MarketAssetRecord,
     MarketLevelRecord,
@@ -437,6 +449,212 @@ class Repository:
         except Exception as exc:  # pragma: no cover
             log.warning("risk_gateway_decisions_list_failed", error=type(exc).__name__)
             return []
+
+    async def record_hip4_capability_probe(self, probe: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                item = Hip4CapabilityProbeRecord(
+                    network=str(probe.get("network") or "unknown"),
+                    probed_at_ms=int(probe.get("probed_at_ms") or 0),
+                    outcome_meta_available=bool(probe.get("outcome_meta_available")),
+                    outcome_meta_error=probe.get("outcome_meta_error"),
+                    outcome_meta_schema_hash=probe.get("outcome_meta_schema_hash"),
+                    payload_json=redact_secrets(dict(probe)),
+                    degraded_reasons_json=list(probe.get("degraded_reasons") or []),
+                )
+                session.add(item)
+                await session.commit()
+                return item.probe_id
+        except Exception as exc:  # pragma: no cover
+            log.warning("hip4_capability_probe_record_failed", error=type(exc).__name__)
+            return None
+
+    async def record_hip4_raw_payload(self, payload: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                item = Hip4RawPayloadRecord(
+                    source=str(payload.get("source") or "unknown"),
+                    network=str(payload.get("network") or "unknown"),
+                    payload_json=redact_secrets(dict(payload.get("payload_json") or {})),
+                    schema_hash=str(payload.get("schema_hash") or ""),
+                    schema_version=int(payload.get("schema_version") or 1),
+                    observed_at_ms=int(payload.get("observed_at_ms") or 0),
+                )
+                session.add(item)
+                await session.commit()
+                return item.payload_id
+        except Exception as exc:  # pragma: no cover
+            log.warning("hip4_raw_payload_record_failed", error=type(exc).__name__)
+            return None
+
+    async def upsert_hip4_outcome_specs(self, outcomes: list[dict[str, Any]], *, as_of_ms: int) -> None:
+        if self.sessionmaker is None:
+            return
+        try:
+            async with self.sessionmaker() as session:
+                for data in outcomes:
+                    item = await session.get(Hip4OutcomeSpecRecord, int(data["outcome_id"]))
+                    if item is None:
+                        item = Hip4OutcomeSpecRecord(outcome_id=int(data["outcome_id"]), name="", as_of_ms=as_of_ms)
+                        session.add(item)
+                    item.name = str(data.get("name") or item.name)
+                    item.description = str(data.get("description") or "")
+                    item.quote_token = data.get("quote_token")
+                    item.side0_name = str(data.get("side0_name") or "YES")
+                    item.side1_name = str(data.get("side1_name") or "NO")
+                    item.status = "settled" if data.get("settled") else "open"
+                    item.settle_fraction = str(data.get("settle_fraction")) if data.get("settle_fraction") is not None else None
+                    item.settlement_details = data.get("settlement_details")
+                    item.raw_json = redact_secrets(dict(data.get("raw") or {}))
+                    item.as_of_ms = as_of_ms
+                await session.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("hip4_outcome_specs_upsert_failed", error=type(exc).__name__)
+
+    async def upsert_hip4_question_specs(self, questions: list[dict[str, Any]], *, as_of_ms: int) -> None:
+        if self.sessionmaker is None:
+            return
+        try:
+            async with self.sessionmaker() as session:
+                for data in questions:
+                    item = await session.get(Hip4QuestionSpecRecord, int(data["question_id"]))
+                    if item is None:
+                        item = Hip4QuestionSpecRecord(question_id=int(data["question_id"]), name="", as_of_ms=as_of_ms)
+                        session.add(item)
+                    item.name = str(data.get("name") or item.name)
+                    item.description = str(data.get("description") or "")
+                    item.fallback_outcome_id = data.get("fallback_outcome_id")
+                    item.named_outcome_ids_json = list(data.get("named_outcome_ids") or [])
+                    item.settled_named_outcome_ids_json = list(data.get("settled_named_outcome_ids") or [])
+                    item.outcome_ids_json = list(data.get("outcome_ids") or [])
+                    item.status = str(data.get("status") or "open")
+                    item.raw_json = redact_secrets(dict(data.get("raw") or {}))
+                    item.as_of_ms = as_of_ms
+                await session.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("hip4_question_specs_upsert_failed", error=type(exc).__name__)
+
+    async def record_hip4_edge_candidates(self, candidates: list[dict[str, Any]]) -> None:
+        if self.sessionmaker is None:
+            return
+        try:
+            async with self.sessionmaker() as session:
+                for data in candidates:
+                    item = Hip4EdgeCandidateRecord(
+                        candidate_id=str(data["candidate_id"]),
+                        strategy_type=str(data.get("strategy_type") or "unknown"),
+                        mode=str(data.get("mode") or "shadow"),
+                        question_id=data.get("question_id"),
+                        outcome_ids_json=list(data.get("outcome_ids") or []),
+                        as_of_ms=int(data.get("as_of_ms") or 0),
+                        size=str(data.get("size") or "0"),
+                        gross_cost_or_proceeds=str(data.get("gross_cost_or_proceeds") or "0"),
+                        expected_net_edge_usd=str(data.get("expected_net_edge_usd") or "0"),
+                        expected_net_edge_bps=str(data.get("expected_net_edge_bps") or "0"),
+                        status=str(data.get("status") or "candidate"),
+                        candidate_json=redact_secrets(dict(data)),
+                    )
+                    await session.merge(item)
+                await session.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("hip4_edge_candidates_record_failed", error=type(exc).__name__)
+
+    async def record_hip4_market_snapshot(self, snapshot: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                bids = list(snapshot.get("bids") or [])
+                asks = list(snapshot.get("asks") or [])
+                item = Hip4MarketSnapshotRecord(
+                    question_id=snapshot.get("question_id"),
+                    outcome_id=snapshot.get("outcome_id"),
+                    coin=str(snapshot.get("coin") or ""),
+                    side=int(snapshot.get("side") or 0),
+                    as_of_ms=int(snapshot.get("as_of_ms") or 0),
+                    best_bid=str((bids[0] or {}).get("px")) if bids else None,
+                    best_ask=str((asks[0] or {}).get("px")) if asks else None,
+                    raw_json=redact_secrets(dict(snapshot)),
+                )
+                session.add(item)
+                await session.commit()
+                return item.snapshot_id
+        except Exception as exc:  # pragma: no cover
+            log.warning("hip4_market_snapshot_record_failed", error=type(exc).__name__)
+            return None
+
+    async def record_hip4_settlement(self, settlement: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                item = Hip4SettlementRecord(
+                    outcome_id=int(settlement.get("outcome_id") or settlement.get("outcome") or 0),
+                    settle_fraction=str(settlement.get("settle_fraction") or settlement.get("settleFraction")) if settlement.get("settle_fraction") is not None or settlement.get("settleFraction") is not None else None,
+                    details=settlement.get("details") or settlement.get("settlement_details"),
+                    raw_json=redact_secrets(dict(settlement.get("raw") or settlement)),
+                    as_of_ms=int(settlement.get("as_of_ms") or 0),
+                )
+                session.add(item)
+                await session.commit()
+                return item.settlement_id
+        except Exception as exc:  # pragma: no cover
+            log.warning("hip4_settlement_record_failed", error=type(exc).__name__)
+            return None
+
+    async def record_hip4_paper_execution(self, execution: dict[str, Any]) -> None:
+        if self.sessionmaker is None:
+            return
+        try:
+            async with self.sessionmaker() as session:
+                portfolio = dict(execution.get("portfolio") or {})
+                await session.merge(
+                    Hip4PaperPortfolioRecord(
+                        portfolio_id=str(portfolio.get("portfolio_id") or "hip4_default"),
+                        quote_token=str(portfolio.get("quote_token") or "USDC"),
+                        cash=str(portfolio.get("cash") or "0"),
+                        realized_pnl=str(portfolio.get("realized_pnl") or "0"),
+                        unrealized_pnl=str(portfolio.get("unrealized_pnl") or "0"),
+                        settlement_pnl=str(portfolio.get("settlement_pnl") or "0"),
+                        modeled_fees=str(portfolio.get("modeled_fees") or "0"),
+                        daily_notional=str(portfolio.get("daily_notional") or "0"),
+                        balances_json=redact_secrets(dict(portfolio.get("balances") or {})),
+                        updated_at_ms=int(portfolio.get("updated_at_ms") or execution.get("created_at_ms") or 0),
+                    )
+                )
+                candidate_id = str((execution.get("candidate") or {}).get("candidate_id") or "")
+                for token, balance in dict(portfolio.get("balances") or {}).items():
+                    session.add(Hip4PaperPositionRecord(portfolio_id=str(portfolio.get("portfolio_id") or "hip4_default"), token=str(token), balance=str(balance), updated_at_ms=int(portfolio.get("updated_at_ms") or 0)))
+                for action in execution.get("actions") or []:
+                    session.add(Hip4PaperActionRecord(candidate_id=candidate_id, action_type=str(action.get("action_type") or "unknown"), amount=str(action.get("amount") or "0"), price=str(action.get("price")) if action.get("price") is not None else None, action_json=redact_secrets(dict(action)), created_at_ms=int(execution.get("created_at_ms") or 0)))
+                for fill in execution.get("fills") or []:
+                    session.add(Hip4PaperFillRecord(fill_id=str(fill["fill_id"]), candidate_id=str(fill.get("candidate_id") or candidate_id), coin=str(fill.get("coin") or ""), side=str(fill.get("side") or ""), size=str(fill.get("size") or "0"), price=str(fill.get("price") or "0"), notional=str(fill.get("notional") or "0"), fee=str(fill.get("fee") or "0"), created_at_ms=int(fill.get("created_at_ms") or 0)))
+                await session.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("hip4_paper_execution_record_failed", error=type(exc).__name__)
+
+    async def record_hip4_reconciliation_run(self, result: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        try:
+            async with self.sessionmaker() as session:
+                item = Hip4ReconciliationRunRecord(
+                    run_id=str(result.get("run_id") or ""),
+                    status=str(result.get("status") or "unknown"),
+                    discrepancies_json=redact_secrets(list(result.get("discrepancies") or [])),
+                    result_json=redact_secrets(dict(result)),
+                    created_at_ms=int(result.get("created_at_ms") or 0),
+                )
+                session.add(item)
+                await session.commit()
+                return item.run_id
+        except Exception as exc:  # pragma: no cover
+            log.warning("hip4_reconciliation_record_failed", error=type(exc).__name__)
+            return None
 
     async def record_normalized_event(self, event: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
