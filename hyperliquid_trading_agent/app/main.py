@@ -63,6 +63,9 @@ from hyperliquid_trading_agent.app.tradfi.alpaca_provider import AlpacaTradFiPro
 from hyperliquid_trading_agent.app.tradfi.client import TradFiClient
 from hyperliquid_trading_agent.app.tradfi.options_flow import FlowEnricher, OptionsFlowDetector
 from hyperliquid_trading_agent.app.tradfi.paper.simulator import EquityPaperSimulator
+from hyperliquid_trading_agent.app.world_model.adapters import WorldModelAdapterService
+from hyperliquid_trading_agent.app.world_model.routes import register_world_model_routes
+from hyperliquid_trading_agent.app.world_model.service import WorldModelService
 
 log = get_logger(__name__)
 
@@ -106,6 +109,7 @@ class CandidatePromotionRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
+    dashboard_only = settings.runtime_profile == "dashboard_only"
     UP.set(1)
     SERVICE_INFO.info({"version": __version__, "environment": settings.environment})
 
@@ -115,18 +119,19 @@ async def lifespan(app: FastAPI):
     decision_context_recorder = DecisionContextRecorder(settings=settings, repository=repository, code_version=__version__)
     await decision_context_recorder.snapshot_startup()
     hyperliquid = HyperliquidClient(settings=settings)
-    sdk_info = None if settings.high_stakes_info_provider == "rest_only" else SDKInfoClient(settings=settings)
+    sdk_info = None if dashboard_only or settings.high_stakes_info_provider == "rest_only" else SDKInfoClient(settings=settings)
     news = NewsService(settings=settings, repository=repository)
     model_gateway = ModelGateway(settings=settings)
     shadow_service = ShadowComparisonService(repository=repository)
     review_service = ReviewWorkflowService(repository=repository, shadow_service=shadow_service)
+    world_model_service = WorldModelService(settings=settings, repository=repository)
 
     tradfi_client: TradFiClient | None = None
     options_flow_detector: OptionsFlowDetector | None = None
     flow_enricher: FlowEnricher | None = None
     equity_paper: EquityPaperSimulator | None = None
     equity_signal_generator: EquitySignalGenerator | None = None
-    if settings.tradfi_enabled:
+    if settings.tradfi_enabled and not dashboard_only:
         if settings.alpaca_api_key and settings.alpaca_api_secret:
             try:
                 provider = AlpacaTradFiProvider(
@@ -177,8 +182,8 @@ async def lifespan(app: FastAPI):
         options_flow=options_flow_detector,
     )
     memory_service = MemoryService(settings=settings, repository=repository)
-    evaluation_service = SignalEvaluationService(settings=settings, repository=repository, memory_service=memory_service)
-    event_evaluation_service = AlphaEventEvaluationService(settings=settings, repository=repository, memory_service=memory_service)
+    evaluation_service = SignalEvaluationService(settings=settings, repository=repository, memory_service=memory_service, world_model_service=world_model_service)
+    event_evaluation_service = AlphaEventEvaluationService(settings=settings, repository=repository, memory_service=memory_service, world_model_service=world_model_service)
     tuning_service = TuningProposalService(settings=settings, repository=repository, memory_service=memory_service)
     report_service = AutonomyReportService(
         settings=settings,
@@ -188,12 +193,12 @@ async def lifespan(app: FastAPI):
         memory_service=memory_service,
         tuning_service=tuning_service,
     )
-    high_stakes_context = HighStakesContextBuilder(tools=tools, settings=settings, sdk_info=sdk_info)
-    high_stakes_roles = HighStakesRoleRunner(model_gateway=model_gateway, settings=settings, memory_service=memory_service)
+    high_stakes_context = HighStakesContextBuilder(tools=tools, settings=settings, sdk_info=sdk_info, world_model_service=world_model_service)
+    high_stakes_roles = HighStakesRoleRunner(model_gateway=model_gateway, settings=settings, memory_service=memory_service, world_model_service=world_model_service)
     ws_worker = HyperliquidWebSocketWorker(settings=settings)
     tracking_service = PositionTrackingService(settings=settings, repository=repository, ws_worker=ws_worker)
     risk_gateway = RiskGateway(settings=settings, repository=repository, decision_context_recorder=decision_context_recorder)
-    hip4_service = Hip4Service(settings=settings, repository=repository, hyperliquid=hyperliquid, ws_worker=ws_worker, risk_gateway=risk_gateway)
+    hip4_service = Hip4Service(settings=settings, repository=repository, hyperliquid=hyperliquid, ws_worker=ws_worker, risk_gateway=risk_gateway, world_model_service=world_model_service)
     autonomy_service = AutonomousTradingLoopService(
         settings=settings,
         repository=repository,
@@ -213,6 +218,7 @@ async def lifespan(app: FastAPI):
         flow_enricher=flow_enricher,
         decision_context_recorder=decision_context_recorder,
         risk_gateway=risk_gateway,
+        world_model_service=world_model_service,
     )
     engine_service = InstitutionalEngineService(
         settings=settings,
@@ -220,6 +226,7 @@ async def lifespan(app: FastAPI):
         hyperliquid=hyperliquid,
         risk_gateway=risk_gateway,
         portfolio_service=autonomy_service.portfolio,
+        world_model_service=world_model_service,
     )
     autonomy_service.engine_service = engine_service
     report_service.portfolio_service = autonomy_service.portfolio
@@ -251,7 +258,8 @@ async def lifespan(app: FastAPI):
     newswire_service = NewswireService(settings=settings, repository=repository)
     newswire_enricher = Enricher(settings=settings, model_gateway=model_gateway)
     newswire_discord = DiscordNewsPublisher(settings=settings, bus=newswire_service.bus, alert_sink=autonomy_alert_sink, enricher=newswire_enricher)
-    newswire_agent_consumer = AgentNewsConsumer(settings=settings, bus=newswire_service.bus, autonomy_service=autonomy_service, repository=repository, event_evaluation_service=event_evaluation_service)
+    newswire_agent_consumer = AgentNewsConsumer(settings=settings, bus=newswire_service.bus, autonomy_service=autonomy_service, repository=repository, event_evaluation_service=event_evaluation_service, world_model_service=world_model_service)
+    world_model_adapter_service = WorldModelAdapterService(settings=settings, world_model_service=world_model_service)
 
     app.state.engine = engine
     app.state.repository = repository
@@ -276,6 +284,8 @@ async def lifespan(app: FastAPI):
     app.state.tuning_service = tuning_service
     app.state.shadow_service = shadow_service
     app.state.review_service = review_service
+    app.state.world_model_service = world_model_service
+    app.state.world_model_adapter_service = world_model_adapter_service
     app.state.newswire_service = newswire_service
     app.state.tradfi_client = tradfi_client
     app.state.options_flow_detector = options_flow_detector
@@ -287,25 +297,27 @@ async def lifespan(app: FastAPI):
     ws_task: asyncio.Task | None = None
     tracking_task: asyncio.Task | None = None
     autonomy_task: asyncio.Task | None = None
-    if settings.hyperliquid_ws_enabled or settings.position_tracking_enabled or settings.autonomy_enabled or (settings.hip4_enabled and settings.hip4_ws_enabled):
+    if not dashboard_only and (settings.hyperliquid_ws_enabled or settings.position_tracking_enabled or settings.autonomy_enabled or (settings.hip4_enabled and settings.hip4_ws_enabled)):
         ws_task = asyncio.create_task(ws_worker.start(), name="hyperliquid-ws")
         log.info("hyperliquid_ws_task_started")
-    if settings.position_tracking_enabled:
+    if settings.position_tracking_enabled and not dashboard_only:
         tracking_task = asyncio.create_task(tracking_service.start(), name="position-tracking")
         log.info("position_tracking_task_started")
-    if settings.autonomy_enabled:
+    if settings.autonomy_enabled and not dashboard_only:
         autonomy_task = asyncio.create_task(autonomy_service.start(), name="autonomy-service")
         log.info("autonomy_service_task_started")
-    await hip4_service.start()
-    if settings.discord_bot_token and settings.environment.lower() != "test":
+    if not dashboard_only:
+        await hip4_service.start()
+    if settings.discord_bot_token and settings.environment.lower() != "test" and not dashboard_only:
         bot_task = asyncio.create_task(bot.start(), name="discord-bot")
         log.info("discord_bot_task_started")
     else:
         reason = "test-environment" if settings.environment.lower() == "test" else "DISCORD_BOT_TOKEN-not-set"
         log.info("discord_bot_disabled", reason=reason)
-    await engine_validation_monitor.start()
-    await engine_pnl_attribution.start()
-    if settings.newswire_enabled:
+    if not dashboard_only:
+        await engine_validation_monitor.start()
+        await engine_pnl_attribution.start()
+    if settings.newswire_enabled and not dashboard_only:
         # Subscribe consumers before adapters start so no early events are missed.
         await newswire_discord.start()
         await newswire_agent_consumer.start()
@@ -315,17 +327,19 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         UP.set(0)
-        await bot.stop()
-        if settings.newswire_enabled:
+        if not dashboard_only:
+            await bot.stop()
+        if settings.newswire_enabled and not dashboard_only:
             await newswire_service.stop()
             await newswire_discord.stop()
             await newswire_agent_consumer.stop()
-        await engine_pnl_attribution.stop()
-        await engine_validation_monitor.stop()
-        await hip4_service.stop()
-        await autonomy_service.stop()
-        await tracking_service.stop()
-        await ws_worker.stop()
+        if not dashboard_only:
+            await engine_pnl_attribution.stop()
+            await engine_validation_monitor.stop()
+            await hip4_service.stop()
+            await autonomy_service.stop()
+            await tracking_service.stop()
+            await ws_worker.stop()
         if sdk_info is not None:
             await sdk_info.close()
         if tradfi_client is not None:
@@ -349,6 +363,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     register_governance_routes(app, settings, _require_agent_api)
     register_dashboard_routes(app, settings, _require_agent_api)
+    register_world_model_routes(app, settings, _require_agent_api)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -356,12 +371,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/ready")
     async def ready() -> dict[str, Any]:
-        ready_checks: dict[str, Any] = {"discord_enabled": bool(settings.discord_bot_token)}
-        try:
-            await app.state.hyperliquid.all_mids()
-            ready_checks["hyperliquid"] = "ok"
-        except Exception as exc:
-            ready_checks["hyperliquid"] = f"degraded:{type(exc).__name__}"
+        dashboard_only = settings.runtime_profile == "dashboard_only"
+        ready_checks: dict[str, Any] = {"discord_enabled": bool(settings.discord_bot_token) and not dashboard_only, "runtime_profile": settings.runtime_profile}
+        if dashboard_only:
+            health = await app.state.world_model_service.repository_health()
+            ready_checks["world_model_repository"] = "ok" if health.get("ping", {}).get("ok") else f"degraded:{health.get('ping', {}).get('error')}"
+            return {"status": "ready", "checks": ready_checks}
+        else:
+            try:
+                await app.state.hyperliquid.all_mids()
+                ready_checks["hyperliquid"] = "ok"
+            except Exception as exc:
+                ready_checks["hyperliquid"] = f"degraded:{type(exc).__name__}"
         if settings.position_tracking_enabled:
             tracking_status = app.state.tracking_service.status()
             ws_status = app.state.ws_worker.status()
@@ -401,6 +422,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         gateway = ModelGateway(settings)
         attempts = gateway.configured_attempts()
         return {
+            "runtime_profile": settings.runtime_profile,
             "environment": settings.environment,
             "hyperliquid_network": settings.hyperliquid_network,
             "hyperliquid_exchange_enabled": settings.hyperliquid_exchange_enabled,
@@ -422,6 +444,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "min_net_ev_bps": settings.engine_min_net_ev_bps,
                 "min_risk_adjusted_utility": settings.engine_min_risk_adjusted_utility,
             },
+            "world_model": app.state.world_model_service.status() if getattr(app.state, "world_model_service", None) is not None else {},
             "high_stakes": {
                 "enabled": settings.high_stakes_debate_enabled,
                 "activation_policy": settings.high_stakes_activation_policy,

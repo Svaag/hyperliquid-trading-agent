@@ -34,10 +34,11 @@ class AlphaEventEvaluationService:
     Capital, memory, and tuning proposals as evidence.
     """
 
-    def __init__(self, *, settings: Settings, repository: Any = None, memory_service: Any | None = None):
+    def __init__(self, *, settings: Settings, repository: Any = None, memory_service: Any | None = None, world_model_service: Any | None = None):
         self.settings = settings
         self.repository = repository
         self.memory_service = memory_service
+        self.world_model_service = world_model_service
         self.evaluations: dict[str, AlphaEventEvaluation] = {}
         self.marks: dict[str, AlphaEventEvaluationMark] = {}
         self.last_mark_at_ms: int | None = None
@@ -380,6 +381,13 @@ class AlphaEventEvaluationService:
             observe = getattr(self.memory_service, "observe_event_evaluation", None)
             if callable(observe):
                 await observe(evaluation)
+        if self.world_model_service is not None:
+            observe_world = getattr(self.world_model_service, "observe_alpha_event_evaluation", None)
+            if callable(observe_world):
+                try:
+                    await observe_world(evaluation)
+                except Exception as exc:  # pragma: no cover - advisory memory must not break event evaluation
+                    log.warning("world_model_event_evaluation_observe_failed", error=type(exc).__name__)
 
     async def _existing(self, event_id: str, symbol: str) -> AlphaEventEvaluation | None:
         evaluation_id = _evaluation_id(event_id, symbol)

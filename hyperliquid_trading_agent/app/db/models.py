@@ -239,6 +239,228 @@ class MemoryInjectionEventRecord(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class WorldEventRecord(TimestampMixin, Base):
+    __tablename__ = "world_events"
+    __table_args__ = (
+        Index("ix_world_events_source_type", "source_type"),
+        Index("ix_world_events_received", "received_ts_ms"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    source_type: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    source: Mapped[str] = mapped_column(String(128), nullable=False, default="unknown")
+    provider: Mapped[str] = mapped_column(String(128), nullable=False, default="unknown")
+    event_type: Mapped[str] = mapped_column(String(128), nullable=False, default="unknown")
+    asset_class: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    symbols_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    topics_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    title: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    body: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    url: Mapped[str | None] = mapped_column(Text)
+    event_ts_ms: Mapped[int | None] = mapped_column(BigInteger)
+    received_ts_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    computed_ts_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    importance_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    sentiment: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    source_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    quality_score: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    staleness_ms: Mapped[int | None] = mapped_column(BigInteger)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class MarketBeliefRecord(TimestampMixin, Base):
+    __tablename__ = "market_beliefs"
+    __table_args__ = (
+        Index("ix_market_beliefs_kind_status", "kind", "status"),
+        Index("ix_market_beliefs_subject", "subject"),
+        Index("ix_market_beliefs_updated", "updated_at_ms"),
+    )
+
+    belief_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    statement: Mapped[str] = mapped_column(Text, nullable=False)
+    symbols_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    topics_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    direction: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    probability: Mapped[float | None] = mapped_column(Float)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    salience: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    evidence_event_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    contradicts_belief_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expires_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class NarrativeClusterRecord(TimestampMixin, Base):
+    __tablename__ = "narrative_clusters"
+    __table_args__ = (
+        Index("ix_narrative_clusters_updated", "updated_at_ms"),
+        Index("ix_narrative_clusters_pressure", "pressure_score"),
+    )
+
+    cluster_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    symbols_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    topics_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    belief_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    event_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    pressure_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    consensus_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    conflict_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class PredictionMarketSignalRecord(TimestampMixin, Base):
+    __tablename__ = "prediction_market_signals"
+    __table_args__ = (
+        Index("ix_prediction_market_signals_venue_market", "venue", "market_id"),
+        Index("ix_prediction_market_signals_as_of", "as_of_ms"),
+        Index("ix_prediction_market_signals_status", "status"),
+    )
+
+    signal_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    market_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome_id: Mapped[str | None] = mapped_column(String(128))
+    outcome_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    symbols_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    topics_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    implied_probability: Mapped[float | None] = mapped_column(Float)
+    probability_delta: Mapped[float | None] = mapped_column(Float)
+    best_bid: Mapped[float | None] = mapped_column(Float)
+    best_ask: Mapped[float | None] = mapped_column(Float)
+    liquidity_usd: Mapped[float | None] = mapped_column(Float)
+    volume_usd: Mapped[float | None] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    source_event_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    as_of_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    staleness_ms: Mapped[int | None] = mapped_column(BigInteger)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class SourceCredibilityRecord(TimestampMixin, Base):
+    __tablename__ = "source_credibility"
+
+    source_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    source: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider: Mapped[str] = mapped_column(String(128), nullable=False, default="unknown")
+    score: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    observations: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    confirmations: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    contradictions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    notes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WorldMemoryAtomRecord(TimestampMixin, Base):
+    __tablename__ = "world_memory_atoms"
+    __table_args__ = (
+        Index("ix_world_memory_atoms_type", "memory_type"),
+        Index("ix_world_memory_atoms_subject", "subject"),
+        Index("ix_world_memory_atoms_reinforced", "last_reinforced_at_ms"),
+    )
+
+    memory_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    memory_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    symbols_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    topics_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    source_event_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    source_belief_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    salience: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_reinforced_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    expires_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WorldModelSnapshotRecord(TimestampMixin, Base):
+    __tablename__ = "world_model_snapshots"
+    __table_args__ = (Index("ix_world_model_snapshots_as_of", "as_of_ms"),)
+
+    snapshot_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    as_of_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    symbols_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    topics_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    top_beliefs_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    narrative_clusters_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    prediction_market_signals_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    source_credibility_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    memory_atoms_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    quality_flags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WorldModelAnnotationRecord(TimestampMixin, Base):
+    __tablename__ = "world_model_annotations"
+    __table_args__ = (
+        Index("ix_world_model_annotations_target", "target_type", "target_id"),
+        Index("ix_world_model_annotations_created", "created_at_ms"),
+    )
+
+    annotation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    target_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    note: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    actor_id: Mapped[str | None] = mapped_column(String(128))
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WorldModelOutcomeRecord(TimestampMixin, Base):
+    __tablename__ = "world_model_outcomes"
+    __table_args__ = (
+        Index("ix_world_model_outcomes_target", "target_type", "target_id"),
+        Index("ix_world_model_outcomes_created", "created_at_ms"),
+    )
+
+    outcome_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    target_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str | None] = mapped_column(String(64))
+    horizon: Mapped[str | None] = mapped_column(String(64))
+    realized_value: Mapped[float | None] = mapped_column(Float)
+    confidence_delta: Mapped[float] = mapped_column(Float, nullable=False, default=0.05)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class PredictionMarketCalibrationRecord(TimestampMixin, Base):
+    __tablename__ = "prediction_market_calibrations"
+    __table_args__ = (
+        Index("ix_prediction_market_calibrations_signal", "signal_id"),
+        Index("ix_prediction_market_calibrations_venue_market", "venue", "market_id"),
+    )
+
+    calibration_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    signal_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    market_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    implied_probability: Mapped[float | None] = mapped_column(Float)
+    realized_outcome: Mapped[float | None] = mapped_column(Float)
+    brier_score: Mapped[float | None] = mapped_column(Float)
+    settled_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class TradeProposalRecord(TimestampMixin, Base):
     __tablename__ = "trade_proposals"
 

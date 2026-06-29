@@ -53,12 +53,14 @@ from hyperliquid_trading_agent.app.db.models import (
     Hip4SettlementRecord,
     KillSwitchEventRecord,
     MarketAssetRecord,
+    MarketBeliefRecord,
     MarketLevelRecord,
     MarketObservation,
     MemoryInjectionEventRecord,
     MemoryObservationRecord,
     ModelTrainingRunRecord,
     ModelVersionRecord,
+    NarrativeClusterRecord,
     NewsItem,
     NewswireEventRow,
     NormalizedEventRecord,
@@ -75,6 +77,8 @@ from hyperliquid_trading_agent.app.db.models import (
     PortfolioSnapshotRecord,
     PositionThesisRecord,
     PositionTracker,
+    PredictionMarketCalibrationRecord,
+    PredictionMarketSignalRecord,
     PromotionDecisionRecord,
     PromptVersionRecord,
     ReconciliationRunRecord,
@@ -89,6 +93,7 @@ from hyperliquid_trading_agent.app.db.models import (
     ShadowRoleLessonRecord,
     SignalEvaluationMarkRecord,
     SignalEvaluationRecord,
+    SourceCredibilityRecord,
     TokenCapitalSnapshotRecord,
     ToolCall,
     TrackedLevel,
@@ -97,6 +102,11 @@ from hyperliquid_trading_agent.app.db.models import (
     TradeSignalRecord,
     TuningProposalRecord,
     WeeklyReportRecord,
+    WorldEventRecord,
+    WorldMemoryAtomRecord,
+    WorldModelAnnotationRecord,
+    WorldModelOutcomeRecord,
+    WorldModelSnapshotRecord,
 )
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.security import redact_secrets
@@ -1783,6 +1793,358 @@ class Repository:
             result = await session.execute(select(NewswireEventRow).order_by(NewswireEventRow.received_at_ms.desc()).limit(limit))
             return [_newswire_event_to_dict(item) for item in result.scalars().all()]
 
+    async def upsert_world_event(self, event: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(WorldEventRecord, str(event["event_id"]))
+            if item is None:
+                item = WorldEventRecord(
+                    event_id=str(event["event_id"]),
+                    received_ts_ms=int(event.get("received_ts_ms") or 0),
+                    computed_ts_ms=int(event.get("computed_ts_ms") or 0),
+                )
+                session.add(item)
+            _apply_world_event(item, event)
+            await session.commit()
+            return item.event_id
+
+    async def list_world_events(self, limit: int = 100, source_type: str | None = None, symbol: str | None = None) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(WorldEventRecord).order_by(WorldEventRecord.computed_ts_ms.desc()).limit(max(limit, limit * 3 if symbol else limit))
+            if source_type:
+                stmt = stmt.where(WorldEventRecord.source_type == source_type)
+            result = await session.execute(stmt)
+            items = [_world_event_to_dict(item) for item in result.scalars().all()]
+            if symbol:
+                wanted = symbol.upper()
+                items = [item for item in items if wanted in item.get("symbols", [])]
+            return items[:limit]
+
+    async def upsert_market_belief(self, belief: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(MarketBeliefRecord, str(belief["belief_id"]))
+            if item is None:
+                item = MarketBeliefRecord(
+                    belief_id=str(belief["belief_id"]),
+                    kind=str(belief.get("kind") or "fact"),
+                    subject=str(belief.get("subject") or ""),
+                    statement=str(belief.get("statement") or ""),
+                    created_at_ms=int(belief.get("created_at_ms") or 0),
+                    updated_at_ms=int(belief.get("updated_at_ms") or 0),
+                )
+                session.add(item)
+            _apply_market_belief(item, belief)
+            await session.commit()
+            return item.belief_id
+
+    async def list_market_beliefs(self, limit: int = 100, symbol: str | None = None, kind: str | None = None, status: str | None = "active") -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(MarketBeliefRecord).order_by(MarketBeliefRecord.updated_at_ms.desc()).limit(max(limit, limit * 3 if symbol else limit))
+            if kind:
+                stmt = stmt.where(MarketBeliefRecord.kind == kind)
+            if status:
+                stmt = stmt.where(MarketBeliefRecord.status == status)
+            result = await session.execute(stmt)
+            items = [_market_belief_to_dict(item) for item in result.scalars().all()]
+            if symbol:
+                wanted = symbol.upper()
+                items = [item for item in items if wanted in item.get("symbols", [])]
+            return items[:limit]
+
+    async def upsert_narrative_cluster(self, cluster: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(NarrativeClusterRecord, str(cluster["cluster_id"]))
+            if item is None:
+                item = NarrativeClusterRecord(
+                    cluster_id=str(cluster["cluster_id"]),
+                    title=str(cluster.get("title") or ""),
+                    created_at_ms=int(cluster.get("created_at_ms") or 0),
+                    updated_at_ms=int(cluster.get("updated_at_ms") or 0),
+                )
+                session.add(item)
+            _apply_narrative_cluster(item, cluster)
+            await session.commit()
+            return item.cluster_id
+
+    async def list_narrative_clusters(self, limit: int = 100, symbol: str | None = None) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            result = await session.execute(select(NarrativeClusterRecord).order_by(NarrativeClusterRecord.updated_at_ms.desc()).limit(max(limit, limit * 3 if symbol else limit)))
+            items = [_narrative_cluster_to_dict(item) for item in result.scalars().all()]
+            if symbol:
+                wanted = symbol.upper()
+                items = [item for item in items if wanted in item.get("symbols", [])]
+            return items[:limit]
+
+    async def upsert_prediction_market_signal(self, signal: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(PredictionMarketSignalRecord, str(signal["signal_id"]))
+            if item is None:
+                item = PredictionMarketSignalRecord(
+                    signal_id=str(signal["signal_id"]),
+                    venue=str(signal.get("venue") or "unknown"),
+                    market_id=str(signal.get("market_id") or ""),
+                    question=str(signal.get("question") or ""),
+                    as_of_ms=int(signal.get("as_of_ms") or 0),
+                )
+                session.add(item)
+            _apply_prediction_market_signal(item, signal)
+            await session.commit()
+            return item.signal_id
+
+    async def list_prediction_market_signals(self, limit: int = 100, venue: str | None = None, symbol: str | None = None) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(PredictionMarketSignalRecord).order_by(PredictionMarketSignalRecord.as_of_ms.desc()).limit(max(limit, limit * 3 if symbol else limit))
+            if venue:
+                stmt = stmt.where(PredictionMarketSignalRecord.venue == venue)
+            result = await session.execute(stmt)
+            items = [_prediction_market_signal_to_dict(item) for item in result.scalars().all()]
+            if symbol:
+                wanted = symbol.upper()
+                items = [item for item in items if wanted in item.get("symbols", [])]
+            return items[:limit]
+
+    async def upsert_source_credibility(self, source: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(SourceCredibilityRecord, str(source["source_key"]))
+            if item is None:
+                item = SourceCredibilityRecord(
+                    source_key=str(source["source_key"]),
+                    source=str(source.get("source") or "unknown"),
+                    last_updated_at_ms=int(source.get("last_updated_at_ms") or 0),
+                )
+                session.add(item)
+            _apply_source_credibility(item, source)
+            await session.commit()
+            return item.source_key
+
+    async def upsert_world_memory_atom(self, memory: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(WorldMemoryAtomRecord, str(memory["memory_id"]))
+            if item is None:
+                item = WorldMemoryAtomRecord(
+                    memory_id=str(memory["memory_id"]),
+                    memory_type=str(memory.get("memory_type") or "working"),
+                    subject=str(memory.get("subject") or ""),
+                    content=str(memory.get("content") or ""),
+                    created_at_ms=int(memory.get("created_at_ms") or 0),
+                )
+                session.add(item)
+            _apply_world_memory_atom(item, memory)
+            await session.commit()
+            return item.memory_id
+
+    async def list_world_memory_atoms(self, limit: int = 100, symbol: str | None = None, memory_type: str | None = None) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(WorldMemoryAtomRecord).order_by(WorldMemoryAtomRecord.last_reinforced_at_ms.desc().nullslast(), WorldMemoryAtomRecord.created_at_ms.desc()).limit(max(limit, limit * 3 if symbol else limit))
+            if memory_type:
+                stmt = stmt.where(WorldMemoryAtomRecord.memory_type == memory_type)
+            result = await session.execute(stmt)
+            items = [_world_memory_atom_to_dict(item) for item in result.scalars().all()]
+            if symbol:
+                wanted = symbol.upper()
+                items = [item for item in items if wanted in item.get("symbols", [])]
+            return items[:limit]
+
+    async def upsert_world_model_snapshot(self, snapshot: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(WorldModelSnapshotRecord, str(snapshot["snapshot_id"]))
+            if item is None:
+                item = WorldModelSnapshotRecord(snapshot_id=str(snapshot["snapshot_id"]), as_of_ms=int(snapshot.get("as_of_ms") or 0))
+                session.add(item)
+            _apply_world_model_snapshot(item, snapshot)
+            await session.commit()
+            return item.snapshot_id
+
+    async def latest_world_model_snapshot(self) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            result = await session.execute(select(WorldModelSnapshotRecord).order_by(WorldModelSnapshotRecord.as_of_ms.desc()).limit(1))
+            item = result.scalar_one_or_none()
+            return _world_model_snapshot_to_dict(item) if item is not None else None
+
+    async def get_world_model_snapshot(self, snapshot_id: str) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(WorldModelSnapshotRecord, snapshot_id)
+            return _world_model_snapshot_to_dict(item) if item is not None else None
+
+    async def list_world_model_snapshots(
+        self,
+        *,
+        limit: int = 100,
+        symbol: str | None = None,
+        topic: str | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+    ) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(WorldModelSnapshotRecord).order_by(WorldModelSnapshotRecord.as_of_ms.desc()).limit(max(limit, limit * 3 if symbol or topic else limit))
+            if start_ms is not None:
+                stmt = stmt.where(WorldModelSnapshotRecord.as_of_ms >= start_ms)
+            if end_ms is not None:
+                stmt = stmt.where(WorldModelSnapshotRecord.as_of_ms <= end_ms)
+            result = await session.execute(stmt)
+            items = [_world_model_snapshot_to_dict(item) for item in result.scalars().all()]
+            if symbol:
+                wanted = symbol.upper()
+                items = [item for item in items if wanted in item.get("symbols", []) or any(wanted in belief.get("symbols", []) for belief in item.get("top_beliefs", []))]
+            if topic:
+                wanted_topic = topic.lower()
+                items = [item for item in items if wanted_topic in item.get("topics", [])]
+            return items[:limit]
+
+    async def nearest_world_model_snapshot(self, as_of_ms: int, *, symbol: str | None = None, topic: str | None = None) -> dict[str, Any] | None:
+        items = await self.list_world_model_snapshots(limit=50, symbol=symbol, topic=topic, end_ms=as_of_ms)
+        return items[0] if items else None
+
+    async def upsert_world_model_annotation(self, annotation: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(WorldModelAnnotationRecord, str(annotation["annotation_id"]))
+            if item is None:
+                item = WorldModelAnnotationRecord(
+                    annotation_id=str(annotation["annotation_id"]),
+                    target_type=str(annotation.get("target_type") or ""),
+                    target_id=str(annotation.get("target_id") or ""),
+                    action=str(annotation.get("action") or ""),
+                    created_at_ms=int(annotation.get("created_at_ms") or 0),
+                )
+                session.add(item)
+            _apply_world_model_annotation(item, annotation)
+            await session.commit()
+            return item.annotation_id
+
+    async def list_world_model_annotations(
+        self,
+        *,
+        target_type: str | None = None,
+        target_id: str | None = None,
+        action: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(WorldModelAnnotationRecord).order_by(WorldModelAnnotationRecord.created_at_ms.desc()).limit(limit)
+            if target_type:
+                stmt = stmt.where(WorldModelAnnotationRecord.target_type == target_type)
+            if target_id:
+                stmt = stmt.where(WorldModelAnnotationRecord.target_id == target_id)
+            if action:
+                stmt = stmt.where(WorldModelAnnotationRecord.action == action)
+            result = await session.execute(stmt)
+            return [_world_model_annotation_to_dict(item) for item in result.scalars().all()]
+
+    async def upsert_world_model_outcome(self, outcome: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(WorldModelOutcomeRecord, str(outcome["outcome_id"]))
+            if item is None:
+                item = WorldModelOutcomeRecord(
+                    outcome_id=str(outcome["outcome_id"]),
+                    target_type=str(outcome.get("target_type") or ""),
+                    target_id=str(outcome.get("target_id") or ""),
+                    outcome=str(outcome.get("outcome") or ""),
+                    created_at_ms=int(outcome.get("created_at_ms") or 0),
+                )
+                session.add(item)
+            _apply_world_model_outcome(item, outcome)
+            await session.commit()
+            return item.outcome_id
+
+    async def list_world_model_outcomes(
+        self,
+        *,
+        target_type: str | None = None,
+        target_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(WorldModelOutcomeRecord).order_by(WorldModelOutcomeRecord.created_at_ms.desc()).limit(limit)
+            if target_type:
+                stmt = stmt.where(WorldModelOutcomeRecord.target_type == target_type)
+            if target_id:
+                stmt = stmt.where(WorldModelOutcomeRecord.target_id == target_id)
+            result = await session.execute(stmt)
+            return [_world_model_outcome_to_dict(item) for item in result.scalars().all()]
+
+    async def upsert_prediction_market_calibration(self, calibration: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(PredictionMarketCalibrationRecord, str(calibration["calibration_id"]))
+            if item is None:
+                item = PredictionMarketCalibrationRecord(
+                    calibration_id=str(calibration["calibration_id"]),
+                    signal_id=str(calibration.get("signal_id") or ""),
+                    venue=str(calibration.get("venue") or "unknown"),
+                    market_id=str(calibration.get("market_id") or ""),
+                    created_at_ms=int(calibration.get("created_at_ms") or 0),
+                )
+                session.add(item)
+            _apply_prediction_market_calibration(item, calibration)
+            await session.commit()
+            return item.calibration_id
+
+    async def list_prediction_market_calibrations(
+        self,
+        *,
+        signal_id: str | None = None,
+        venue: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(PredictionMarketCalibrationRecord).order_by(PredictionMarketCalibrationRecord.created_at_ms.desc()).limit(limit)
+            if signal_id:
+                stmt = stmt.where(PredictionMarketCalibrationRecord.signal_id == signal_id)
+            if venue:
+                stmt = stmt.where(PredictionMarketCalibrationRecord.venue == venue)
+            result = await session.execute(stmt)
+            return [_prediction_market_calibration_to_dict(item) for item in result.scalars().all()]
+
+    async def ping(self) -> dict[str, Any]:
+        if self.sessionmaker is None:
+            return {"ok": False, "error": "repository_disabled"}
+        try:
+            async with self.sessionmaker() as session:
+                await session.execute(select(1))
+            return {"ok": True, "error": None}
+        except Exception as exc:
+            return {"ok": False, "error": type(exc).__name__}
+
     async def create_or_update_trade_signal(self, signal: dict[str, Any], approved_by: str | None = None, rejected_by: str | None = None) -> None:
         if self.sessionmaker is None:
             return
@@ -3239,6 +3601,333 @@ def _newswire_event_to_dict(item: NewswireEventRow) -> dict[str, Any]:
         "enrichment": item.enrichment_json,
         "metadata": item.metadata_json,
     }
+
+
+def _world_event_to_dict(item: WorldEventRecord) -> dict[str, Any]:
+    return {
+        "event_id": item.event_id,
+        "source_type": item.source_type,
+        "source": item.source,
+        "provider": item.provider,
+        "event_type": item.event_type,
+        "asset_class": item.asset_class,
+        "symbols": item.symbols_json,
+        "topics": item.topics_json,
+        "title": item.title,
+        "body": item.body,
+        "url": item.url,
+        "event_ts_ms": item.event_ts_ms,
+        "received_ts_ms": item.received_ts_ms,
+        "computed_ts_ms": item.computed_ts_ms,
+        "importance_score": item.importance_score,
+        "sentiment": item.sentiment,
+        "confidence": item.confidence,
+        "source_score": item.source_score,
+        "quality_score": item.quality_score,
+        "staleness_ms": item.staleness_ms,
+        "payload": item.payload_json,
+        "metadata": item.metadata_json,
+    }
+
+
+def _apply_world_event(item: WorldEventRecord, data: dict[str, Any]) -> None:
+    item.source_type = str(data.get("source_type") or "unknown")
+    item.source = str(data.get("source") or "unknown")
+    item.provider = str(data.get("provider") or "unknown")
+    item.event_type = str(data.get("event_type") or "unknown")
+    item.asset_class = str(data.get("asset_class") or "unknown")
+    item.symbols_json = [str(symbol).upper() for symbol in data.get("symbols") or []]
+    item.topics_json = [str(topic).lower() for topic in data.get("topics") or []]
+    item.title = str(data.get("title") or "")
+    item.body = str(data.get("body") or "")
+    item.url = data.get("url")
+    item.event_ts_ms = data.get("event_ts_ms")
+    item.received_ts_ms = int(data.get("received_ts_ms") or 0)
+    item.computed_ts_ms = int(data.get("computed_ts_ms") or item.received_ts_ms)
+    item.importance_score = float(data.get("importance_score") or 0)
+    item.sentiment = str(data.get("sentiment") or "unknown")
+    item.confidence = float(data.get("confidence") or 0)
+    item.source_score = float(data.get("source_score") or 0)
+    item.quality_score = float(data.get("quality_score") or 1)
+    item.staleness_ms = data.get("staleness_ms")
+    item.payload_json = redact_secrets(dict(data.get("payload") or {}))
+    item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
+
+
+def _market_belief_to_dict(item: MarketBeliefRecord) -> dict[str, Any]:
+    return {
+        "belief_id": item.belief_id,
+        "kind": item.kind,
+        "subject": item.subject,
+        "statement": item.statement,
+        "symbols": item.symbols_json,
+        "topics": item.topics_json,
+        "direction": item.direction,
+        "probability": item.probability,
+        "confidence": item.confidence,
+        "salience": item.salience,
+        "evidence_event_ids": item.evidence_event_ids_json,
+        "contradicts_belief_ids": item.contradicts_belief_ids_json,
+        "status": item.status,
+        "created_at_ms": item.created_at_ms,
+        "updated_at_ms": item.updated_at_ms,
+        "expires_at_ms": item.expires_at_ms,
+        "metadata": item.metadata_json,
+    }
+
+
+def _apply_market_belief(item: MarketBeliefRecord, data: dict[str, Any]) -> None:
+    item.kind = str(data.get("kind") or "fact")
+    item.subject = str(data.get("subject") or "")
+    item.statement = str(data.get("statement") or "")
+    item.symbols_json = [str(symbol).upper() for symbol in data.get("symbols") or []]
+    item.topics_json = [str(topic).lower() for topic in data.get("topics") or []]
+    item.direction = str(data.get("direction") or "unknown")
+    item.probability = data.get("probability")
+    item.confidence = float(data.get("confidence") or 0)
+    item.salience = float(data.get("salience") or 0)
+    item.evidence_event_ids_json = [str(event_id) for event_id in data.get("evidence_event_ids") or []]
+    item.contradicts_belief_ids_json = [str(belief_id) for belief_id in data.get("contradicts_belief_ids") or []]
+    item.status = str(data.get("status") or "active")
+    item.created_at_ms = int(data.get("created_at_ms") or item.created_at_ms or 0)
+    item.updated_at_ms = int(data.get("updated_at_ms") or item.updated_at_ms or item.created_at_ms)
+    item.expires_at_ms = data.get("expires_at_ms")
+    item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
+
+
+def _narrative_cluster_to_dict(item: NarrativeClusterRecord) -> dict[str, Any]:
+    return {
+        "cluster_id": item.cluster_id,
+        "title": item.title,
+        "summary": item.summary,
+        "symbols": item.symbols_json,
+        "topics": item.topics_json,
+        "belief_ids": item.belief_ids_json,
+        "event_ids": item.event_ids_json,
+        "pressure_score": item.pressure_score,
+        "consensus_score": item.consensus_score,
+        "conflict_score": item.conflict_score,
+        "created_at_ms": item.created_at_ms,
+        "updated_at_ms": item.updated_at_ms,
+        "metadata": item.metadata_json,
+    }
+
+
+def _apply_narrative_cluster(item: NarrativeClusterRecord, data: dict[str, Any]) -> None:
+    item.title = str(data.get("title") or "")
+    item.summary = str(data.get("summary") or "")
+    item.symbols_json = [str(symbol).upper() for symbol in data.get("symbols") or []]
+    item.topics_json = [str(topic).lower() for topic in data.get("topics") or []]
+    item.belief_ids_json = [str(belief_id) for belief_id in data.get("belief_ids") or []]
+    item.event_ids_json = [str(event_id) for event_id in data.get("event_ids") or []]
+    item.pressure_score = float(data.get("pressure_score") or 0)
+    item.consensus_score = float(data.get("consensus_score") or 0)
+    item.conflict_score = float(data.get("conflict_score") or 0)
+    item.created_at_ms = int(data.get("created_at_ms") or item.created_at_ms or 0)
+    item.updated_at_ms = int(data.get("updated_at_ms") or item.updated_at_ms or item.created_at_ms)
+    item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
+
+
+def _prediction_market_signal_to_dict(item: PredictionMarketSignalRecord) -> dict[str, Any]:
+    return {
+        "signal_id": item.signal_id,
+        "venue": item.venue,
+        "market_id": item.market_id,
+        "question": item.question,
+        "outcome_id": item.outcome_id,
+        "outcome_name": item.outcome_name,
+        "symbols": item.symbols_json,
+        "topics": item.topics_json,
+        "implied_probability": item.implied_probability,
+        "probability_delta": item.probability_delta,
+        "best_bid": item.best_bid,
+        "best_ask": item.best_ask,
+        "liquidity_usd": item.liquidity_usd,
+        "volume_usd": item.volume_usd,
+        "status": item.status,
+        "source_event_ids": item.source_event_ids_json,
+        "as_of_ms": item.as_of_ms,
+        "staleness_ms": item.staleness_ms,
+        "confidence": item.confidence,
+        "metadata": item.metadata_json,
+    }
+
+
+def _apply_prediction_market_signal(item: PredictionMarketSignalRecord, data: dict[str, Any]) -> None:
+    item.venue = str(data.get("venue") or "unknown")
+    item.market_id = str(data.get("market_id") or "")
+    item.question = str(data.get("question") or "")
+    item.outcome_id = data.get("outcome_id")
+    item.outcome_name = str(data.get("outcome_name") or "")
+    item.symbols_json = [str(symbol).upper() for symbol in data.get("symbols") or []]
+    item.topics_json = [str(topic).lower() for topic in data.get("topics") or []]
+    item.implied_probability = data.get("implied_probability")
+    item.probability_delta = data.get("probability_delta")
+    item.best_bid = data.get("best_bid")
+    item.best_ask = data.get("best_ask")
+    item.liquidity_usd = data.get("liquidity_usd")
+    item.volume_usd = data.get("volume_usd")
+    item.status = str(data.get("status") or "unknown")
+    item.source_event_ids_json = [str(event_id) for event_id in data.get("source_event_ids") or []]
+    item.as_of_ms = int(data.get("as_of_ms") or item.as_of_ms or 0)
+    item.staleness_ms = data.get("staleness_ms")
+    item.confidence = float(data.get("confidence") or 0)
+    item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
+
+
+def _apply_source_credibility(item: SourceCredibilityRecord, data: dict[str, Any]) -> None:
+    item.source = str(data.get("source") or "unknown")
+    item.provider = str(data.get("provider") or "unknown")
+    item.score = float(data.get("score") or 0.5)
+    item.observations = int(data.get("observations") or 0)
+    item.confirmations = int(data.get("confirmations") or 0)
+    item.contradictions = int(data.get("contradictions") or 0)
+    item.last_updated_at_ms = int(data.get("last_updated_at_ms") or item.last_updated_at_ms or 0)
+    item.notes_json = [str(note) for note in data.get("notes") or []]
+    item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
+
+
+def _world_memory_atom_to_dict(item: WorldMemoryAtomRecord) -> dict[str, Any]:
+    return {
+        "memory_id": item.memory_id,
+        "memory_type": item.memory_type,
+        "subject": item.subject,
+        "content": item.content,
+        "symbols": item.symbols_json,
+        "topics": item.topics_json,
+        "source_event_ids": item.source_event_ids_json,
+        "source_belief_ids": item.source_belief_ids_json,
+        "confidence": item.confidence,
+        "salience": item.salience,
+        "created_at_ms": item.created_at_ms,
+        "last_reinforced_at_ms": item.last_reinforced_at_ms,
+        "expires_at_ms": item.expires_at_ms,
+        "metadata": item.metadata_json,
+    }
+
+
+def _apply_world_memory_atom(item: WorldMemoryAtomRecord, data: dict[str, Any]) -> None:
+    item.memory_type = str(data.get("memory_type") or "working")
+    item.subject = str(data.get("subject") or "")
+    item.content = str(data.get("content") or "")
+    item.symbols_json = [str(symbol).upper() for symbol in data.get("symbols") or []]
+    item.topics_json = [str(topic).lower() for topic in data.get("topics") or []]
+    item.source_event_ids_json = [str(event_id) for event_id in data.get("source_event_ids") or []]
+    item.source_belief_ids_json = [str(belief_id) for belief_id in data.get("source_belief_ids") or []]
+    item.confidence = float(data.get("confidence") or 0)
+    item.salience = float(data.get("salience") or 0)
+    item.created_at_ms = int(data.get("created_at_ms") or item.created_at_ms or 0)
+    item.last_reinforced_at_ms = data.get("last_reinforced_at_ms")
+    item.expires_at_ms = data.get("expires_at_ms")
+    item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
+
+
+def _world_model_snapshot_to_dict(item: WorldModelSnapshotRecord) -> dict[str, Any]:
+    return {
+        "snapshot_id": item.snapshot_id,
+        "as_of_ms": item.as_of_ms,
+        "symbols": item.symbols_json,
+        "topics": item.topics_json,
+        "summary": item.summary,
+        "top_beliefs": item.top_beliefs_json,
+        "narrative_clusters": item.narrative_clusters_json,
+        "prediction_market_signals": item.prediction_market_signals_json,
+        "source_credibility": item.source_credibility_json,
+        "memory_atoms": item.memory_atoms_json,
+        "quality_flags": item.quality_flags_json,
+        "metadata": item.metadata_json,
+    }
+
+
+def _apply_world_model_snapshot(item: WorldModelSnapshotRecord, data: dict[str, Any]) -> None:
+    item.as_of_ms = int(data.get("as_of_ms") or 0)
+    item.symbols_json = [str(symbol).upper() for symbol in data.get("symbols") or []]
+    item.topics_json = [str(topic).lower() for topic in data.get("topics") or []]
+    item.summary = str(data.get("summary") or "")
+    item.top_beliefs_json = redact_secrets(list(data.get("top_beliefs") or []))
+    item.narrative_clusters_json = redact_secrets(list(data.get("narrative_clusters") or []))
+    item.prediction_market_signals_json = redact_secrets(list(data.get("prediction_market_signals") or []))
+    item.source_credibility_json = redact_secrets(list(data.get("source_credibility") or []))
+    item.memory_atoms_json = redact_secrets(list(data.get("memory_atoms") or []))
+    item.quality_flags_json = [str(flag) for flag in data.get("quality_flags") or []]
+    item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
+
+
+def _world_model_annotation_to_dict(item: WorldModelAnnotationRecord) -> dict[str, Any]:
+    return {
+        "annotation_id": item.annotation_id,
+        "target_type": item.target_type,
+        "target_id": item.target_id,
+        "action": item.action,
+        "note": item.note,
+        "actor_id": item.actor_id,
+        "created_at_ms": item.created_at_ms,
+        "metadata": item.metadata_json,
+    }
+
+
+def _apply_world_model_annotation(item: WorldModelAnnotationRecord, data: dict[str, Any]) -> None:
+    item.target_type = str(data.get("target_type") or "")
+    item.target_id = str(data.get("target_id") or "")
+    item.action = str(data.get("action") or "")
+    item.note = str(data.get("note") or "")
+    item.actor_id = data.get("actor_id")
+    item.created_at_ms = int(data.get("created_at_ms") or item.created_at_ms or 0)
+    item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
+
+
+def _world_model_outcome_to_dict(item: WorldModelOutcomeRecord) -> dict[str, Any]:
+    return {
+        "outcome_id": item.outcome_id,
+        "target_type": item.target_type,
+        "target_id": item.target_id,
+        "outcome": item.outcome,
+        "symbol": item.symbol,
+        "horizon": item.horizon,
+        "realized_value": item.realized_value,
+        "confidence_delta": item.confidence_delta,
+        "created_at_ms": item.created_at_ms,
+        "metadata": item.metadata_json,
+    }
+
+
+def _apply_world_model_outcome(item: WorldModelOutcomeRecord, data: dict[str, Any]) -> None:
+    item.target_type = str(data.get("target_type") or "")
+    item.target_id = str(data.get("target_id") or "")
+    item.outcome = str(data.get("outcome") or "")
+    item.symbol = str(data.get("symbol")).upper() if data.get("symbol") else None
+    item.horizon = data.get("horizon")
+    item.realized_value = data.get("realized_value")
+    item.confidence_delta = float(data.get("confidence_delta") if data.get("confidence_delta") is not None else 0.05)
+    item.created_at_ms = int(data.get("created_at_ms") or item.created_at_ms or 0)
+    item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
+
+
+def _prediction_market_calibration_to_dict(item: PredictionMarketCalibrationRecord) -> dict[str, Any]:
+    return {
+        "calibration_id": item.calibration_id,
+        "signal_id": item.signal_id,
+        "venue": item.venue,
+        "market_id": item.market_id,
+        "implied_probability": item.implied_probability,
+        "realized_outcome": item.realized_outcome,
+        "brier_score": item.brier_score,
+        "settled_at_ms": item.settled_at_ms,
+        "created_at_ms": item.created_at_ms,
+        "metadata": item.metadata_json,
+    }
+
+
+def _apply_prediction_market_calibration(item: PredictionMarketCalibrationRecord, data: dict[str, Any]) -> None:
+    item.signal_id = str(data.get("signal_id") or "")
+    item.venue = str(data.get("venue") or "unknown")
+    item.market_id = str(data.get("market_id") or "")
+    item.implied_probability = data.get("implied_probability")
+    item.realized_outcome = data.get("realized_outcome")
+    item.brier_score = data.get("brier_score")
+    item.settled_at_ms = data.get("settled_at_ms")
+    item.created_at_ms = int(data.get("created_at_ms") or item.created_at_ms or 0)
+    item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
 
 
 def _risk_gateway_decision_to_dict(item: RiskGatewayDecisionRecord) -> dict[str, Any]:

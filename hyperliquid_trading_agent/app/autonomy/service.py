@@ -84,6 +84,7 @@ class AutonomousTradingLoopService:
         decision_context_recorder: Any | None = None,
         risk_gateway: RiskGateway | None = None,
         engine_service: Any | None = None,
+        world_model_service: Any | None = None,
     ):
         self.settings = settings
         self.repository = repository
@@ -105,6 +106,7 @@ class AutonomousTradingLoopService:
         self.decision_context_recorder = decision_context_recorder
         self.risk_gateway = risk_gateway or RiskGateway(settings=settings, repository=repository, decision_context_recorder=decision_context_recorder)
         self.engine_service = engine_service
+        self.world_model_service = world_model_service
         self.universe_resolver = MarketUniverseResolver(settings, hyperliquid)
         self.reducer = MarketMapReducer()
         self.newswire = AutonomyNewswire(settings, news)
@@ -194,6 +196,7 @@ class AutonomousTradingLoopService:
             "reports": self.report_service.status() if self.report_service is not None and callable(getattr(self.report_service, "status", None)) else {},
             "tuning_proposals": self.tuning_service.status() if self.tuning_service is not None and callable(getattr(self.tuning_service, "status", None)) else {},
             "warnings": [*self.settings.autonomy_config_warnings(), *self.universe_resolver.warnings],
+            "world_model": self.world_model_service.status() if self.world_model_service is not None and callable(getattr(self.world_model_service, "status", None)) else {},
         }
 
     def signals_today(self) -> int:
@@ -618,6 +621,8 @@ class AutonomousTradingLoopService:
                 NEWSWIRE_EVENTS.labels(provider=event.provider).inc()
                 if self.repository is not None and getattr(self.repository, "enabled", False):
                     await self.repository.record_news_event(event.model_dump(mode="json"))
+                if self.world_model_service is not None and callable(getattr(self.world_model_service, "observe_news_event", None)):
+                    await self.world_model_service.observe_news_event(event)
                 if self.event_evaluation_service is not None:
                     await self.event_evaluation_service.create_for_news_event(event, market_regime=self.reducer.snapshot().risk_regime)
             self._last_news_ms = ts
@@ -826,6 +831,7 @@ class AutonomousTradingLoopService:
                 self._model_call_timestamps.append(time.monotonic())
                 AUTONOMY_MODEL_INSIGHT_CALLS.labels(result="ok" if enriched.model_insight and enriched.model_insight.get("status") != "unavailable" else "fallback").inc()
             enriched = await self._attach_decision_context(enriched, source_type="autonomy_signal", timestamp_ms=timestamp_ms)
+            enriched = self._attach_world_model_snapshot(enriched)
             self.signals[enriched.id] = enriched
             AUTONOMY_SIGNALS_CREATED.labels(signal_type=enriched.signal_type).inc()
             await self._persist_signal(enriched)
@@ -939,6 +945,26 @@ class AutonomousTradingLoopService:
         )
         await recorder.record_decision_context(context, source_type=source_type, source_id=signal.id)
         return signal.model_copy(update={"metadata": {**signal.metadata, "decision_context": context.model_dump(mode="json")}})
+
+    def _attach_world_model_snapshot(self, signal: TradeSignal) -> TradeSignal:
+        if self.world_model_service is None or signal.metadata.get("world_model_snapshot"):
+            return signal
+        snapshot = getattr(self.world_model_service, "snapshot", None)
+        if not callable(snapshot):
+            return signal
+        try:
+            world_snapshot = snapshot(symbols=[signal.symbol], max_beliefs=8)
+        except Exception:
+            return signal
+        return signal.model_copy(
+            update={
+                "metadata": {
+                    **signal.metadata,
+                    "world_model_snapshot": world_snapshot.model_dump(mode="json"),
+                    "world_model_snapshot_id": world_snapshot.snapshot_id,
+                }
+            }
+        )
 
     async def _persist_signal(self, signal: TradeSignal, approved_by: str | None = None, rejected_by: str | None = None) -> None:
         if self.repository is None or not getattr(self.repository, "enabled", False):

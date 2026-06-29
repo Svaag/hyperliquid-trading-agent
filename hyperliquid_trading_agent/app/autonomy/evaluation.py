@@ -35,10 +35,11 @@ class SignalEvaluationService:
     approved, rejected, and expired ideas.
     """
 
-    def __init__(self, *, settings: Settings, repository: Any = None, memory_service: Any | None = None):
+    def __init__(self, *, settings: Settings, repository: Any = None, memory_service: Any | None = None, world_model_service: Any | None = None):
         self.settings = settings
         self.repository = repository
         self.memory_service = memory_service
+        self.world_model_service = world_model_service
         self.evaluations: dict[str, SignalEvaluation] = {}
         self.marks: dict[str, SignalEvaluationMark] = {}
         self.last_mark_at_ms: int | None = None
@@ -321,6 +322,13 @@ class SignalEvaluationService:
             observe = getattr(self.memory_service, "observe_signal_evaluation", None)
             if callable(observe):
                 await observe(evaluation)
+        if self.world_model_service is not None:
+            observe_world = getattr(self.world_model_service, "observe_signal_evaluation", None)
+            if callable(observe_world):
+                try:
+                    await observe_world(evaluation)
+                except Exception as exc:  # pragma: no cover - advisory memory must not break evaluation
+                    log.warning("world_model_signal_evaluation_observe_failed", error=type(exc).__name__)
 
     async def _persist(self, evaluation: SignalEvaluation) -> None:
         if self._repo_enabled():

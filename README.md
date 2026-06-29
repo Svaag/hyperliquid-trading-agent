@@ -42,7 +42,7 @@ design.
 - Semantic tool gathering for market snapshots, funding, candles, account public state, fills, docs, news, and paper trades.
 - PostgreSQL persistence for audit events, tool calls, conversations, cache, news, paper trades, debate runs, role outputs, state snapshots, trade proposals, autonomous market state, signals, paper orders/fills/positions, and portfolio snapshots.
 - Paper/shadow-only institutional engine scaffolding: normalized event ledger, point-in-time feature store, regime vector, alpha candidates, EV estimates, allocation decisions, EvidencePacks, debate decisions, OrderIntents, execution reports, position theses, reconciliation/attribution/model registry tables, and read-only `/engine/*` inspection endpoints.
-- Alembic migrations through `0014_model_registry_retention`.
+- Alembic migrations through `0017_world_model_supervision`.
 - Dockerfile and Docker Compose with Postgres.
 
 ## Quick start
@@ -75,6 +75,32 @@ DISCORD_BOT_TOKEN=
 DISCORD_ALLOWED_GUILD_IDS=
 DISCORD_ALLOWED_CHANNEL_IDS=
 ```
+
+Dashboard-only World Model runtime:
+
+```bash
+docker compose --profile dashboard up dashboard
+```
+
+This profile runs migrations, connects to the Compose Postgres service, and starts only the FastAPI dashboard/API surface with `RUNTIME_PROFILE=dashboard_only`. It intentionally disables Discord, Alpaca/TradFi, HIP-4, engine loops, autonomy, position tracking, newswire workers, and Hyperliquid WebSocket streaming. Open `http://127.0.0.1:8090/world-model/dashboard`.
+
+For a fresh local dashboard, seed advisory-only demo data from the UI or API:
+
+```bash
+curl -X POST http://127.0.0.1:8090/world-model/dev/seed \
+  -H 'content-type: application/json' \
+  -d '{"symbol":"BTC","topic":"macro"}'
+```
+
+Useful smoke endpoints:
+
+```bash
+curl http://127.0.0.1:8090/world-model/repository/health
+curl 'http://127.0.0.1:8090/world-model/dashboard/data?symbol=BTC&mode=prediction_consensus'
+curl 'http://127.0.0.1:8090/world-model/snapshots?symbol=BTC'
+```
+
+Live adapters are disabled by default. Enable them explicitly with `WORLD_MODEL_ADAPTERS_ENABLED=true` plus the venue flag, for example `WORLD_MODEL_POLYMARKET_ENABLED=true`; use `POST /world-model/adapters/poll?force=true` for manual dashboard polling.
 
 Model chain:
 

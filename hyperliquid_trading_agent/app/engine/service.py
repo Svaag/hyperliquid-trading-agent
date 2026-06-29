@@ -41,12 +41,14 @@ class InstitutionalEngineService:
         hyperliquid: Any,
         risk_gateway: RiskGateway,
         portfolio_service: Any | None = None,
+        world_model_service: Any | None = None,
     ):
         self.settings = settings
         self.repository = repository
         self.hyperliquid = hyperliquid
         self.risk_gateway = risk_gateway
         self.portfolio_service = portfolio_service
+        self.world_model_service = world_model_service
         self.ledger = EventLedger(repository)
         self.feature_store = FeatureStore(repository)
         self.regime_engine = RegimeEngine()
@@ -135,6 +137,7 @@ class InstitutionalEngineService:
             current_loop_allocations = []
             throttle_events = []
             for symbol in symbols:
+                await self._record_world_model_features(symbol)
                 features = await self.feature_store.latest(asset=symbol, limit=200)
                 if not features:
                     continue
@@ -242,6 +245,18 @@ class InstitutionalEngineService:
             if snapshot is not None:
                 return snapshot.model_dump(mode="json")
         return {"equity_usd": self.settings.autonomy_paper_initial_equity_usd, "initial_equity_usd": self.settings.autonomy_paper_initial_equity_usd}
+
+    async def _record_world_model_features(self, symbol: str) -> None:
+        if self.world_model_service is None:
+            return
+        snapshot = getattr(self.world_model_service, "snapshot", None)
+        if not callable(snapshot):
+            return
+        try:
+            world_snapshot = snapshot(symbols=[symbol], max_beliefs=12)
+            await self.feature_store.features_for_world_model_snapshot(asset=symbol, snapshot=world_snapshot)
+        except Exception:
+            return
 
     def _order_intent(self, candidate: AlphaCandidate, model_version_id: str, allocation_id: str, size: float, notional: float, ts: int) -> OrderIntent:
         side = "buy" if candidate.side == "long" else "sell"

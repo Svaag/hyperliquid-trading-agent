@@ -34,5 +34,42 @@ services:
       postgres:
         condition: service_healthy
 
+  dashboard:
+    profiles: ["dashboard"]
+    build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      RUNTIME_PROFILE: dashboard_only
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-hlagent}:${POSTGRES_PASSWORD:-hlagent}@postgres:5432/${POSTGRES_DB:-hlagent}
+      DISCORD_BOT_TOKEN: ""
+      TRADFI_ENABLED: "false"
+      ENGINE_ENABLED: "false"
+      ENGINE_PNL_ATTRIBUTION_ENABLED: "false"
+      POSITION_TRACKING_ENABLED: "false"
+      NEWSWIRE_ENABLED: "false"
+      HIP4_ENABLED: "false"
+      HIP4_SCAN_ENABLED: "false"
+      HIP4_PAPER_EXECUTION_ENABLED: "false"
+      HIP4_MANUAL_TICKET_EXPORT_ENABLED: "false"
+      HIP4_PROACTIVE_LOOP_ENABLED: "false"
+      HIP4_PROACTIVE_PAPER_EXECUTION_ENABLED: "false"
+      AUTONOMY_ENABLED: "false"
+      HYPERLIQUID_WS_ENABLED: "false"
+      WORLD_MODEL_DEV_SEED_ENABLED: "true"
+    command: sh -c "alembic upgrade head && hyperliquid-trading-agent"
+    ports:
+      - "${DASHBOARD_HOST_PORT:-8090}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "python - <<'PY'\nimport urllib.request\nurllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).read()\nPY"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres_data:

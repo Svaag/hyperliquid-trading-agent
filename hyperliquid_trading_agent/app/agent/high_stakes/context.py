@@ -41,10 +41,11 @@ class PlannedCall:
 
 
 class HighStakesContextBuilder:
-    def __init__(self, tools: AgentTools, settings: Settings, sdk_info: SDKInfoClient | None = None):
+    def __init__(self, tools: AgentTools, settings: Settings, sdk_info: SDKInfoClient | None = None, world_model_service: Any | None = None):
         self.tools = tools
         self.settings = settings
         self.sdk_info = sdk_info
+        self.world_model_service = world_model_service
 
     async def gather(
         self,
@@ -92,6 +93,9 @@ class HighStakesContextBuilder:
             },
         )
         features["data_coverage"] = coverage.model_dump(mode="json")
+        world_snapshot = self._world_model_snapshot(coins)
+        if world_snapshot:
+            features["world_model"] = world_snapshot
         return MarketContextBundle(
             prompt=prompt,
             route=route,
@@ -131,6 +135,9 @@ class HighStakesContextBuilder:
             },
         )
         features["data_coverage"] = coverage.model_dump(mode="json")
+        world_snapshot = self._world_model_snapshot(first.route.coins or [])
+        if world_snapshot:
+            features["world_model"] = world_snapshot
         return MarketContextBundle(
             prompt=request.prompt,
             route=first.route,
@@ -285,6 +292,18 @@ class HighStakesContextBuilder:
             return await self.tools.search_market_news(prompt, lookback_hours=lookback_hours)
 
         return call
+
+    def _world_model_snapshot(self, coins: list[str]) -> dict[str, Any]:
+        if self.world_model_service is None:
+            return {}
+        snapshot = getattr(self.world_model_service, "snapshot", None)
+        if not callable(snapshot):
+            return {}
+        try:
+            result = snapshot(symbols=coins, max_beliefs=8)
+            return result.model_dump(mode="json")
+        except Exception:
+            return {}
 
     def _docs_call(self, query: str) -> Callable[[], Awaitable[ToolResult]]:
         async def call() -> ToolResult:

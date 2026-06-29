@@ -39,12 +39,14 @@ class Hip4Service:
         hyperliquid: Any | None = None,
         ws_worker: Any | None = None,
         risk_gateway: Any | None = None,
+        world_model_service: Any | None = None,
     ):
         self.settings = settings
         self.repository = repository
         self.hyperliquid = hyperliquid
         self.ws_worker = ws_worker
         self.risk_gateway = risk_gateway
+        self.world_model_service = world_model_service
         self.alert_sink: Any | None = None
         self.hip4_client = Hip4InfoClient(settings=settings, hyperliquid=hyperliquid) if hyperliquid is not None else None
         self.capability_probe_service = Hip4CapabilityProbeService(settings=settings, hip4_client=self.hip4_client, repository=repository, ws_worker=ws_worker)
@@ -599,6 +601,7 @@ class Hip4Service:
         return settlement
 
     async def _persist_market_snapshot(self, book: Any) -> None:
+        await self._observe_world_model_book(book)
         if self.repository is None or not getattr(self.repository, "enabled", False):
             return
         record = getattr(self.repository, "record_hip4_market_snapshot", None)
@@ -617,11 +620,37 @@ class Hip4Service:
         return prioritize_hot_coins(allowlisted=allowlisted, active=[], liquid=[], remaining=remaining, budget=self.settings.hip4_ws_max_subscriptions)
 
     async def _persist_candidates(self, candidates: list[Hip4Candidate]) -> None:
+        await self._observe_world_model_candidates(candidates)
         if self.repository is None or not getattr(self.repository, "enabled", False):
             return
         record = getattr(self.repository, "record_hip4_edge_candidates", None)
         if callable(record):
             await record([candidate.model_dump(mode="json") for candidate in candidates])
+
+    async def _observe_world_model_book(self, book: Any) -> None:
+        if self.world_model_service is None:
+            return
+        observe = getattr(self.world_model_service, "observe_hip4_book", None)
+        if not callable(observe):
+            return
+        try:
+            outcome = self.registry.outcomes.get(int(getattr(book, "outcome_id", 0)))
+            question = next((item for item in self.registry.questions.values() if getattr(book, "outcome_id", None) in item.outcome_ids), None)
+            await observe(book, question=question, outcome=outcome)
+        except Exception as exc:  # pragma: no cover - advisory prediction signal should not break HIP-4
+            log.warning("hip4_world_model_book_observe_failed", error=type(exc).__name__)
+
+    async def _observe_world_model_candidates(self, candidates: list[Hip4Candidate]) -> None:
+        if self.world_model_service is None:
+            return
+        observe = getattr(self.world_model_service, "observe_hip4_candidate", None)
+        if not callable(observe):
+            return
+        for candidate in candidates[:20]:
+            try:
+                await observe(candidate)
+            except Exception as exc:  # pragma: no cover
+                log.warning("hip4_world_model_candidate_observe_failed", error=type(exc).__name__)
 
 
 def _empty_learning_state() -> dict[str, Any]:

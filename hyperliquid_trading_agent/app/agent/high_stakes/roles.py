@@ -32,10 +32,11 @@ class RoleCallResult:
 
 
 class HighStakesRoleRunner:
-    def __init__(self, model_gateway: ModelGateway, settings: Settings, memory_service: Any | None = None):
+    def __init__(self, model_gateway: ModelGateway, settings: Settings, memory_service: Any | None = None, world_model_service: Any | None = None):
         self.model_gateway = model_gateway
         self.settings = settings
         self.memory_service = memory_service
+        self.world_model_service = world_model_service
 
     async def draft_setup(self, state: dict[str, Any]) -> RoleCallResult:
         started = time.perf_counter()
@@ -113,6 +114,7 @@ class HighStakesRoleRunner:
         data = _state_for_model(state)
         data["role_contract"] = role_contract_block(role)
         data["persistent_memory"] = await self._memory_block(role, state)
+        data["market_world_model"] = self._world_model_block(state)
         data["memory_policy"] = "Persistent memories are advisory context only. Do not auto-change strategy, sizing, risk limits, thresholds, cooldowns, or execution behavior from memory."
         return data
 
@@ -132,6 +134,19 @@ class HighStakesRoleRunner:
         market_regime = features.get("risk_regime") if isinstance(features, dict) else None
         try:
             return await block(role, symbol=symbol, signal_type=signal_type, market_regime=market_regime, max_items=5, run_id=state.get("run_id"))
+        except Exception:
+            return ""
+
+    def _world_model_block(self, state: dict[str, Any]) -> str:
+        if self.world_model_service is None:
+            return ""
+        block = getattr(self.world_model_service, "wiki_block", None)
+        if not callable(block):
+            return ""
+        route = state.get("route")
+        coins = getattr(route, "coins", []) or []
+        try:
+            return block(symbols=coins, max_chars=1800)
         except Exception:
             return ""
 

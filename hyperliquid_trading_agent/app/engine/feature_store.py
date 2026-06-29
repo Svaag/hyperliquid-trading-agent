@@ -31,6 +31,12 @@ class FeatureStore:
             await self.record(feature)
         return features
 
+    async def features_for_world_model_snapshot(self, *, asset: str, snapshot: Any) -> list[FeatureValue]:
+        features = derive_world_model_features(asset=asset, snapshot=snapshot)
+        for feature in features:
+            await self.record(feature)
+        return features
+
     async def latest(self, *, asset: str, feature_name: str | None = None, limit: int = 100) -> list[FeatureValue]:
         if self.repository is not None and getattr(self.repository, "enabled", False):
             list_values = getattr(self.repository, "list_feature_values", None)
@@ -75,6 +81,44 @@ def derive_features(event: NormalizedEvent) -> list[FeatureValue]:
     return []
 
 
+def derive_world_model_features(*, asset: str, snapshot: Any) -> list[FeatureValue]:
+    data = snapshot.model_dump(mode="json") if callable(getattr(snapshot, "model_dump", None)) else dict(snapshot or {})
+    _assert_world_model_advisory(data)
+    asset = asset.upper()
+    ts = int(data.get("as_of_ms") or now_ms())
+    pseudo_event = NormalizedEvent(
+        event_id=str(data.get("snapshot_id") or f"world_model:{asset}:{ts}"),
+        event_type="world_model_snapshot",
+        asset_class="crypto",
+        symbols=[asset],
+        source="world_model",
+        provider="internal",
+        received_ts_ms=ts,
+        computed_ts_ms=max(ts, now_ms()),
+        payload=data,
+        quality_score=1.0,
+        metadata={"paper_only": True, "execution_authority": "none"},
+    )
+    clusters = [item for item in data.get("narrative_clusters") or [] if asset in [str(symbol).upper() for symbol in item.get("symbols", [])]]
+    predictions = [item for item in data.get("prediction_market_signals") or [] if asset in [str(symbol).upper() for symbol in item.get("symbols", [])]]
+    beliefs = [item for item in data.get("top_beliefs") or [] if asset in [str(symbol).upper() for symbol in item.get("symbols", [])]]
+    out: list[FeatureValue] = []
+    if clusters:
+        strongest = max(clusters, key=lambda item: abs(float(item.get("pressure_score") or 0.0)))
+        out.append(_feature(pseudo_event, asset=asset, group="world_model", name="narrative_pressure", value={"cluster_id": strongest.get("cluster_id"), "pressure": strongest.get("pressure_score")}, scalar=_float(strongest.get("pressure_score"))))
+        out.append(_feature(pseudo_event, asset=asset, group="world_model", name="belief_conflict_score", value={"cluster_id": strongest.get("cluster_id"), "conflict": strongest.get("conflict_score")}, scalar=_float(strongest.get("conflict_score"))))
+        out.append(_feature(pseudo_event, asset=asset, group="world_model", name="source_consensus_score", value={"cluster_id": strongest.get("cluster_id"), "consensus": strongest.get("consensus_score")}, scalar=_float(strongest.get("consensus_score"))))
+    if predictions:
+        top = max(predictions, key=lambda item: (float(item.get("confidence") or 0.0), float(item.get("liquidity_usd") or 0.0)))
+        out.append(_feature(pseudo_event, asset=asset, group="world_model", name="prediction_implied_probability", value={"signal_id": top.get("signal_id"), "question": top.get("question"), "probability": top.get("implied_probability")}, scalar=_float(top.get("implied_probability"))))
+        out.append(_feature(pseudo_event, asset=asset, group="world_model", name="prediction_probability_delta", value={"signal_id": top.get("signal_id"), "delta": top.get("probability_delta")}, scalar=_float(top.get("probability_delta"))))
+        out.append(_feature(pseudo_event, asset=asset, group="world_model", name="prediction_liquidity_usd", value={"signal_id": top.get("signal_id"), "liquidity_usd": top.get("liquidity_usd")}, scalar=_float(top.get("liquidity_usd"))))
+    if beliefs:
+        avg_salience = sum(float(item.get("salience") or 0.0) for item in beliefs) / len(beliefs)
+        out.append(_feature(pseudo_event, asset=asset, group="world_model", name="belief_salience", value={"belief_count": len(beliefs), "avg_salience": avg_salience}, scalar=avg_salience))
+    return out
+
+
 def _feature(event: NormalizedEvent, *, asset: str, group: str, name: str, value: dict[str, Any], scalar: float | None = None, quality: float | None = None) -> FeatureValue:
     computed = now_ms()
     fid = "feat_" + hashlib.sha1(f"{event.event_id}:{asset}:{group}:{name}".encode()).hexdigest()[:24]
@@ -93,7 +137,27 @@ def _feature(event: NormalizedEvent, *, asset: str, group: str, name: str, value
         version=FEATURE_VERSION,
         quality_score=quality if quality is not None else event.quality_score,
         staleness_ms=event.staleness_ms,
+        metadata=dict(event.metadata or {}),
     )
+
+
+def _assert_world_model_advisory(data: dict[str, Any]) -> None:
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    authority = metadata.get("execution_authority")
+    if authority not in {None, "none"}:
+        raise ValueError("world model snapshots must be advisory-only at engine feature boundary")
+    forbidden_keys = {
+        "exchange_actions",
+        "order_intents",
+        "orders",
+        "risk_mutations",
+        "config_changes",
+        "execution_requests",
+    }
+    for container in (data, metadata):
+        for key in forbidden_keys:
+            if container.get(key):
+                raise ValueError(f"world model snapshot cannot carry {key}")
 
 
 def _price_features(event: NormalizedEvent) -> list[FeatureValue]:
