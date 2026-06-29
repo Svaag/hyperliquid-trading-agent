@@ -135,6 +135,24 @@ class Settings(BaseSettings):
     # Hyperliquid account-exact: addresses to watch (csv) + the HLP liquidator vault.
     liquidations_hl_watch_addresses: str = ""
     hl_liquidator_vault_address: str = ""
+    # Public value-add export API (Phase 2): durable history + CSV/NDJSON/JSON export,
+    # open + IP rate-limited. Read-only over the store; 503s when no DB is configured.
+    liquidations_export_enabled: bool = True
+    liquidations_trust_proxy: bool = False  # honor X-Forwarded-For only behind a trusted proxy
+    liquidations_export_rate_per_min: float = 120.0
+    liquidations_export_burst: int = 60
+    liquidations_export_max_rows: int = 100_000  # hard cap per export request
+    liquidations_export_max_range_ms: int = 7 * 24 * 3_600_000  # 7d max time range per query
+    liquidations_stats_max_buckets: int = 5000  # reject stats requests that would exceed this
+    # Derived-vs-confirmed reconciliation harness (Phase 2; off until a confirmed source exists).
+    liquidations_reconcile_enabled: bool = False
+    liquidations_reconcile_window_ms: int = 3_600_000
+    liquidations_reconcile_bucket_ms: int = 1000  # match the HL derived dedupe second-bucket
+    # Hyperliquid confirmed/global via managed gRPC StreamFills provider (Phase 2-live; transport gated).
+    liquidations_hl_grpc_enabled: bool = False
+    hl_grpc_endpoint: str = ""
+    hl_grpc_api_key: str = ""
+    hl_grpc_provider: str = ""  # provider label for the vendor badge, e.g. "thunderhead"
 
     vault_enabled: bool = False
     vault_addr: str = "http://127.0.0.1:8200"

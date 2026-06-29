@@ -258,6 +258,12 @@
       <span class="sub"
         >the shape of crypto liquidations across open perp DEXes — graded by source honesty</span
       >
+      <a
+        class="sub"
+        href="/liquidations/api/meta"
+        style="border: 1px solid var(--line); padding: 3px 10px; border-radius: 999px"
+        >Public&nbsp;API&nbsp;↗</a
+      >
       <span class="live"><span id="livedot" class="dot"></span><span id="livetxt">connecting…</span></span>
     </header>
     <main>
@@ -331,6 +337,17 @@
       Confirmed where the venue exposes confirmed liquidations; <em>derived</em> or <em>snapshot</em> where it does
       not — headline totals count confirmed-kind executions only, inferred pressure is shown dimmed in the tape and
       never inflates the numbers. Counterparties are hashed.
+      <div style="margin-top: 12px">
+        <strong style="color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; font-size: 10px"
+          >Public API</strong
+        >
+        — open &amp; rate-limited ·
+        <a href="/liquidations/api/meta">schema&nbsp;&amp;&nbsp;limits</a> ·
+        <a href="/liquidations/api/history">history&nbsp;(json)</a> ·
+        <a href="/liquidations/api/export?format=csv">export&nbsp;csv</a> ·
+        <a href="/liquidations/api/export?format=ndjson">ndjson</a> ·
+        <a href="/liquidations/api/stats">stats</a>
+      </div>
     </footer>
     <script src="/liquidations/app.js"></script>
   </body>

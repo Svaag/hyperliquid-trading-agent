@@ -12,25 +12,45 @@ Repository) so the subsystem lifts cleanly into a standalone service later.
 
 from __future__ import annotations
 
+import base64
+import binascii
+from collections.abc import AsyncIterator
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, Integer, and_, case, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from hyperliquid_trading_agent.app.db.models import LiquidationAdapterStateRecord, LiquidationEventRecord
 from hyperliquid_trading_agent.app.liquidations import dedupe
-from hyperliquid_trading_agent.app.liquidations.models import LiquidationEvent
+from hyperliquid_trading_agent.app.liquidations.models import EXECUTION_EVENT_TYPES, LiquidationEvent
 from hyperliquid_trading_agent.app.logging import get_logger
 
 log = get_logger(__name__)
 
 _NUMERIC_FIELDS = ("price", "avg_price", "mark_price", "bankruptcy_price", "size_base", "notional_usd", "confidence")
+_TOP_SYMBOLS = 25
+_EXECUTION_EVENT_VALUES = tuple(str(t) for t in EXECUTION_EVENT_TYPES)
 
 
 def _f(value: Decimal | float | None) -> float | None:
     return float(value) if value is not None else None
+
+
+def encode_cursor(timestamp_ms: int, event_id: str) -> str:
+    """Opaque keyset cursor over the ``(timestamp_ms DESC, event_id DESC)`` order."""
+    return base64.urlsafe_b64encode(f"{timestamp_ms}:{event_id}".encode()).decode()
+
+
+def decode_cursor(cursor: str) -> tuple[int, str] | None:
+    """Inverse of :func:`encode_cursor`; ``None`` if the token is malformed."""
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode()).decode()
+        ts_str, event_id = raw.split(":", 1)
+        return int(ts_str), event_id
+    except (ValueError, binascii.Error, UnicodeDecodeError):
+        return None
 
 
 class LiquidationStore:
@@ -126,6 +146,210 @@ class LiquidationStore:
             log.warning("liquidation_get_event_failed", error=type(exc).__name__)
             return None
 
+    async def query(
+        self,
+        *,
+        limit: int = 200,
+        cursor: str | None = None,
+        venue: str | None = None,
+        symbol: str | None = None,
+        source_integrity: str | None = None,
+        event_type: str | None = None,
+        side: str | None = None,
+        min_notional: float | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Durable, keyset-paginated history (public projection).
+
+        Ordered ``timestamp_ms DESC, event_id DESC``; ``next_cursor`` is non-null
+        only when a full page was returned (i.e. more rows may exist).
+        """
+        if self.sessionmaker is None:
+            return {"items": [], "next_cursor": None}
+        limit = max(1, min(limit, 1000))
+        stmt = select(LiquidationEventRecord).where(
+            *_filter_conditions(
+                venue=venue,
+                symbol=symbol,
+                source_integrity=source_integrity,
+                event_type=event_type,
+                side=side,
+                min_notional=min_notional,
+                since_ms=since_ms,
+                until_ms=until_ms,
+            )
+        )
+        if cursor:
+            decoded = decode_cursor(cursor)
+            if decoded is not None:
+                ts, eid = decoded
+                stmt = stmt.where(
+                    or_(
+                        LiquidationEventRecord.timestamp_ms < ts,
+                        and_(LiquidationEventRecord.timestamp_ms == ts, LiquidationEventRecord.event_id < eid),
+                    )
+                )
+        stmt = stmt.order_by(
+            LiquidationEventRecord.timestamp_ms.desc(), LiquidationEventRecord.event_id.desc()
+        ).limit(limit)
+        try:
+            async with self.sessionmaker() as session:
+                rows = list((await session.execute(stmt)).scalars().all())
+        except Exception as exc:  # pragma: no cover - read must not raise to the API
+            log.warning("liquidation_query_failed", error=type(exc).__name__)
+            return {"items": [], "next_cursor": None}
+        next_cursor = encode_cursor(rows[-1].timestamp_ms, rows[-1].event_id) if len(rows) == limit else None
+        return {"items": [_record_to_dict(r, public=True) for r in rows], "next_cursor": next_cursor}
+
+    async def stream_query(
+        self,
+        *,
+        max_rows: int,
+        venue: str | None = None,
+        symbol: str | None = None,
+        source_integrity: str | None = None,
+        event_type: str | None = None,
+        side: str | None = None,
+        min_notional: float | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Server-side cursored stream of the public projection, for bulk export.
+
+        Yields at most ``max_rows`` rows newest-first without buffering the whole
+        result set (backed by ``stream_scalars``). No-op generator when disabled.
+        """
+        if self.sessionmaker is None:
+            return
+        stmt = (
+            select(LiquidationEventRecord)
+            .where(
+                *_filter_conditions(
+                    venue=venue,
+                    symbol=symbol,
+                    source_integrity=source_integrity,
+                    event_type=event_type,
+                    side=side,
+                    min_notional=min_notional,
+                    since_ms=since_ms,
+                    until_ms=until_ms,
+                )
+            )
+            .order_by(LiquidationEventRecord.timestamp_ms.desc(), LiquidationEventRecord.event_id.desc())
+        )
+        async with self.sessionmaker() as session:
+            result = await session.stream_scalars(stmt)
+            emitted = 0
+            async for row in result:
+                yield _record_to_dict(row, public=True)
+                emitted += 1
+                if emitted >= max_rows:
+                    break
+
+    async def stats(
+        self,
+        *,
+        since_ms: int,
+        until_ms: int,
+        bucket_ms: int,
+        venue: str | None = None,
+        symbol: str | None = None,
+        source_integrity: str | None = None,
+        side: str | None = None,
+        min_notional: float | None = None,
+    ) -> dict[str, Any]:
+        """Durable, bucketed aggregates over an arbitrary range — executions only.
+
+        Inferred ``liquidation_pressure`` is always excluded so the historical
+        "how much was liquidated" series can never be inflated by derived flow.
+        """
+        empty: dict[str, Any] = {
+            "since_ms": since_ms,
+            "until_ms": until_ms,
+            "bucket_ms": bucket_ms,
+            "count": 0,
+            "total_notional_usd": 0.0,
+            "series": [],
+            "by_venue": {},
+            "by_symbol": {},
+            "by_integrity": {},
+        }
+        if self.sessionmaker is None:
+            return empty
+        notional = func.coalesce(LiquidationEventRecord.notional_usd, 0.0)
+        side_col = LiquidationEventRecord.liquidated_side
+        conditions = [
+            LiquidationEventRecord.timestamp_ms >= since_ms,
+            LiquidationEventRecord.timestamp_ms < until_ms,
+            LiquidationEventRecord.event_type.in_(_EXECUTION_EVENT_VALUES),
+            *_filter_conditions(
+                venue=venue, symbol=symbol, source_integrity=source_integrity, side=side, min_notional=min_notional
+            ),
+        ]
+        # Integer bucket index from range start; integer/integer division floors on
+        # both Postgres and SQLite, so the same SQL serves prod and tests.
+        bucket = ((LiquidationEventRecord.timestamp_ms - since_ms) / bucket_ms).cast(Integer).label("bucket")
+        series_stmt = (
+            select(
+                bucket,
+                func.count().label("count"),
+                func.coalesce(func.sum(notional), 0.0).label("total"),
+                func.coalesce(func.sum(case((side_col == "long", notional), else_=0.0)), 0.0).label("long"),
+                func.coalesce(func.sum(case((side_col == "short", notional), else_=0.0)), 0.0).label("short"),
+            )
+            .where(*conditions)
+            .group_by(bucket)
+            .order_by(bucket)
+        )
+        venue_stmt = (
+            select(LiquidationEventRecord.venue, func.coalesce(func.sum(notional), 0.0))
+            .where(*conditions)
+            .group_by(LiquidationEventRecord.venue)
+        )
+        symbol_stmt = (
+            select(LiquidationEventRecord.symbol, func.coalesce(func.sum(notional), 0.0).label("n"))
+            .where(*conditions)
+            .group_by(LiquidationEventRecord.symbol)
+            .order_by(func.coalesce(func.sum(notional), 0.0).desc())
+            .limit(_TOP_SYMBOLS)
+        )
+        integrity_stmt = (
+            select(LiquidationEventRecord.source_integrity, func.count())
+            .where(*conditions)
+            .group_by(LiquidationEventRecord.source_integrity)
+        )
+        try:
+            async with self.sessionmaker() as session:
+                series_rows = (await session.execute(series_stmt)).all()
+                venue_rows = (await session.execute(venue_stmt)).all()
+                symbol_rows = (await session.execute(symbol_stmt)).all()
+                integrity_rows = (await session.execute(integrity_stmt)).all()
+        except Exception as exc:  # pragma: no cover - read must not raise to the API
+            log.warning("liquidation_stats_failed", error=type(exc).__name__)
+            return empty
+        series = [
+            {
+                "t": since_ms + int(b) * bucket_ms,
+                "count": int(count),
+                "total": float(total),
+                "long": float(long_usd),
+                "short": float(short_usd),
+            }
+            for (b, count, total, long_usd, short_usd) in series_rows
+        ]
+        return {
+            "since_ms": since_ms,
+            "until_ms": until_ms,
+            "bucket_ms": bucket_ms,
+            "count": sum(row["count"] for row in series),
+            "total_notional_usd": sum(row["total"] for row in series),
+            "series": series,
+            "by_venue": {venue_name: float(total) for venue_name, total in venue_rows},
+            "by_symbol": {sym: float(total) for sym, total in symbol_rows},
+            "by_integrity": {integrity: int(count) for integrity, count in integrity_rows},
+        }
+
     async def upsert_adapter_state(
         self,
         adapter_name: str,
@@ -158,6 +382,38 @@ class LiquidationStore:
                 await session.commit()
         except Exception as exc:  # pragma: no cover
             log.warning("liquidation_adapter_state_failed", adapter=adapter_name, error=type(exc).__name__)
+
+
+def _filter_conditions(
+    *,
+    venue: str | None = None,
+    symbol: str | None = None,
+    source_integrity: str | None = None,
+    event_type: str | None = None,
+    side: str | None = None,
+    min_notional: float | None = None,
+    since_ms: int | None = None,
+    until_ms: int | None = None,
+) -> list[ColumnElement[bool]]:
+    """Shared WHERE-clause set for the history/export/stats reads."""
+    conditions: list[ColumnElement[bool]] = []
+    if venue:
+        conditions.append(LiquidationEventRecord.venue == venue)
+    if symbol:
+        conditions.append(LiquidationEventRecord.symbol == symbol.upper())
+    if source_integrity:
+        conditions.append(LiquidationEventRecord.source_integrity == source_integrity)
+    if event_type:
+        conditions.append(LiquidationEventRecord.event_type == event_type)
+    if side:
+        conditions.append(LiquidationEventRecord.liquidated_side == side)
+    if min_notional is not None:
+        conditions.append(LiquidationEventRecord.notional_usd >= min_notional)
+    if since_ms is not None:
+        conditions.append(LiquidationEventRecord.timestamp_ms >= since_ms)
+    if until_ms is not None:
+        conditions.append(LiquidationEventRecord.timestamp_ms < until_ms)
+    return conditions
 
 
 def _record_to_dict(record: LiquidationEventRecord, *, public: bool) -> dict[str, Any]:

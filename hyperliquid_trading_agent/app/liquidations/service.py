@@ -21,9 +21,17 @@ from hyperliquid_trading_agent.app.liquidations.adapters.replay import Synthetic
 from hyperliquid_trading_agent.app.liquidations.aggregator import WINDOWS_MS, RollingAggregator
 from hyperliquid_trading_agent.app.liquidations.bus import LiquidationBus
 from hyperliquid_trading_agent.app.liquidations.models import LiquidationEvent
+from hyperliquid_trading_agent.app.liquidations.reconcile import reconcile
 from hyperliquid_trading_agent.app.liquidations.store import LiquidationStore
 from hyperliquid_trading_agent.app.logging import get_logger
-from hyperliquid_trading_agent.app.metrics import LIQUIDATION_DEDUPED, LIQUIDATION_EVENTS, LIQUIDATION_NOTIONAL
+from hyperliquid_trading_agent.app.metrics import (
+    LIQUIDATION_DEDUPED,
+    LIQUIDATION_EVENTS,
+    LIQUIDATION_NOTIONAL,
+    LIQUIDATION_RECONCILE_CONFIRMED_COVERAGE,
+    LIQUIDATION_RECONCILE_MATCH_RATE,
+    LIQUIDATION_RECONCILE_NOTIONAL_DELTA,
+)
 
 log = get_logger(__name__)
 
@@ -183,6 +191,38 @@ class LiquidationService:
             if event.event_id == event_id:
                 return event.model_dump(mode="json")
         return None
+
+    def reconcile_report(self, now_ms: int) -> dict[str, Any]:
+        """Derived-vs-confirmed reconciliation over the live HL tape + gauge sync.
+
+        Pull-based: gauges refresh when the report is computed. Honest by default —
+        with no confirmed source the report shows ``confirmed_coverage: 0.0`` and
+        ``confirmed_source: "not_configured"``.
+        """
+        report = reconcile(
+            list(self._recent),
+            bucket_ms=self.settings.liquidations_reconcile_bucket_ms,
+            window_ms=self.settings.liquidations_reconcile_window_ms,
+            now_ms=now_ms,
+            confirmed_source=self._confirmed_source_label(),
+        )
+        LIQUIDATION_RECONCILE_CONFIRMED_COVERAGE.set(report["confirmed_coverage"])
+        for symbol, stats in report["by_symbol"].items():
+            derived = stats["derived_buckets"]
+            match_rate = stats["matched_buckets"] / derived if derived else 0.0
+            LIQUIDATION_RECONCILE_MATCH_RATE.labels(symbol=symbol).set(match_rate)
+            LIQUIDATION_RECONCILE_NOTIONAL_DELTA.labels(symbol=symbol).set(
+                stats["confirmed_notional_usd"] - stats["derived_notional_usd"]
+            )
+        return report
+
+    def _confirmed_source_label(self) -> str:
+        settings = self.settings
+        if settings.liquidations_hl_grpc_enabled and settings.hl_grpc_endpoint:
+            return settings.hl_grpc_provider or "grpc"
+        if settings.liquidations_hl_user_enabled and settings.hl_watch_address_list:
+            return "account_private"
+        return "not_configured"
 
     def subscribe(self) -> Any:
         return self.bus.subscribe()
