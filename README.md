@@ -66,6 +66,14 @@ curl http://127.0.0.1:8080/health
 `docker compose config` works without `.env`; the env file is optional for static
 validation and expected for real deployments.
 
+Optional local Vault:
+
+```bash
+docker compose --profile vault up -d vault
+```
+
+The Vault service is a persistent local secret store for Discord, model-provider, newswire, exchange, and operator credentials. It is opt-in and does not change the trading guardrails: live exchange flags are still rejected by config validation. See [docs/vault.md](docs/vault.md) for init/unseal, KV paths, read-only app tokens, and the recommended credential inventory.
+
 ## Configuration
 
 Required for Discord runtime:

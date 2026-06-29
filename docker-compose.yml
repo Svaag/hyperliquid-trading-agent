@@ -14,6 +14,27 @@ services:
       timeout: 3s
       retries: 10
 
+  vault:
+    profiles: ["vault"]
+    image: hashicorp/vault:${VAULT_IMAGE_TAG:-2.0.3}
+    restart: unless-stopped
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_ADDR: http://127.0.0.1:8200
+      VAULT_API_ADDR: http://127.0.0.1:8200
+    command: server -config=/vault/config/config.hcl
+    ports:
+      - "${VAULT_HOST_PORT:-8200}:8200"
+    volumes:
+      - vault_data:/vault/file
+      - ./infra/vault/config.hcl:/vault/config/config.hcl:ro
+    healthcheck:
+      test: ["CMD-SHELL", "vault status -address=http://127.0.0.1:8200 >/dev/null 2>&1; code=$$?; [ $$code -eq 0 ] || [ $$code -eq 2 ]"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
   bot:
     build: .
     restart: unless-stopped
@@ -111,3 +132,4 @@ services:
 
 volumes:
   postgres_data:
+  vault_data:

@@ -108,6 +108,7 @@ def test_engine_validation_monitor_detects_bad_shadow_conditions_and_posts_diges
         engine_shadow_enabled=True,
         engine_execution_modes="shadow",
         autonomy_core_universe="BTC,ETH",
+        autonomy_alert_channel_id="alerts",
         engine_validation_risk_reject_spike_count=5,
         engine_validation_missing_data_seconds=300,
     )

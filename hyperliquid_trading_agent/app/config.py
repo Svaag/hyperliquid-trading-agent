@@ -7,6 +7,8 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from hyperliquid_trading_agent.app.vault import load_vault_environment
+
 # Paid OpenRouter model pool (June 2026). Free-tier latency was unfixable, so the debate
 # runs on paid models sized to each role: frontier reasoners on the decision spine,
 # cheap-but-strong reasoners on the parallel reviewers.
@@ -111,6 +113,16 @@ class Settings(BaseSettings):
     runtime_profile: Literal["full", "dashboard_only", "world_model_live"] = "full"
 
     database_url: str = "postgresql+asyncpg://hlagent:hlagent@postgres:5432/hlagent"
+
+    vault_enabled: bool = False
+    vault_addr: str = "http://127.0.0.1:8200"
+    vault_namespace: str = ""
+    vault_kv_mount: str = "kv"
+    vault_kv_version: Literal["1", "2"] = "2"
+    vault_secret_path: str = "hyperliquid-trading-agent/prod"
+    vault_token_file: str = ""
+    vault_env_override: bool = False
+    vault_timeout_seconds: float = 3.0
 
     discord_bot_token: str = Field(default="", validation_alias="DISCORD_BOT_TOKEN")
     discord_allowed_guild_ids: str = ""
@@ -882,4 +894,5 @@ def _alias_map(value: str) -> dict[str, list[str]]:
 
 @lru_cache(maxsize=1)
 def load_settings() -> Settings:
+    load_vault_environment()
     return Settings()
