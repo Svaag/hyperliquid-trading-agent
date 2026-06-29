@@ -80,6 +80,10 @@ class LiquidationService:
             )
 
             adapters.append(HyperliquidUserEventsAdapter(settings))
+        if settings.liquidations_hl_grpc_enabled:
+            from hyperliquid_trading_agent.app.liquidations.adapters.hyperliquid_grpc import HyperliquidGrpcAdapter
+
+            adapters.append(HyperliquidGrpcAdapter(settings))
         if settings.liquidations_demo_enabled:
             adapters.append(SyntheticDemoAdapter())
         return adapters

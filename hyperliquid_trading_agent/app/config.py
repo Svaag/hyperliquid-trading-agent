@@ -150,9 +150,12 @@ class Settings(BaseSettings):
     liquidations_reconcile_bucket_ms: int = 1000  # match the HL derived dedupe second-bucket
     # Hyperliquid confirmed/global via managed gRPC StreamFills provider (Phase 2-live; transport gated).
     liquidations_hl_grpc_enabled: bool = False
-    hl_grpc_endpoint: str = ""
+    hl_grpc_endpoint: str = ""  # host:port of the managed StreamFills provider (no scheme)
     hl_grpc_api_key: str = ""
     hl_grpc_provider: str = ""  # provider label for the vendor badge, e.g. "thunderhead"
+    hl_grpc_auth_header: str = "x-api-key"  # metadata header carrying hl_grpc_api_key
+    hl_grpc_use_tls: bool = True  # managed providers require TLS; off only for local plaintext
+    hl_grpc_resume_lookback_ms: int = 5000  # cold-start: stream from now-this; then resume at last fill
 
     vault_enabled: bool = False
     vault_addr: str = "http://127.0.0.1:8200"

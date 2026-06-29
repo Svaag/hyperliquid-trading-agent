@@ -69,3 +69,5 @@ LIQUIDATION_RATE_LIMITED = Counter("hyperliquid_trading_agent_liquidation_rate_l
 LIQUIDATION_RECONCILE_MATCH_RATE = Gauge("hyperliquid_trading_agent_liquidation_reconcile_match_rate", "Fraction of derived HL pressure buckets matched by a confirmed fill", ["symbol"])
 LIQUIDATION_RECONCILE_NOTIONAL_DELTA = Gauge("hyperliquid_trading_agent_liquidation_reconcile_notional_delta_usd", "Confirmed minus derived notional over the reconcile window", ["symbol"])
 LIQUIDATION_RECONCILE_CONFIRMED_COVERAGE = Gauge("hyperliquid_trading_agent_liquidation_reconcile_confirmed_coverage", "Fraction of HL liquidation notional from a confirmed/vendor source")
+LIQUIDATION_GRPC_FILLS_TOTAL = Counter("hyperliquid_trading_agent_liquidation_grpc_fills_total", "All fills observed on the HL gRPC StreamFills stream")
+LIQUIDATION_GRPC_LIQUIDATIONS_TOTAL = Counter("hyperliquid_trading_agent_liquidation_grpc_liquidations_total", "Liquidation fills kept from the HL gRPC StreamFills stream")

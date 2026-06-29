@@ -37,6 +37,14 @@ dev = [
     "aiosqlite>=0.20",
     "ruff>=0.8",
     "mypy>=1.13",
+    "grpcio-tools>=1.66",  # regenerate the vendored liquidations gRPC stubs (codegen only)
+]
+# Optional: live Hyperliquid confirmed/global liquidations via a managed gRPC
+# StreamFills provider. Not pulled by default; the adapter stays NotConfigured
+# without it. Pinned to match the committed generated stubs (protobuf 6.x gencode).
+grpc = [
+    "grpcio>=1.81",
+    "protobuf>=6.33,<7",
 ]
 
 [project.scripts]
@@ -52,6 +60,7 @@ packages = ["hyperliquid_trading_agent"]
 [tool.ruff]
 line-length = 120
 target-version = "py312"
+extend-exclude = ["hyperliquid_trading_agent/app/liquidations/adapters/proto"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "RUF"]
@@ -61,6 +70,13 @@ ignore = ["E501"]
 python_version = "3.12"
 ignore_missing_imports = true
 warn_unused_ignores = true
+exclude = ['hyperliquid_trading_agent/app/liquidations/adapters/proto/']
+
+[[tool.mypy.overrides]]
+module = "hyperliquid_trading_agent.app.liquidations.adapters.proto.*"
+ignore_errors = true
+ignore_missing_imports = true
+follow_imports = "skip"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

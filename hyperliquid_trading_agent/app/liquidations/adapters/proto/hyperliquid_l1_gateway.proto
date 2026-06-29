@@ -1,0 +1,52 @@
+// Hyperliquid node L1 gateway streaming gRPC (provider-neutral).
+//
+// This mirrors the Hyperliquid node's own gRPC gateway that managed providers
+// (Dwellir, Quicknode, ...) re-expose, so the client stays provider-agnostic.
+// We depend only on StreamFills/GetFills and treat the BlockFills body as an
+// opaque JSON `data` field that `decode_block_fills()` json-decodes at runtime
+// — so this surface is tiny and robust to schema drift. The decoder needs only
+// the JSON shape `{ block_number, events: [[address, fill], ...] }`, where each
+// `fill` is a node `node_fills` object (a `liquidation` sub-object marks liqs).
+//
+// If your provider publishes a richer/different `.proto` (e.g. structured
+// BlockFills fields instead of a single JSON `data` field), vendor theirs here
+// and regenerate; only `_open_stream` needs to adapt to hand `decode_block_fills`
+// the same JSON envelope.
+syntax = "proto3";
+
+package hyperliquid_l1_gateway.v2;
+
+// Inclusive start position for a stream/query; exactly one of the two.
+message Position {
+  oneof position {
+    int64 timestamp_ms = 1;  // ms since Unix epoch, inclusive
+    int64 block_height = 2;  // block height, inclusive
+  }
+}
+
+message Timestamp {
+  int64 timestamp_ms = 1;
+}
+
+// JSON-bearing envelopes. `data` is a UTF-8 JSON document; for BlockFills it is
+// `{ local_time, block_time, block_number, events: [[address, fill], ...] }`.
+message BlockFills {
+  bytes data = 1;
+}
+
+message Block {
+  bytes data = 1;
+}
+
+message OrderBookSnapshot {
+  bytes data = 1;
+}
+
+service HyperliquidL1Gateway {
+  rpc StreamBlocks(Position) returns (stream Block);
+  rpc StreamFills(Position) returns (stream BlockFills);
+  rpc StreamOrderbookSnapshots(Position) returns (stream OrderBookSnapshot);
+  rpc GetBlock(Position) returns (Block);
+  rpc GetFills(Position) returns (BlockFills);
+  rpc GetOrderBookSnapshot(Timestamp) returns (OrderBookSnapshot);
+}
