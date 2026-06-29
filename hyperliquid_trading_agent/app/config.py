@@ -114,6 +114,28 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://hlagent:hlagent@postgres:5432/hlagent"
 
+    # Liquidation flow monitor (source-graded multi-venue liquidation feed).
+    # Disabled by default so the subsystem never starts adapters in tests/CI.
+    liquidations_enabled: bool = False
+    liquidations_demo_enabled: bool = False  # local-only synthetic feed; never on a public deploy
+    liquidations_recent_buffer: int = 5000  # in-memory tape size for /api/recent
+    # Per-venue adapters (each gated independently; also require liquidations_enabled).
+    liquidations_aster_enabled: bool = False
+    liquidations_lighter_enabled: bool = False
+    liquidations_hl_public_enabled: bool = False
+    liquidations_hl_user_enabled: bool = False
+    # Endpoints (overridable for testnet / self-host).
+    aster_ws_url: str = "wss://fstream.asterdex.com"
+    lighter_ws_url: str = "wss://mainnet.zklighter.elliot.ai/stream"
+    lighter_markets_url: str = "https://mainnet.zklighter.elliot.ai/api/v1/orderBooks"
+    lighter_max_markets: int = 120  # fallback subscribe range if the market list can't be fetched
+    # Hyperliquid public-derived: emit liquidation_pressure only for sweeps >= this notional.
+    hl_pressure_min_notional_usd: float = 50000.0
+    hl_public_coins: str = "BTC,ETH,SOL,HYPE"  # csv of coins to watch on the public trades feed
+    # Hyperliquid account-exact: addresses to watch (csv) + the HLP liquidator vault.
+    liquidations_hl_watch_addresses: str = ""
+    hl_liquidator_vault_address: str = ""
+
     vault_enabled: bool = False
     vault_addr: str = "http://127.0.0.1:8200"
     vault_namespace: str = ""
@@ -527,6 +549,18 @@ class Settings(BaseSettings):
     @property
     def smart_money_addresses(self) -> list[str]:
         return [address.lower() for address in _csv(self.high_stakes_smart_money_addresses)]
+
+    @property
+    def hl_public_coin_list(self) -> list[str]:
+        return [coin.upper() for coin in _csv(self.hl_public_coins)]
+
+    @property
+    def hl_watch_address_list(self) -> list[str]:
+        addresses = set(_csv(self.liquidations_hl_watch_addresses))
+        if self.hl_liquidator_vault_address:
+            addresses.add(self.hl_liquidator_vault_address)
+        addresses.update(self.smart_money_addresses)
+        return sorted(address.lower() for address in addresses if address)
 
     @property
     def autonomy_core_symbols(self) -> list[str]:
