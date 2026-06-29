@@ -108,7 +108,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8080
     public_hostname: str = ""
-    runtime_profile: Literal["full", "dashboard_only"] = "full"
+    runtime_profile: Literal["full", "dashboard_only", "world_model_live"] = "full"
 
     database_url: str = "postgresql+asyncpg://hlagent:hlagent@postgres:5432/hlagent"
 
@@ -363,8 +363,14 @@ class Settings(BaseSettings):
     world_model_adapter_poll_interval_seconds: float = 60.0
     world_model_adapter_dedupe_ttl_seconds: float = 3600.0
     world_model_dev_seed_enabled: bool = False
+    world_model_streams_enabled: bool = False
+    world_model_stream_stale_after_seconds: int = 120
+    world_model_stream_reconnect_max_seconds: int = 60
     world_model_polymarket_enabled: bool = False
     world_model_polymarket_base_url: str = "https://gamma-api.polymarket.com"
+    world_model_polymarket_ws_enabled: bool = False
+    world_model_polymarket_ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    world_model_polymarket_ws_ping_seconds: int = 10
     world_model_kalshi_enabled: bool = False
     world_model_kalshi_base_url: str = "https://api.elections.kalshi.com/trade-api/v2"
     world_model_x_enabled: bool = False

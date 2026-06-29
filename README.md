@@ -102,6 +102,14 @@ curl 'http://127.0.0.1:8090/world-model/snapshots?symbol=BTC'
 
 Live adapters are disabled by default. Enable them explicitly with `WORLD_MODEL_ADAPTERS_ENABLED=true` plus the venue flag, for example `WORLD_MODEL_POLYMARKET_ENABLED=true`; use `POST /world-model/adapters/poll?force=true` for manual dashboard polling.
 
+Stream-first World Model runtime:
+
+```bash
+docker compose --profile world-model-live up world-model-live
+```
+
+This runs the dashboard plus live World Model ingestion with `RUNTIME_PROFILE=world_model_live`. It starts Newswire and World Model streams, keeps trading/engine/autonomy/Discord/HIP-4 execution disabled, and exposes the dashboard at `http://127.0.0.1:${WORLD_MODEL_LIVE_HOST_PORT:-8091}/world-model/dashboard`. Polymarket WebSocket streaming is enabled in the profile; Alpaca News and Trading Economics streams become active when their API keys/settings are present. REST adapters remain available for discovery, manual repair, and backfill.
+
 Model chain:
 
 ```env

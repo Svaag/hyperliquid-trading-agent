@@ -66,6 +66,7 @@ from hyperliquid_trading_agent.app.tradfi.paper.simulator import EquityPaperSimu
 from hyperliquid_trading_agent.app.world_model.adapters import WorldModelAdapterService
 from hyperliquid_trading_agent.app.world_model.routes import register_world_model_routes
 from hyperliquid_trading_agent.app.world_model.service import WorldModelService
+from hyperliquid_trading_agent.app.world_model.streams import WorldModelStreamService
 
 log = get_logger(__name__)
 
@@ -110,6 +111,8 @@ class CandidatePromotionRequest(BaseModel):
 async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
     dashboard_only = settings.runtime_profile == "dashboard_only"
+    world_model_live = settings.runtime_profile == "world_model_live"
+    restricted_runtime = dashboard_only or world_model_live
     UP.set(1)
     SERVICE_INFO.info({"version": __version__, "environment": settings.environment})
 
@@ -119,7 +122,7 @@ async def lifespan(app: FastAPI):
     decision_context_recorder = DecisionContextRecorder(settings=settings, repository=repository, code_version=__version__)
     await decision_context_recorder.snapshot_startup()
     hyperliquid = HyperliquidClient(settings=settings)
-    sdk_info = None if dashboard_only or settings.high_stakes_info_provider == "rest_only" else SDKInfoClient(settings=settings)
+    sdk_info = None if restricted_runtime or settings.high_stakes_info_provider == "rest_only" else SDKInfoClient(settings=settings)
     news = NewsService(settings=settings, repository=repository)
     model_gateway = ModelGateway(settings=settings)
     shadow_service = ShadowComparisonService(repository=repository)
@@ -131,7 +134,7 @@ async def lifespan(app: FastAPI):
     flow_enricher: FlowEnricher | None = None
     equity_paper: EquityPaperSimulator | None = None
     equity_signal_generator: EquitySignalGenerator | None = None
-    if settings.tradfi_enabled and not dashboard_only:
+    if settings.tradfi_enabled and not restricted_runtime:
         if settings.alpaca_api_key and settings.alpaca_api_secret:
             try:
                 provider = AlpacaTradFiProvider(
@@ -258,8 +261,16 @@ async def lifespan(app: FastAPI):
     newswire_service = NewswireService(settings=settings, repository=repository)
     newswire_enricher = Enricher(settings=settings, model_gateway=model_gateway)
     newswire_discord = DiscordNewsPublisher(settings=settings, bus=newswire_service.bus, alert_sink=autonomy_alert_sink, enricher=newswire_enricher)
-    newswire_agent_consumer = AgentNewsConsumer(settings=settings, bus=newswire_service.bus, autonomy_service=autonomy_service, repository=repository, event_evaluation_service=event_evaluation_service, world_model_service=world_model_service)
+    newswire_agent_consumer = AgentNewsConsumer(
+        settings=settings,
+        bus=newswire_service.bus,
+        autonomy_service=None if world_model_live else autonomy_service,
+        repository=repository,
+        event_evaluation_service=None if world_model_live else event_evaluation_service,
+        world_model_service=world_model_service,
+    )
     world_model_adapter_service = WorldModelAdapterService(settings=settings, world_model_service=world_model_service)
+    world_model_stream_service = WorldModelStreamService(settings=settings, world_model_service=world_model_service)
 
     app.state.engine = engine
     app.state.repository = repository
@@ -286,6 +297,7 @@ async def lifespan(app: FastAPI):
     app.state.review_service = review_service
     app.state.world_model_service = world_model_service
     app.state.world_model_adapter_service = world_model_adapter_service
+    app.state.world_model_stream_service = world_model_stream_service
     app.state.newswire_service = newswire_service
     app.state.tradfi_client = tradfi_client
     app.state.options_flow_detector = options_flow_detector
@@ -297,43 +309,49 @@ async def lifespan(app: FastAPI):
     ws_task: asyncio.Task | None = None
     tracking_task: asyncio.Task | None = None
     autonomy_task: asyncio.Task | None = None
-    if not dashboard_only and (settings.hyperliquid_ws_enabled or settings.position_tracking_enabled or settings.autonomy_enabled or (settings.hip4_enabled and settings.hip4_ws_enabled)):
+    if not restricted_runtime and (settings.hyperliquid_ws_enabled or settings.position_tracking_enabled or settings.autonomy_enabled or (settings.hip4_enabled and settings.hip4_ws_enabled)):
         ws_task = asyncio.create_task(ws_worker.start(), name="hyperliquid-ws")
         log.info("hyperliquid_ws_task_started")
-    if settings.position_tracking_enabled and not dashboard_only:
+    if settings.position_tracking_enabled and not restricted_runtime:
         tracking_task = asyncio.create_task(tracking_service.start(), name="position-tracking")
         log.info("position_tracking_task_started")
-    if settings.autonomy_enabled and not dashboard_only:
+    if settings.autonomy_enabled and not restricted_runtime:
         autonomy_task = asyncio.create_task(autonomy_service.start(), name="autonomy-service")
         log.info("autonomy_service_task_started")
-    if not dashboard_only:
+    if not restricted_runtime:
         await hip4_service.start()
-    if settings.discord_bot_token and settings.environment.lower() != "test" and not dashboard_only:
+    if settings.discord_bot_token and settings.environment.lower() != "test" and not restricted_runtime:
         bot_task = asyncio.create_task(bot.start(), name="discord-bot")
         log.info("discord_bot_task_started")
     else:
         reason = "test-environment" if settings.environment.lower() == "test" else "DISCORD_BOT_TOKEN-not-set"
         log.info("discord_bot_disabled", reason=reason)
-    if not dashboard_only:
+    if not restricted_runtime:
         await engine_validation_monitor.start()
         await engine_pnl_attribution.start()
     if settings.newswire_enabled and not dashboard_only:
         # Subscribe consumers before adapters start so no early events are missed.
-        await newswire_discord.start()
+        if not world_model_live:
+            await newswire_discord.start()
         await newswire_agent_consumer.start()
         await newswire_service.start()
         log.info("newswire_started")
+    if settings.world_model_streams_enabled and not dashboard_only:
+        await world_model_stream_service.start()
     try:
         yield
     finally:
         UP.set(0)
-        if not dashboard_only:
+        if not restricted_runtime:
             await bot.stop()
+        if settings.world_model_streams_enabled and not dashboard_only:
+            await world_model_stream_service.stop()
         if settings.newswire_enabled and not dashboard_only:
             await newswire_service.stop()
-            await newswire_discord.stop()
+            if not world_model_live:
+                await newswire_discord.stop()
             await newswire_agent_consumer.stop()
-        if not dashboard_only:
+        if not restricted_runtime:
             await engine_pnl_attribution.stop()
             await engine_validation_monitor.stop()
             await hip4_service.stop()
@@ -372,10 +390,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/ready")
     async def ready() -> dict[str, Any]:
         dashboard_only = settings.runtime_profile == "dashboard_only"
-        ready_checks: dict[str, Any] = {"discord_enabled": bool(settings.discord_bot_token) and not dashboard_only, "runtime_profile": settings.runtime_profile}
-        if dashboard_only:
+        world_model_live = settings.runtime_profile == "world_model_live"
+        restricted_runtime = dashboard_only or world_model_live
+        ready_checks: dict[str, Any] = {"discord_enabled": bool(settings.discord_bot_token) and not restricted_runtime, "runtime_profile": settings.runtime_profile}
+        if restricted_runtime:
             health = await app.state.world_model_service.repository_health()
             ready_checks["world_model_repository"] = "ok" if health.get("ping", {}).get("ok") else f"degraded:{health.get('ping', {}).get('error')}"
+            if world_model_live:
+                newswire_status = app.state.newswire_service.status()
+                stream_status = app.state.world_model_stream_service.status()
+                ready_checks["newswire"] = "ok" if newswire_status.get("running") else "disabled" if not settings.newswire_enabled else "degraded:not_running"
+                stream_items = stream_status.get("streams") or []
+                enabled_streams = [item for item in stream_items if item.get("enabled")]
+                connected = [item for item in enabled_streams if item.get("connected") and not item.get("stale")]
+                ready_checks["world_model_streams"] = "ok" if connected else "disabled" if not settings.world_model_streams_enabled or not enabled_streams else "degraded:no_connected_streams"
             return {"status": "ready", "checks": ready_checks}
         else:
             try:
@@ -445,6 +473,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "min_risk_adjusted_utility": settings.engine_min_risk_adjusted_utility,
             },
             "world_model": app.state.world_model_service.status() if getattr(app.state, "world_model_service", None) is not None else {},
+            "world_model_streams": app.state.world_model_stream_service.status() if getattr(app.state, "world_model_stream_service", None) is not None else {},
             "high_stakes": {
                 "enabled": settings.high_stakes_debate_enabled,
                 "activation_policy": settings.high_stakes_activation_policy,

@@ -11,11 +11,19 @@ from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.engine.feature_store import FeatureStore, derive_world_model_features
 from hyperliquid_trading_agent.app.hip4.schemas import NormalizedOutcomeBook, PriceLevel
 from hyperliquid_trading_agent.app.main import create_app
+from hyperliquid_trading_agent.app.newswire.bus import InProcessNewswireBus
+from hyperliquid_trading_agent.app.newswire.consumers.agent_feed import AgentNewsConsumer
 from hyperliquid_trading_agent.app.newswire.normalize import normalize
 from hyperliquid_trading_agent.app.newswire.schemas import RawNewsItem
 from hyperliquid_trading_agent.app.world_model.adapters import PolymarketAdapter, _kalshi_signal, _polymarket_signals
 from hyperliquid_trading_agent.app.world_model.routes import register_world_model_routes
 from hyperliquid_trading_agent.app.world_model.service import WorldModelService, prediction_signal_from_hip4_book
+from hyperliquid_trading_agent.app.world_model.streams import (
+    WorldModelStreamAdapter,
+    WorldModelStreamService,
+    _polymarket_subscriptions,
+    _polymarket_ws_signals,
+)
 
 
 def _raw_news(**kwargs) -> RawNewsItem:
@@ -90,6 +98,28 @@ def test_world_model_snapshot_derives_engine_features():
     assert features["narrative_pressure"].scalar_value is not None
     assert features["narrative_pressure"].scalar_value > 0
     assert features["narrative_pressure"].metadata["execution_authority"] == "none"
+
+
+def test_newswire_consumer_feeds_world_model_without_autonomy():
+    async def run():
+        settings = Settings(environment="test", newswire_enabled=True, newswire_agent_min_importance=0)
+        bus = InProcessNewswireBus()
+        service = WorldModelService(settings=settings)
+        consumer = AgentNewsConsumer(settings=settings, bus=bus, autonomy_service=None, world_model_service=service)
+        await consumer.start()
+        event = normalize(_raw_news(external_id="wm-only", headline="BTC ETF inflow surge", symbols=["BTC"]), symbols_universe=["BTC"], received_at_ms=1_000)
+        assert event is not None
+        event.sentiment = "bullish"
+        event.importance_score = 85
+        event.confidence = 0.8
+        await bus.publish(event)
+        await consumer.stop()
+        return service.snapshot(symbols=["BTC"])
+
+    snapshot = anyio.run(run)
+
+    assert snapshot.top_beliefs
+    assert snapshot.top_beliefs[0].symbols == ["BTC"]
 
 
 def test_world_model_feature_boundary_forbids_execution_authority():
@@ -341,6 +371,83 @@ def test_world_model_adapter_cadence_and_probability_delta():
     assert signal.metadata["execution_authority"] == "none"
 
 
+def test_polymarket_ws_message_normalizes_advisory_signal():
+    settings = Settings(environment="test", autonomy_core_universe="BTC,ETH,HYPE")
+    subscriptions = _polymarket_subscriptions(
+        {
+            "id": "m1",
+            "question": "Will Bitcoin close above 100k?",
+            "outcomes": '["Yes","No"]',
+            "clobTokenIds": '["asset_yes","asset_no"]',
+            "liquidity": "10000",
+            "volume": "50000",
+        },
+        settings,
+    )
+    by_asset = {item.asset_id: item for item in subscriptions}
+
+    signals = _polymarket_ws_signals(
+        {
+            "event_type": "price_change",
+            "changes": [{"asset_id": "asset_yes", "price": "0.66", "best_bid": "0.65", "best_ask": "0.67"}],
+        },
+        by_asset=by_asset,
+        now=2_000,
+    )
+
+    assert len(signals) == 1
+    assert signals[0].venue == "polymarket"
+    assert signals[0].signal_id == _polymarket_signals(
+        {
+            "id": "m1",
+            "question": "Will Bitcoin close above 100k?",
+            "outcomes": '["Yes","No"]',
+            "outcomePrices": '["0.66","0.34"]',
+        },
+        settings,
+    )[0].signal_id
+    assert signals[0].implied_probability == 0.66
+    assert signals[0].best_bid == 0.65
+    assert signals[0].best_ask == 0.67
+    assert signals[0].metadata["execution_authority"] == "none"
+    assert signals[0].metadata["adapter"] == "polymarket_ws"
+
+
+def test_world_model_stream_service_status_tracks_fake_adapter():
+    class FakeStreamAdapter(WorldModelStreamAdapter):
+        name = "fake"
+
+        @property
+        def enabled(self) -> bool:
+            return True
+
+        async def run(self, service: WorldModelService) -> None:
+            self.status.connected = True
+            self.status.last_message_at_ms = 2_000
+            self.status.subscribed_markets = 1
+            self.status.subscriptions = ["asset_yes"]
+            self.status.last_event = {"signal_id": "pm_fake"}
+            while not self._stop.is_set():
+                await anyio.sleep(0.01)
+
+    async def run():
+        settings = Settings(environment="test", world_model_streams_enabled=True)
+        service = WorldModelService(settings=settings)
+        streams = WorldModelStreamService(settings=settings, world_model_service=service, adapters=[FakeStreamAdapter(settings)])
+        await streams.start()
+        await anyio.sleep(0.02)
+        status = streams.status()
+        await streams.stop()
+        return status
+
+    status = anyio.run(run)
+
+    assert status["running"] is True
+    assert status["streams"][0]["connected"] is True
+    assert status["streams"][0]["subscribed_markets"] == 1
+    assert status["streams"][0]["execution_authority"] == "none"
+
+
 def test_dashboard_only_readiness_ignores_full_runtime_flags():
     app = create_app(
         Settings(
@@ -359,4 +466,34 @@ def test_dashboard_only_readiness_ignores_full_runtime_flags():
     assert body["checks"]["runtime_profile"] == "dashboard_only"
     assert "world_model_repository" in body["checks"]
     assert "position_tracking" not in body["checks"]
+    assert "tradfi" not in body["checks"]
+
+
+def test_world_model_live_readiness_ignores_trading_runtime_flags():
+    app = create_app(
+        Settings(
+            environment="test",
+            runtime_profile="world_model_live",
+            newswire_enabled=False,
+            world_model_streams_enabled=False,
+            position_tracking_enabled=True,
+            autonomy_enabled=True,
+            tradfi_enabled=True,
+            engine_enabled=True,
+            hip4_enabled=True,
+            hip4_scan_enabled=True,
+            discord_bot_token="not-used",
+        )
+    )
+
+    with TestClient(app) as client:
+        body = client.get("/ready").json()
+
+    assert body["checks"]["runtime_profile"] == "world_model_live"
+    assert body["checks"]["discord_enabled"] is False
+    assert body["checks"]["newswire"] == "disabled"
+    assert body["checks"]["world_model_streams"] == "disabled"
+    assert "world_model_repository" in body["checks"]
+    assert "position_tracking" not in body["checks"]
+    assert "autonomy" not in body["checks"]
     assert "tradfi" not in body["checks"]

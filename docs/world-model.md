@@ -45,6 +45,7 @@ GET /world-model/replay
 POST /world-model/annotations
 POST /world-model/outcomes
 GET /world-model/prediction-calibration
+GET /world-model/streams/status
 ```
 
 These endpoints are protected by the existing agent API token outside dev/test/local.
@@ -61,6 +62,16 @@ The profile applies migrations, connects to Compose Postgres, and starts only th
 
 For a blank local instance, the dashboard can seed advisory-only demo data through `POST /world-model/dev/seed`. The endpoint is disabled unless `WORLD_MODEL_DEV_SEED_ENABLED=true` and the process is running in local/test/dev or `dashboard_only` mode.
 
+## Stream-First Runtime
+
+Use the live World Model profile when the dashboard should ingest real-time world state:
+
+```bash
+docker compose --profile world-model-live up world-model-live
+```
+
+This starts Newswire, World Model streams, FastAPI, and Postgres only. It keeps Discord, autonomy, engine loops, HIP-4 execution, position tracking, and trading disabled. The dashboard stream panel shows connection state, last message time, reconnects, subscription count, gap repairs, and the latest normalized signal/event.
+
 ## Supervision
 
 - Operator annotations are append-only audit marks: `confirmed`, `disputed`, `needs_review`, or `pinned`.
@@ -70,14 +81,16 @@ For a blank local instance, the dashboard can seed advisory-only demo data throu
 
 ## Source Adapters
 
-Live source adapters are explicit pollers and are off by default:
+The live architecture is stream-first, with REST retained for discovery, manual repair, and backfill:
 
-- `polymarket`: normalizes active markets into stable market/outcome signal IDs.
-- `kalshi`: normalizes open markets into stable YES probability signals.
+- `newswire`: streams Alpaca News and Trading Economics WebSocket events into the World Model through the existing bus.
+- `polymarket_ws`: subscribes to the public Polymarket market WebSocket and normalizes market updates into stable prediction signals.
+- `polymarket`: REST discovery/backfill for active markets.
+- `kalshi`: REST normalization remains available; WebSocket streaming is deferred.
 - `x`: normalizes recent-search tweets into social events when `X_BEARER_TOKEN` is configured.
 - `tavily`: normalizes search results into macro/newswire enrichment events when `TAVILY_API_KEY` is configured.
 
-Adapters enforce a poll interval, retain raw source payloads in metadata for audit/calibration, and mark every item with `execution_authority=none`.
+Adapters retain raw source payloads in metadata for audit/calibration and mark every item with `execution_authority=none`.
 
 ## Integration
 

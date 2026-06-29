@@ -18,6 +18,7 @@ from hyperliquid_trading_agent.app.world_model.schemas import (
     WorldModelSnapshot,
 )
 from hyperliquid_trading_agent.app.world_model.service import WorldModelService
+from hyperliquid_trading_agent.app.world_model.streams import WorldModelStreamService
 
 __all__ = [
     "MarketBelief",
@@ -31,4 +32,5 @@ __all__ = [
     "WorldModelOutcome",
     "WorldModelService",
     "WorldModelSnapshot",
+    "WorldModelStreamService",
 ]
