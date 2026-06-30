@@ -114,6 +114,49 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://hlagent:hlagent@postgres:5432/hlagent"
 
+    # Liquidation flow monitor (source-graded multi-venue liquidation feed).
+    # Disabled by default so the subsystem never starts adapters in tests/CI.
+    liquidations_enabled: bool = False
+    liquidations_demo_enabled: bool = False  # local-only synthetic feed; never on a public deploy
+    liquidations_recent_buffer: int = 5000  # in-memory tape size for /api/recent
+    # Per-venue adapters (each gated independently; also require liquidations_enabled).
+    liquidations_aster_enabled: bool = False
+    liquidations_lighter_enabled: bool = False
+    liquidations_hl_public_enabled: bool = False
+    liquidations_hl_user_enabled: bool = False
+    # Endpoints (overridable for testnet / self-host).
+    aster_ws_url: str = "wss://fstream.asterdex.com"
+    lighter_ws_url: str = "wss://mainnet.zklighter.elliot.ai/stream"
+    lighter_markets_url: str = "https://mainnet.zklighter.elliot.ai/api/v1/orderBooks"
+    lighter_max_markets: int = 120  # fallback subscribe range if the market list can't be fetched
+    # Hyperliquid public-derived: emit liquidation_pressure only for sweeps >= this notional.
+    hl_pressure_min_notional_usd: float = 50000.0
+    hl_public_coins: str = "BTC,ETH,SOL,HYPE"  # csv of coins to watch on the public trades feed
+    # Hyperliquid account-exact: addresses to watch (csv) + the HLP liquidator vault.
+    liquidations_hl_watch_addresses: str = ""
+    hl_liquidator_vault_address: str = ""
+    # Public value-add export API (Phase 2): durable history + CSV/NDJSON/JSON export,
+    # open + IP rate-limited. Read-only over the store; 503s when no DB is configured.
+    liquidations_export_enabled: bool = True
+    liquidations_trust_proxy: bool = False  # honor X-Forwarded-For only behind a trusted proxy
+    liquidations_export_rate_per_min: float = 120.0
+    liquidations_export_burst: int = 60
+    liquidations_export_max_rows: int = 100_000  # hard cap per export request
+    liquidations_export_max_range_ms: int = 7 * 24 * 3_600_000  # 7d max time range per query
+    liquidations_stats_max_buckets: int = 5000  # reject stats requests that would exceed this
+    # Derived-vs-confirmed reconciliation harness (Phase 2; off until a confirmed source exists).
+    liquidations_reconcile_enabled: bool = False
+    liquidations_reconcile_window_ms: int = 3_600_000
+    liquidations_reconcile_bucket_ms: int = 1000  # match the HL derived dedupe second-bucket
+    # Hyperliquid confirmed/global via managed gRPC StreamFills provider (Phase 2-live; transport gated).
+    liquidations_hl_grpc_enabled: bool = False
+    hl_grpc_endpoint: str = ""  # host:port of the managed StreamFills provider (no scheme)
+    hl_grpc_api_key: str = ""
+    hl_grpc_provider: str = ""  # provider label for the vendor badge, e.g. "thunderhead"
+    hl_grpc_auth_header: str = "x-api-key"  # metadata header carrying hl_grpc_api_key
+    hl_grpc_use_tls: bool = True  # managed providers require TLS; off only for local plaintext
+    hl_grpc_resume_lookback_ms: int = 5000  # cold-start: stream from now-this; then resume at last fill
+
     vault_enabled: bool = False
     vault_addr: str = "http://127.0.0.1:8200"
     vault_namespace: str = ""
@@ -142,6 +185,11 @@ class Settings(BaseSettings):
     hyperliquid_testnet_url: str = "https://api.hyperliquid-testnet.xyz"
     hyperliquid_mainnet_ws_url: str = "wss://api.hyperliquid.xyz/ws"
     hyperliquid_testnet_ws_url: str = "wss://api.hyperliquid-testnet.xyz/ws"
+    # HyperEVM JSON-RPC (chain 999), separate from Hyperliquid Core /info + WS above.
+    # Tokened provider URLs belong in local .env or Vault, not in committed files.
+    hyperliquid_evm_rpc_provider: str = ""
+    hyperliquid_evm_rpc_url: str = ""
+    hyperliquid_evm_ws_url: str = ""
     hyperliquid_network: Literal["mainnet", "testnet"] = "mainnet"
     hyperliquid_ws_enabled: bool = False
     hyperliquid_exchange_enabled: bool = False
@@ -527,6 +575,18 @@ class Settings(BaseSettings):
     @property
     def smart_money_addresses(self) -> list[str]:
         return [address.lower() for address in _csv(self.high_stakes_smart_money_addresses)]
+
+    @property
+    def hl_public_coin_list(self) -> list[str]:
+        return [coin.upper() for coin in _csv(self.hl_public_coins)]
+
+    @property
+    def hl_watch_address_list(self) -> list[str]:
+        addresses = set(_csv(self.liquidations_hl_watch_addresses))
+        if self.hl_liquidator_vault_address:
+            addresses.add(self.hl_liquidator_vault_address)
+        addresses.update(self.smart_money_addresses)
+        return sorted(address.lower() for address in addresses if address)
 
     @property
     def autonomy_core_symbols(self) -> list[str]:

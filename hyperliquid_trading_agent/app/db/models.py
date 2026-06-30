@@ -2112,3 +2112,59 @@ class Hip4SettlementRecord(TimestampMixin, Base):
     details: Mapped[str | None] = mapped_column(Text)
     raw_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     as_of_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class LiquidationEventRecord(TimestampMixin, Base):
+    """Append-only normalized liquidation row (liquidations subsystem).
+
+    Numeric fields are Float to match the codebase convention; exact decimals
+    survive in the contract layer and in ``raw_json`` for audit/replay.
+    """
+
+    __tablename__ = "liquidation_events"
+    __table_args__ = (
+        Index("ix_liquidation_events_ts", "timestamp_ms"),
+        Index("ix_liquidation_events_venue_symbol_ts", "venue", "symbol", "timestamp_ms"),
+        Index("ix_liquidation_events_integrity_ts", "source_integrity", "timestamp_ms"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    venue: Mapped[str] = mapped_column(String(32), nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_integrity: Mapped[str] = mapped_column(String(32), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    venue_market_id: Mapped[str | None] = mapped_column(String(64))
+    liquidated_side: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")
+    raw_side: Mapped[str | None] = mapped_column(String(32))
+    price: Mapped[float | None] = mapped_column(Float)
+    avg_price: Mapped[float | None] = mapped_column(Float)
+    mark_price: Mapped[float | None] = mapped_column(Float)
+    bankruptcy_price: Mapped[float | None] = mapped_column(Float)
+    size_base: Mapped[float | None] = mapped_column(Float)
+    notional_usd: Mapped[float | None] = mapped_column(Float)
+    timestamp_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    received_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    block_height: Mapped[int | None] = mapped_column(BigInteger)
+    tx_hash: Mapped[str | None] = mapped_column(String(128))
+    log_index: Mapped[int | None] = mapped_column(Integer)
+    trade_id: Mapped[str | None] = mapped_column(String(128))
+    liquidation_id: Mapped[str | None] = mapped_column(String(128))
+    liquidated_user: Mapped[str | None] = mapped_column(String(128))
+    liquidator: Mapped[str | None] = mapped_column(String(128))
+    method: Mapped[str | None] = mapped_column(String(32))
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    raw_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class LiquidationAdapterStateRecord(TimestampMixin, Base):
+    """Per-adapter checkpoint / health row (liquidations subsystem)."""
+
+    __tablename__ = "liquidation_adapter_state"
+
+    adapter_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    last_cursor: Mapped[str | None] = mapped_column(String(255))
+    last_event_ms: Mapped[int | None] = mapped_column(BigInteger)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="init")
+    error: Mapped[str | None] = mapped_column(Text)

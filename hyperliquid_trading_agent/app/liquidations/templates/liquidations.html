@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Liquidation Flow Monitor</title>
+    <meta
+      name="description"
+      content="Honest, source-graded, multi-venue crypto liquidation feed. Confirmed where the venue exposes confirmed liquidations; derived where it does not."
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #07100e;
+        --panel: #0c1a17;
+        --panel-2: #0f201c;
+        --line: #163029;
+        --muted: #6b8a82;
+        --text: #d7f4ec;
+        --accent: #4fe0c0; /* mint */
+        --long: #34d399; /* shorts squeezed up... liquidated longs shown red below */
+        --short: #34d399;
+        --liq-long: #f1556c; /* a liquidated long = forced sell */
+        --liq-short: #2ee6a6; /* a liquidated short = forced buy */
+        --warn: #f5b34a;
+        font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: radial-gradient(1200px 600px at 80% -10%, #0d241f 0%, var(--bg) 60%);
+        color: var(--text);
+      }
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      header {
+        padding: 18px 22px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        gap: 18px;
+        align-items: baseline;
+        flex-wrap: wrap;
+      }
+      header h1 {
+        font-size: 16px;
+        margin: 0;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--accent);
+      }
+      header .sub {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .live {
+        margin-left: auto;
+        font-size: 11px;
+        color: var(--muted);
+        display: flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--muted);
+        box-shadow: 0 0 0 0 rgba(79, 224, 192, 0.6);
+      }
+      .dot.on {
+        background: var(--liq-short);
+        animation: pulse 1.8s infinite;
+      }
+      @keyframes pulse {
+        0% {
+          box-shadow: 0 0 0 0 rgba(46, 230, 166, 0.5);
+        }
+        70% {
+          box-shadow: 0 0 0 7px rgba(46, 230, 166, 0);
+        }
+        100% {
+          box-shadow: 0 0 0 0 rgba(46, 230, 166, 0);
+        }
+      }
+      main {
+        padding: 18px 22px 60px;
+        display: grid;
+        gap: 16px;
+        grid-template-columns: 1fr;
+        max-width: 1400px;
+        margin: 0 auto;
+      }
+      .row {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      }
+      .panel {
+        background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 14px 16px;
+      }
+      .panel h2 {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--muted);
+        margin: 0 0 10px;
+      }
+      .metric {
+        font-size: 26px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+      }
+      .metric.sm {
+        font-size: 18px;
+      }
+      .split {
+        display: flex;
+        gap: 12px;
+        align-items: baseline;
+        margin-top: 4px;
+        font-size: 12px;
+      }
+      .longv {
+        color: var(--liq-long);
+      }
+      .shortv {
+        color: var(--liq-short);
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .grid2 {
+        display: grid;
+        grid-template-columns: 1.6fr 1fr;
+        gap: 16px;
+      }
+      @media (max-width: 900px) {
+        .grid2 {
+          grid-template-columns: 1fr;
+        }
+      }
+      canvas {
+        width: 100%;
+        height: 220px;
+        display: block;
+      }
+      /* venue badges */
+      .venues {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .venue {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 5px 11px;
+        font-size: 12px;
+        background: #0a1714;
+      }
+      .badge {
+        font-size: 9.5px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        padding: 2px 7px;
+        border-radius: 999px;
+        border: 1px solid currentColor;
+        font-weight: 700;
+      }
+      .b-confirmed,
+      .b-verifiable {
+        color: var(--liq-short);
+      }
+      .b-snapshot_throttled {
+        color: var(--warn);
+      }
+      .b-derived {
+        color: #7aa2ff;
+      }
+      .b-account_private {
+        color: #c08bff;
+      }
+      .b-vendor {
+        color: var(--muted);
+      }
+      /* tape */
+      .tape {
+        max-height: 560px;
+        overflow: auto;
+        font-size: 12px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th {
+        position: sticky;
+        top: 0;
+        background: var(--panel-2);
+        text-align: left;
+        color: var(--muted);
+        font-weight: 500;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        padding: 8px 8px;
+        border-bottom: 1px solid var(--line);
+      }
+      td {
+        padding: 6px 8px;
+        border-bottom: 1px solid #102019;
+        white-space: nowrap;
+      }
+      tr.long td.sd {
+        color: var(--liq-long);
+      }
+      tr.short td.sd {
+        color: var(--liq-short);
+      }
+      tr.flash {
+        animation: flash 1.1s ease-out;
+      }
+      @keyframes flash {
+        from {
+          background: rgba(79, 224, 192, 0.16);
+        }
+        to {
+          background: transparent;
+        }
+      }
+      .num {
+        font-variant-numeric: tabular-nums;
+      }
+      .pressure {
+        opacity: 0.62;
+      }
+      footer {
+        color: var(--muted);
+        font-size: 11px;
+        padding: 0 22px 30px;
+        max-width: 1400px;
+        margin: 0 auto;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Liquidation&nbsp;Flow&nbsp;Monitor</h1>
+      <span class="sub"
+        >the shape of crypto liquidations across open perp DEXes — graded by source honesty</span
+      >
+      <a
+        class="sub"
+        href="/liquidations/api/meta"
+        style="border: 1px solid var(--line); padding: 3px 10px; border-radius: 999px"
+        >Public&nbsp;API&nbsp;↗</a
+      >
+      <span class="live"><span id="livedot" class="dot"></span><span id="livetxt">connecting…</span></span>
+    </header>
+    <main>
+      <section class="row" id="headline">
+        <div class="panel">
+          <h2>Liquidated · 1h</h2>
+          <div class="metric num" id="h-total">—</div>
+          <div class="split">
+            <span class="longv num" id="h-long">longs —</span><span class="shortv num" id="h-short">shorts —</span>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>1m</h2>
+          <div class="metric sm num" id="h-1m">—</div>
+        </div>
+        <div class="panel">
+          <h2>5m</h2>
+          <div class="metric sm num" id="h-5m">—</div>
+        </div>
+        <div class="panel">
+          <h2>Biggest single · 1h</h2>
+          <div class="metric sm num" id="h-max">—</div>
+          <div class="muted" id="h-max-sub">—</div>
+        </div>
+        <div class="panel">
+          <h2>Events · 1h</h2>
+          <div class="metric sm num" id="h-count">—</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Sources</h2>
+        <div class="venues" id="venues"><span class="muted">no adapters connected</span></div>
+      </section>
+
+      <section class="grid2">
+        <div class="panel">
+          <h2>Liquidation shape · last hour (per minute)</h2>
+          <canvas id="chart"></canvas>
+        </div>
+        <div class="panel">
+          <h2>By venue · 1h</h2>
+          <div id="byvenue"><span class="muted">—</span></div>
+          <h2 style="margin-top: 16px">Top markets · 1h</h2>
+          <div id="bysymbol"><span class="muted">—</span></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Live tape</h2>
+        <div class="tape">
+          <table>
+            <thead>
+              <tr>
+                <th>time</th>
+                <th>venue</th>
+                <th>source</th>
+                <th>market</th>
+                <th>side</th>
+                <th class="num">size (USD)</th>
+                <th class="num">price</th>
+                <th>kind</th>
+              </tr>
+            </thead>
+            <tbody id="tape"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <footer>
+      Confirmed where the venue exposes confirmed liquidations; <em>derived</em> or <em>snapshot</em> where it does
+      not — headline totals count confirmed-kind executions only, inferred pressure is shown dimmed in the tape and
+      never inflates the numbers. Counterparties are hashed.
+      <div style="margin-top: 12px">
+        <strong style="color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; font-size: 10px"
+          >Public API</strong
+        >
+        — open &amp; rate-limited ·
+        <a href="/liquidations/api/meta">schema&nbsp;&amp;&nbsp;limits</a> ·
+        <a href="/liquidations/api/history">history&nbsp;(json)</a> ·
+        <a href="/liquidations/api/export?format=csv">export&nbsp;csv</a> ·
+        <a href="/liquidations/api/export?format=ndjson">ndjson</a> ·
+        <a href="/liquidations/api/stats">stats</a>
+      </div>
+    </footer>
+    <script src="/liquidations/app.js"></script>
+  </body>
+</html>

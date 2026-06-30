@@ -49,6 +49,8 @@ from hyperliquid_trading_agent.app.hip4.service import Hip4Service
 from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
 from hyperliquid_trading_agent.app.hyperliquid.sdk_info_client import SDKInfoClient
 from hyperliquid_trading_agent.app.hyperliquid.ws_worker import HyperliquidWebSocketWorker
+from hyperliquid_trading_agent.app.liquidations.routes import register_liquidation_routes
+from hyperliquid_trading_agent.app.liquidations.service import LiquidationService
 from hyperliquid_trading_agent.app.logging import configure_logging, get_logger
 from hyperliquid_trading_agent.app.metrics import SERVICE_INFO, UP
 from hyperliquid_trading_agent.app.news.service import NewsService
@@ -119,6 +121,9 @@ async def lifespan(app: FastAPI):
     engine = create_engine(settings)
     sessionmaker = create_sessionmaker(engine)
     repository = Repository(sessionmaker)
+    # Liquidation flow monitor: independent of the trading runtime profiles — it is
+    # a public observability surface, gated only by its own feature flag.
+    liquidation_service = LiquidationService(settings, sessionmaker) if settings.liquidations_enabled else None
     decision_context_recorder = DecisionContextRecorder(settings=settings, repository=repository, code_version=__version__)
     await decision_context_recorder.snapshot_startup()
     hyperliquid = HyperliquidClient(settings=settings)
@@ -274,6 +279,7 @@ async def lifespan(app: FastAPI):
 
     app.state.engine = engine
     app.state.repository = repository
+    app.state.liquidation_service = liquidation_service
     app.state.decision_context_recorder = decision_context_recorder
     app.state.hyperliquid = hyperliquid
     app.state.news = news
@@ -338,10 +344,15 @@ async def lifespan(app: FastAPI):
         log.info("newswire_started")
     if settings.world_model_streams_enabled and not dashboard_only:
         await world_model_stream_service.start()
+    if liquidation_service is not None:
+        await liquidation_service.start()
+        log.info("liquidation_service_task_started")
     try:
         yield
     finally:
         UP.set(0)
+        if liquidation_service is not None:
+            await liquidation_service.stop()
         if not restricted_runtime:
             await bot.stop()
         if settings.world_model_streams_enabled and not dashboard_only:
@@ -382,6 +393,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_governance_routes(app, settings, _require_agent_api)
     register_dashboard_routes(app, settings, _require_agent_api)
     register_world_model_routes(app, settings, _require_agent_api)
+    register_liquidation_routes(app, settings, _require_agent_api)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
