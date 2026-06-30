@@ -185,6 +185,11 @@ class Settings(BaseSettings):
     hyperliquid_testnet_url: str = "https://api.hyperliquid-testnet.xyz"
     hyperliquid_mainnet_ws_url: str = "wss://api.hyperliquid.xyz/ws"
     hyperliquid_testnet_ws_url: str = "wss://api.hyperliquid-testnet.xyz/ws"
+    # HyperEVM JSON-RPC (chain 999), separate from Hyperliquid Core /info + WS above.
+    # Tokened provider URLs belong in local .env or Vault, not in committed files.
+    hyperliquid_evm_rpc_provider: str = ""
+    hyperliquid_evm_rpc_url: str = ""
+    hyperliquid_evm_ws_url: str = ""
     hyperliquid_network: Literal["mainnet", "testnet"] = "mainnet"
     hyperliquid_ws_enabled: bool = False
     hyperliquid_exchange_enabled: bool = False
