@@ -769,6 +769,58 @@ class RegimeSnapshotRecord(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class StrategySpecRecord(TimestampMixin, Base):
+    __tablename__ = "strategy_specs"
+    __table_args__ = (
+        Index("ix_strategy_specs_family", "family"),
+        Index("ix_strategy_specs_enabled", "enabled"),
+    )
+
+    strategy_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    family: Mapped[str] = mapped_column(String(96), nullable=False)
+    supported_assets_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    supported_venues_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    supported_horizons_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    required_features_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    valid_regimes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    max_candidates_per_run: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    max_allocation_share_pct: Mapped[float] = mapped_column(Float, nullable=False, default=45.0)
+    cooldown_ms: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    min_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    min_ev_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    risk_tags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    counts_for_breadth: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class StrategyRegimePerformanceRecord(TimestampMixin, Base):
+    __tablename__ = "strategy_regime_performance"
+    __table_args__ = (
+        Index("ix_strategy_regime_performance_strategy", "strategy_id"),
+        Index("ix_strategy_regime_performance_regime", "regime_label"),
+        Index("ix_strategy_regime_performance_window", "window_end_ms"),
+    )
+
+    performance_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    strategy_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    strategy_family: Mapped[str] = mapped_column(String(96), nullable=False, default="unknown")
+    regime_label: Mapped[str] = mapped_column(String(255), nullable=False)
+    asset: Mapped[str] = mapped_column(String(64), nullable=False, default="GLOBAL")
+    window_start_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    window_end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    allocation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    win_rate_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    avg_net_ev_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    realized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class AlphaCandidateRecord(TimestampMixin, Base):
     __tablename__ = "alpha_candidates"
     __table_args__ = (
@@ -862,6 +914,137 @@ class AllocationDecisionRecord(TimestampMixin, Base):
     opportunity_cost_rank: Mapped[int | None] = mapped_column(Integer)
     constraints_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     reason_codes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class AllocationDiversityEventRecord(TimestampMixin, Base):
+    __tablename__ = "allocation_diversity_events"
+    __table_args__ = (
+        Index("ix_allocation_diversity_events_candidate", "candidate_id"),
+        Index("ix_allocation_diversity_events_strategy", "strategy_id"),
+        Index("ix_allocation_diversity_events_created", "created_at_ms"),
+        Index("ix_allocation_diversity_events_decision", "decision"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    allocation_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    strategy_family: Mapped[str] = mapped_column(String(96), nullable=False, default="unknown")
+    asset: Mapped[str] = mapped_column(String(64), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason_codes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class CandidateTradePacketRecord(TimestampMixin, Base):
+    __tablename__ = "candidate_trade_packets"
+    __table_args__ = (
+        Index("ix_candidate_trade_packets_candidate", "candidate_id"),
+        Index("ix_candidate_trade_packets_strategy", "strategy_id"),
+        Index("ix_candidate_trade_packets_created", "created_at_ms"),
+    )
+
+    packet_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    strategy_family: Mapped[str] = mapped_column(String(96), nullable=False, default="unknown")
+    asset: Mapped[str] = mapped_column(String(64), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    horizon: Mapped[str] = mapped_column(String(32), nullable=False)
+    feature_snapshot_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    regime_snapshot_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    packet_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class CouncilReviewRecord(TimestampMixin, Base):
+    __tablename__ = "council_reviews"
+    __table_args__ = (
+        Index("ix_council_reviews_candidate", "candidate_id"),
+        Index("ix_council_reviews_strategy", "strategy_id"),
+        Index("ix_council_reviews_decision", "decision"),
+        Index("ix_council_reviews_created", "created_at_ms"),
+    )
+
+    review_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    packet_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    candidate_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    vetoes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    warnings_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    required_evidence_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    regime_fit_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    strategy_regime_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    portfolio_impact_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class CouncilVoteRecord(TimestampMixin, Base):
+    __tablename__ = "council_votes"
+    __table_args__ = (
+        Index("ix_council_votes_review", "review_id"),
+        Index("ix_council_votes_role", "role"),
+        Index("ix_council_votes_created", "created_at_ms"),
+    )
+
+    vote_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    review_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    role: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    vetoes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    warnings_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    required_evidence_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    scores_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class BanditPolicySnapshotRecord(TimestampMixin, Base):
+    __tablename__ = "bandit_policy_snapshots"
+    __table_args__ = (
+        Index("ix_bandit_policy_snapshots_status", "status"),
+        Index("ix_bandit_policy_snapshots_created", "created_at_ms"),
+    )
+
+    policy_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="report_only")
+    trained_window_start_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    trained_window_end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    context_features_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    arms_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    policy_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class BanditRecommendationRecord(TimestampMixin, Base):
+    __tablename__ = "bandit_recommendations"
+    __table_args__ = (
+        Index("ix_bandit_recommendations_policy", "policy_id"),
+        Index("ix_bandit_recommendations_strategy", "strategy_id"),
+        Index("ix_bandit_recommendations_created", "created_at_ms"),
+    )
+
+    recommendation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    policy_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    asset: Mapped[str] = mapped_column(String(64), nullable=False, default="GLOBAL")
+    regime_label: Mapped[str] = mapped_column(String(255), nullable=False, default="unknown")
+    recommendation: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    expected_score_delta: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    auto_apply_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 

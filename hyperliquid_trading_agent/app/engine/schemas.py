@@ -367,6 +367,58 @@ class AllocationDecision(BaseModel):
         return self
 
 
+class StrategyRegimePerformance(BaseModel):
+    performance_id: str
+    strategy_id: str
+    strategy_version: str = "unknown"
+    strategy_family: str = "unknown"
+    regime_label: str
+    asset: str = "GLOBAL"
+    window_start_ms: int
+    window_end_ms: int
+    candidate_count: int = Field(default=0, ge=0)
+    allocation_count: int = Field(default=0, ge=0)
+    win_rate_pct: float = 0.0
+    avg_net_ev_bps: float = 0.0
+    realized_pnl_usd: float = 0.0
+    score: float = 0.0
+    created_at_ms: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class BanditPolicySnapshot(BaseModel):
+    policy_id: str
+    policy_version: str
+    status: str = "report_only"
+    trained_window_start_ms: int
+    trained_window_end_ms: int
+    context_features: list[str] = Field(default_factory=list)
+    arms: list[str] = Field(default_factory=list)
+    policy_json: dict[str, Any] = Field(default_factory=dict)
+    created_at_ms: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class BanditRecommendation(BaseModel):
+    recommendation_id: str
+    policy_id: str
+    strategy_id: str
+    asset: str = "GLOBAL"
+    regime_label: str = "unknown"
+    recommendation: str
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    expected_score_delta: float = 0.0
+    auto_apply_allowed: bool = False
+    created_at_ms: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _report_only_never_auto_applies(self) -> Self:
+        if self.auto_apply_allowed:
+            raise ValueError("bandit recommendations are report-only; auto_apply_allowed must be false")
+        return self
+
+
 class CandidateTradePacket(BaseModel):
     packet_id: str
     candidate_id: str

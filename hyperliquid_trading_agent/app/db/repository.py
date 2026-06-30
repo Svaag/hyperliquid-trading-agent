@@ -8,19 +8,25 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from hyperliquid_trading_agent.app.db.models import (
     AllocationDecisionRecord,
+    AllocationDiversityEventRecord,
     AlphaCandidateRecord,
     AlphaEventEvaluationMarkRecord,
     AlphaEventEvaluationRecord,
     AuditEvent,
     AutonomyEvent,
     AutonomyNewsEvent,
+    BanditPolicySnapshotRecord,
+    BanditRecommendationRecord,
     CacheItem,
     CandidateBookSnapshotRecord,
     CandidateConfigDiffRecord,
     CandidateLessonRecord,
+    CandidateTradePacketRecord,
     ConfigVersionRecord,
     ConversationMessage,
     ConversationThread,
+    CouncilReviewRecord,
+    CouncilVoteRecord,
     DailyReportRecord,
     DebateDecisionRecord,
     DecisionContextRecord,
@@ -94,6 +100,8 @@ from hyperliquid_trading_agent.app.db.models import (
     SignalEvaluationMarkRecord,
     SignalEvaluationRecord,
     SourceCredibilityRecord,
+    StrategyRegimePerformanceRecord,
+    StrategySpecRecord,
     TokenCapitalSnapshotRecord,
     ToolCall,
     TrackedLevel,
@@ -749,6 +757,41 @@ class Repository:
             "rollup_id",
         )
 
+    async def upsert_strategy_spec(self, spec: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            StrategySpecRecord(
+                strategy_id=str(spec["strategy_id"]),
+                version=str(spec.get("version") or "unknown"),
+                family=str(spec.get("family") or "unknown"),
+                supported_assets_json=list(spec.get("supported_assets") or []),
+                supported_venues_json=list(spec.get("supported_venues") or []),
+                supported_horizons_json=list(spec.get("supported_horizons") or []),
+                required_features_json=list(spec.get("required_features") or []),
+                valid_regimes_json=list(spec.get("valid_regimes") or []),
+                max_candidates_per_run=int(spec.get("max_candidates_per_run") or 0),
+                max_allocation_share_pct=float(spec.get("max_allocation_share_pct") or 0),
+                cooldown_ms=int(spec.get("cooldown_ms") or 0),
+                min_confidence=float(spec.get("min_confidence") or 0),
+                min_ev_bps=float(spec.get("min_ev_bps") or 0),
+                risk_tags_json=list(spec.get("risk_tags") or []),
+                counts_for_breadth=bool(spec.get("counts_for_breadth", True)),
+                enabled=bool(spec.get("enabled", True)),
+                metadata_json=redact_secrets(dict(spec.get("metadata") or {})),
+            ),
+            "strategy_id",
+        )
+
+    async def list_strategy_specs(self, *, family: str | None = None, enabled: bool | None = None, limit: int = 500) -> list[dict[str, Any]]:
+        filters = []
+        if family:
+            filters.append(StrategySpecRecord.family == family)
+        if enabled is not None:
+            filters.append(StrategySpecRecord.enabled == enabled)
+        return await self._list_engine_records(StrategySpecRecord, order_by=StrategySpecRecord.strategy_id, limit=limit, filters=filters)
+
+    async def get_strategy_spec(self, strategy_id: str) -> dict[str, Any] | None:
+        return await self._get_engine_record(StrategySpecRecord, strategy_id)
+
     async def record_regime_snapshot(self, regime: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
             RegimeSnapshotRecord(
@@ -887,6 +930,194 @@ class Repository:
     async def list_allocation_decisions(self, *, candidate_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         filters = [AllocationDecisionRecord.candidate_id == candidate_id] if candidate_id else []
         return await self._list_engine_records(AllocationDecisionRecord, order_by=AllocationDecisionRecord.created_at_ms, limit=limit, filters=filters)
+
+    async def record_allocation_diversity_event(self, event: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            AllocationDiversityEventRecord(
+                event_id=str(event["event_id"]),
+                candidate_id=str(event.get("candidate_id") or ""),
+                allocation_id=str(event.get("allocation_id") or ""),
+                strategy_id=str(event.get("strategy_id") or "unknown"),
+                strategy_version=str(event.get("strategy_version") or "unknown"),
+                strategy_family=str(event.get("strategy_family") or "unknown"),
+                asset=str(event.get("asset") or "").upper(),
+                venue=str(event.get("venue") or "unknown"),
+                decision=str(event.get("decision") or "allow"),
+                reason_codes_json=list(event.get("reason_codes") or []),
+                created_at_ms=int(event.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(event.get("metadata") or {})),
+            ),
+            "event_id",
+        )
+
+    async def list_allocation_diversity_events(self, *, strategy_id: str | None = None, decision: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = []
+        if strategy_id:
+            filters.append(AllocationDiversityEventRecord.strategy_id == strategy_id)
+        if decision:
+            filters.append(AllocationDiversityEventRecord.decision == decision)
+        return await self._list_engine_records(AllocationDiversityEventRecord, order_by=AllocationDiversityEventRecord.created_at_ms, limit=limit, filters=filters)
+
+    async def record_candidate_trade_packet(self, packet: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            CandidateTradePacketRecord(
+                packet_id=str(packet["packet_id"]),
+                candidate_id=str(packet.get("candidate_id") or ""),
+                strategy_id=str(packet.get("strategy_id") or "unknown"),
+                strategy_version=str(packet.get("strategy_version") or "unknown"),
+                strategy_family=str(packet.get("strategy_family") or "unknown"),
+                asset=str(packet.get("asset") or "").upper(),
+                side=str(packet.get("side") or ""),
+                horizon=str(packet.get("horizon") or ""),
+                feature_snapshot_id=str(packet.get("feature_snapshot_id") or ""),
+                regime_snapshot_id=str(packet.get("regime_snapshot_id") or ""),
+                packet_json=redact_secrets(dict(packet)),
+                created_at_ms=int(packet.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(packet.get("metadata") or {})),
+            ),
+            "packet_id",
+        )
+
+    async def list_candidate_trade_packets(self, *, candidate_id: str | None = None, strategy_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = []
+        if candidate_id:
+            filters.append(CandidateTradePacketRecord.candidate_id == candidate_id)
+        if strategy_id:
+            filters.append(CandidateTradePacketRecord.strategy_id == strategy_id)
+        return await self._list_engine_records(CandidateTradePacketRecord, order_by=CandidateTradePacketRecord.created_at_ms, limit=limit, filters=filters)
+
+    async def record_council_review(self, review: dict[str, Any]) -> str | None:
+        review_id = await self._merge_engine_record(
+            CouncilReviewRecord(
+                review_id=str(review["review_id"]),
+                packet_id=str(review.get("packet_id") or ""),
+                candidate_id=str(review.get("candidate_id") or ""),
+                strategy_id=str(review.get("strategy_id") or "unknown"),
+                decision=str(review.get("decision") or "needs_more_evidence"),
+                vetoes_json=list(review.get("vetoes") or []),
+                warnings_json=list(review.get("warnings") or []),
+                required_evidence_json=list(review.get("required_evidence") or []),
+                regime_fit_score=float(review.get("regime_fit_score") or 0),
+                strategy_regime_score=float(review.get("strategy_regime_score") or 0),
+                portfolio_impact_score=float(review.get("portfolio_impact_score") or 0),
+                created_at_ms=int(review.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(review.get("metadata") or {})),
+            ),
+            "review_id",
+        )
+        for vote in review.get("votes") or []:
+            await self.record_council_vote(vote)
+        return review_id
+
+    async def list_council_reviews(self, *, candidate_id: str | None = None, strategy_id: str | None = None, decision: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = []
+        if candidate_id:
+            filters.append(CouncilReviewRecord.candidate_id == candidate_id)
+        if strategy_id:
+            filters.append(CouncilReviewRecord.strategy_id == strategy_id)
+        if decision:
+            filters.append(CouncilReviewRecord.decision == decision)
+        return await self._list_engine_records(CouncilReviewRecord, order_by=CouncilReviewRecord.created_at_ms, limit=limit, filters=filters)
+
+    async def record_council_vote(self, vote: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            CouncilVoteRecord(
+                vote_id=str(vote["vote_id"]),
+                review_id=str(vote.get("review_id") or ""),
+                role=str(vote.get("role") or "unknown"),
+                decision=str(vote.get("decision") or "allow"),
+                rationale=str(vote.get("rationale") or ""),
+                vetoes_json=list(vote.get("vetoes") or []),
+                warnings_json=list(vote.get("warnings") or []),
+                required_evidence_json=list(vote.get("required_evidence") or []),
+                scores_json=redact_secrets(dict(vote.get("scores") or {})),
+                created_at_ms=int(vote.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(vote.get("metadata") or {})),
+            ),
+            "vote_id",
+        )
+
+    async def list_council_votes(self, *, review_id: str | None = None, role: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = []
+        if review_id:
+            filters.append(CouncilVoteRecord.review_id == review_id)
+        if role:
+            filters.append(CouncilVoteRecord.role == role)
+        return await self._list_engine_records(CouncilVoteRecord, order_by=CouncilVoteRecord.created_at_ms, limit=limit, filters=filters)
+
+    async def upsert_strategy_regime_performance(self, item: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            StrategyRegimePerformanceRecord(
+                performance_id=str(item["performance_id"]),
+                strategy_id=str(item.get("strategy_id") or "unknown"),
+                strategy_version=str(item.get("strategy_version") or "unknown"),
+                strategy_family=str(item.get("strategy_family") or "unknown"),
+                regime_label=str(item.get("regime_label") or "unknown"),
+                asset=str(item.get("asset") or "GLOBAL").upper(),
+                window_start_ms=int(item.get("window_start_ms") or 0),
+                window_end_ms=int(item.get("window_end_ms") or 0),
+                candidate_count=int(item.get("candidate_count") or 0),
+                allocation_count=int(item.get("allocation_count") or 0),
+                win_rate_pct=float(item.get("win_rate_pct") or 0),
+                avg_net_ev_bps=float(item.get("avg_net_ev_bps") or 0),
+                realized_pnl_usd=float(item.get("realized_pnl_usd") or 0),
+                score=float(item.get("score") or 0),
+                created_at_ms=int(item.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(item.get("metadata") or {})),
+            ),
+            "performance_id",
+        )
+
+    async def list_strategy_regime_performance(self, *, strategy_id: str | None = None, regime_label: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = []
+        if strategy_id:
+            filters.append(StrategyRegimePerformanceRecord.strategy_id == strategy_id)
+        if regime_label:
+            filters.append(StrategyRegimePerformanceRecord.regime_label == regime_label)
+        return await self._list_engine_records(StrategyRegimePerformanceRecord, order_by=StrategyRegimePerformanceRecord.window_end_ms, limit=limit, filters=filters)
+
+    async def upsert_bandit_policy_snapshot(self, snapshot: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            BanditPolicySnapshotRecord(
+                policy_id=str(snapshot["policy_id"]),
+                policy_version=str(snapshot.get("policy_version") or "unknown"),
+                status=str(snapshot.get("status") or "report_only"),
+                trained_window_start_ms=int(snapshot.get("trained_window_start_ms") or 0),
+                trained_window_end_ms=int(snapshot.get("trained_window_end_ms") or 0),
+                context_features_json=list(snapshot.get("context_features") or []),
+                arms_json=list(snapshot.get("arms") or []),
+                policy_json=redact_secrets(dict(snapshot.get("policy_json") or {})),
+                created_at_ms=int(snapshot.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(snapshot.get("metadata") or {})),
+            ),
+            "policy_id",
+        )
+
+    async def record_bandit_recommendation(self, recommendation: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            BanditRecommendationRecord(
+                recommendation_id=str(recommendation["recommendation_id"]),
+                policy_id=str(recommendation.get("policy_id") or "unknown"),
+                strategy_id=str(recommendation.get("strategy_id") or "unknown"),
+                asset=str(recommendation.get("asset") or "GLOBAL").upper(),
+                regime_label=str(recommendation.get("regime_label") or "unknown"),
+                recommendation=str(recommendation.get("recommendation") or ""),
+                confidence=float(recommendation.get("confidence") or 0),
+                expected_score_delta=float(recommendation.get("expected_score_delta") or 0),
+                auto_apply_allowed=bool(recommendation.get("auto_apply_allowed", False)),
+                created_at_ms=int(recommendation.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(recommendation.get("metadata") or {})),
+            ),
+            "recommendation_id",
+        )
+
+    async def list_bandit_recommendations(self, *, strategy_id: str | None = None, policy_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = []
+        if strategy_id:
+            filters.append(BanditRecommendationRecord.strategy_id == strategy_id)
+        if policy_id:
+            filters.append(BanditRecommendationRecord.policy_id == policy_id)
+        return await self._list_engine_records(BanditRecommendationRecord, order_by=BanditRecommendationRecord.created_at_ms, limit=limit, filters=filters)
 
     async def record_evidence_pack(self, pack: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(

@@ -692,6 +692,7 @@ Implementation is complete when:
 
 
 
+
 <!-- pi-plan-progress:start -->
 ## Progress
 
@@ -703,7 +704,7 @@ Status legend: `[x]` done, `[~]` in progress, `[-]` skipped, `[>]` deferred, `[!
 - [x] 4. Implement Wave 1A strategies and adapters. _(done)_
 - [x] 5. Add allocation diversity control and fix allocation metadata persistence. _(done)_
 - [x] 6. Add CandidateTradePacket and deterministic Agentic Council reviews. _(done)_
-- [ ] 7. Add first-class persistence, repository methods, and API routes. _(pending)_
+- [x] 7. Add first-class persistence, repository methods, and API routes. _(done)_
 - [ ] 8. Build strategy-regime performance scorecards. _(pending)_
 - [ ] 9. Upgrade replay comparison and readiness gate checks. _(pending)_
 - [ ] 10. Add offline contextual-bandit report-only recommendations. _(pending)_

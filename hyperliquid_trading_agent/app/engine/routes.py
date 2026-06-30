@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.engine.event_ledger import now_ms
 from hyperliquid_trading_agent.app.engine.readiness import build_paper_readiness_scorecard
 from hyperliquid_trading_agent.app.engine.replay_compare import (
     EngineReplayComparisonService,
@@ -19,6 +20,14 @@ from hyperliquid_trading_agent.app.engine.validation_report import (
 )
 
 RequireAuth = Callable[[Settings, str | None], None]
+
+
+class EngineStrategyRegimeRefreshRequest(BaseModel):
+    window_hours: int = Field(default=24, ge=1, le=24 * 90)
+
+
+class EngineBanditRecommendationRunRequest(BaseModel):
+    window_hours: int = Field(default=24 * 7, ge=1, le=24 * 180)
 
 
 class EngineReplayComparisonRequest(BaseModel):
@@ -126,6 +135,74 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
     async def engine_allocations(candidate_id: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
         _auth(authorization)
         return await _repo().list_allocation_decisions(candidate_id=candidate_id, limit=limit)
+
+    @app.get("/engine/strategies")
+    async def engine_strategies(family: str | None = None, enabled: bool | None = None, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        _auth(authorization)
+        service = getattr(app.state, "engine_service", None)
+        registry = getattr(service, "strategy_registry", None)
+        if registry is not None:
+            specs = [spec.model_dump(mode="json") for spec in registry.specs(enabled_only=enabled is True)]
+            if family:
+                specs = [spec for spec in specs if spec.get("family") == family]
+            if enabled is not None:
+                specs = [spec for spec in specs if bool(spec.get("enabled")) is enabled]
+            return specs
+        return await _repo().list_strategy_specs(family=family, enabled=enabled, limit=500)
+
+    @app.get("/engine/strategies/{strategy_id}")
+    async def engine_strategy(strategy_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _auth(authorization)
+        service = getattr(app.state, "engine_service", None)
+        registry = getattr(service, "strategy_registry", None)
+        if registry is not None:
+            spec = registry.spec(strategy_id)
+            if spec is not None:
+                return spec.model_dump(mode="json")
+        item = await _repo().get_strategy_spec(strategy_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="strategy spec not found")
+        return item
+
+    @app.get("/engine/strategy-regime-performance")
+    async def engine_strategy_regime_performance(strategy_id: str | None = None, regime_label: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        _auth(authorization)
+        return await _repo().list_strategy_regime_performance(strategy_id=strategy_id, regime_label=regime_label, limit=limit)
+
+    @app.get("/engine/strategy-regime-performance/{strategy_id}")
+    async def engine_strategy_regime_performance_for_strategy(strategy_id: str, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        _auth(authorization)
+        return await _repo().list_strategy_regime_performance(strategy_id=strategy_id, limit=limit)
+
+    @app.post("/engine/strategy-regime-performance/refresh")
+    async def engine_strategy_regime_performance_refresh(request: EngineStrategyRegimeRefreshRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _auth(authorization)
+        return {"status": "accepted", "report_only": True, "window_hours": request.window_hours, "created_at_ms": now_ms(), "refreshed_count": 0}
+
+    @app.get("/engine/candidate-trade-packets")
+    async def engine_candidate_trade_packets(candidate_id: str | None = None, strategy_id: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        _auth(authorization)
+        return await _repo().list_candidate_trade_packets(candidate_id=candidate_id, strategy_id=strategy_id, limit=limit)
+
+    @app.get("/engine/council-reviews")
+    async def engine_council_reviews(candidate_id: str | None = None, strategy_id: str | None = None, decision: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        _auth(authorization)
+        return await _repo().list_council_reviews(candidate_id=candidate_id, strategy_id=strategy_id, decision=decision, limit=limit)
+
+    @app.get("/engine/diversity-events")
+    async def engine_diversity_events(strategy_id: str | None = None, decision: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        _auth(authorization)
+        return await _repo().list_allocation_diversity_events(strategy_id=strategy_id, decision=decision, limit=limit)
+
+    @app.get("/engine/bandit-recommendations")
+    async def engine_bandit_recommendations(strategy_id: str | None = None, policy_id: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        _auth(authorization)
+        return await _repo().list_bandit_recommendations(strategy_id=strategy_id, policy_id=policy_id, limit=limit)
+
+    @app.post("/engine/bandit-recommendations/run")
+    async def engine_bandit_recommendations_run(request: EngineBanditRecommendationRunRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _auth(authorization)
+        return {"status": "accepted", "report_only": True, "auto_apply_allowed": False, "window_hours": request.window_hours, "created_at_ms": now_ms(), "recommendation_count": 0}
 
     @app.get("/engine/evidence-packs/{evidence_pack_id}")
     async def engine_evidence_pack(evidence_pack_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:

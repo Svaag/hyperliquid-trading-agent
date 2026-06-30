@@ -36,6 +36,27 @@ class FakeEngineRepository:
     async def list_allocation_decisions(self, **kwargs):
         return [{"allocation_id": "alloc_1"}]
 
+    async def list_strategy_specs(self, **kwargs):
+        return [{"strategy_id": "microstructure_ofi_v2", "family": kwargs.get("family") or "microstructure_orderflow"}]
+
+    async def get_strategy_spec(self, strategy_id):
+        return {"strategy_id": strategy_id, "family": "microstructure_orderflow"} if strategy_id == "microstructure_ofi_v2" else None
+
+    async def list_strategy_regime_performance(self, **kwargs):
+        return [{"performance_id": "perf_1", "strategy_id": kwargs.get("strategy_id") or "microstructure_ofi_v2"}]
+
+    async def list_candidate_trade_packets(self, **kwargs):
+        return [{"packet_id": "packet_1"}]
+
+    async def list_council_reviews(self, **kwargs):
+        return [{"review_id": "council_1"}]
+
+    async def list_allocation_diversity_events(self, **kwargs):
+        return [{"event_id": "div_1"}]
+
+    async def list_bandit_recommendations(self, **kwargs):
+        return [{"recommendation_id": "bandit_1", "auto_apply_allowed": False}]
+
     async def get_evidence_pack(self, evidence_pack_id):
         return {"evidence_pack_id": evidence_pack_id} if evidence_pack_id == "ep_1" else None
 
@@ -82,6 +103,16 @@ def test_engine_readonly_routes_are_registered_and_auth_protected_in_dev():
     assert client.get("/engine/candidate-book/latest").json()["candidate_book_id"] == "book_1"
     assert client.get("/engine/ev-estimates").json()[0]["estimate_id"] == "ev_1"
     assert client.get("/engine/allocations").json()[0]["allocation_id"] == "alloc_1"
+    assert client.get("/engine/strategies").json()[0]["strategy_id"] == "microstructure_ofi_v2"
+    assert client.get("/engine/strategies/microstructure_ofi_v2").json()["strategy_id"] == "microstructure_ofi_v2"
+    assert client.get("/engine/strategy-regime-performance").json()[0]["performance_id"] == "perf_1"
+    assert client.get("/engine/strategy-regime-performance/microstructure_ofi_v2").json()[0]["strategy_id"] == "microstructure_ofi_v2"
+    assert client.post("/engine/strategy-regime-performance/refresh", json={"window_hours": 24}).json()["report_only"] is True
+    assert client.get("/engine/candidate-trade-packets").json()[0]["packet_id"] == "packet_1"
+    assert client.get("/engine/council-reviews").json()[0]["review_id"] == "council_1"
+    assert client.get("/engine/diversity-events").json()[0]["event_id"] == "div_1"
+    assert client.get("/engine/bandit-recommendations").json()[0]["recommendation_id"] == "bandit_1"
+    assert client.post("/engine/bandit-recommendations/run", json={"window_hours": 24}).json()["auto_apply_allowed"] is False
     assert client.get("/engine/evidence-packs/ep_1").json()["evidence_pack_id"] == "ep_1"
     assert client.get("/engine/debate-decisions").json()[0]["debate_decision_id"] == "dd_1"
     assert client.get("/engine/order-intents").json()[0]["intent_id"] == "intent_1"
