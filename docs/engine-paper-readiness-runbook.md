@@ -4,7 +4,7 @@
 
 Live execution remains forbidden. Do not enable private keys, signed exchange adapters, live order routes, `HYPERLIQUID_EXCHANGE_ENABLED`, `ALPACA_TRADING_ENABLED`, or `ENGINE_LIVE_ENABLED`.
 
-Repository defaults and `.env.example` are shadow-only. Paper mode is an explicit operator promotion step after `/engine/readiness` passes.
+Repository defaults and `.env.example` are shadow-only. Paper mode is an explicit operator promotion step after `/engine/readiness` passes. Use `docs/engine-shadow-observation-promotion-package.md` to collect the required clean-window evidence.
 
 ## Shadow-only baseline
 
