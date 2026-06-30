@@ -1,7 +1,7 @@
 """Add engine candidate evidence spine and outcome attribution.
 
-Revision ID: 0020_engine_candidate_outcome_evidence_spine
-Revises: 0019_engine_strategy_regime_council_learning
+Revision ID: 0020_candidate_outcome_spine
+Revises: 0019_strategy_regime_council
 """
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0020_engine_candidate_outcome_evidence_spine"
-down_revision = "0019_engine_strategy_regime_council_learning"
+revision = "0020_candidate_outcome_spine"
+down_revision = "0019_strategy_regime_council"
 branch_labels = None
 depends_on = None
 

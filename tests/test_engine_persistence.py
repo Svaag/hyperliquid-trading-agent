@@ -8,6 +8,7 @@ from hyperliquid_trading_agent.app.engine.schemas import BanditRecommendation
 def test_engine_strategy_regime_council_learning_migration_declares_tables():
     text = Path("alembic/versions/0019_engine_strategy_regime_council_learning.py").read_text()
 
+    assert 'revision = "0019_strategy_regime_council"' in text
     assert 'down_revision = "0018_liquidations"' in text
     for table in [
         "strategy_specs",
@@ -25,7 +26,8 @@ def test_engine_strategy_regime_council_learning_migration_declares_tables():
 def test_engine_candidate_outcome_evidence_spine_migration_declares_tables():
     text = Path("alembic/versions/0020_engine_candidate_outcome_evidence_spine.py").read_text()
 
-    assert 'down_revision = "0019_engine_strategy_regime_council_learning"' in text
+    assert 'revision = "0020_candidate_outcome_spine"' in text
+    assert 'down_revision = "0019_strategy_regime_council"' in text
     for table in [
         "candidate_evidence_links",
         "candidate_outcome_attributions",

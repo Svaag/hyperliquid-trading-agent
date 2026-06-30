@@ -1,6 +1,6 @@
 """Add engine strategy, council, diversity, and learning tables.
 
-Revision ID: 0019_engine_strategy_regime_council_learning
+Revision ID: 0019_strategy_regime_council
 Revises: 0018_liquidations
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0019_engine_strategy_regime_council_learning"
+revision = "0019_strategy_regime_council"
 down_revision = "0018_liquidations"
 branch_labels = None
 depends_on = None
