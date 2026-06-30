@@ -690,6 +690,8 @@ Implementation is complete when:
 
 
 
+
+
 <!-- pi-plan-progress:start -->
 ## Progress
 
@@ -700,7 +702,7 @@ Status legend: `[x]` done, `[~]` in progress, `[-]` skipped, `[>]` deferred, `[!
 - [x] 3. Expand feature ingestion and deterministic regime labeling. _(done)_
 - [x] 4. Implement Wave 1A strategies and adapters. _(done)_
 - [x] 5. Add allocation diversity control and fix allocation metadata persistence. _(done)_
-- [ ] 6. Add CandidateTradePacket and deterministic Agentic Council reviews. _(pending)_
+- [x] 6. Add CandidateTradePacket and deterministic Agentic Council reviews. _(done)_
 - [ ] 7. Add first-class persistence, repository methods, and API routes. _(pending)_
 - [ ] 8. Build strategy-regime performance scorecards. _(pending)_
 - [ ] 9. Upgrade replay comparison and readiness gate checks. _(pending)_

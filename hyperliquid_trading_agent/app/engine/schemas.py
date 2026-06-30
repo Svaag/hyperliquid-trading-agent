@@ -28,6 +28,8 @@ CandidateStatus = Literal[
 ]
 DebateOutcome = Literal["approve", "downgrade", "block", "require_more_data"]
 AllocationDecisionStatus = Literal["allocate", "skip", "reduce", "require_debate", "risk_rejected"]
+CouncilVoteDecision = Literal["allow", "warn", "veto", "needs_more_evidence"]
+CouncilReviewDecision = Literal["allow_shadow", "allow_paper", "reject", "needs_more_evidence"]
 OrderType = Literal["marketable_limit", "post_only", "twap", "vwap", "pov"]
 ExecutionStatus = Literal["accepted", "rejected", "filled", "partial", "cancelled", "expired"]
 PositionThesisState = Literal[
@@ -362,6 +364,69 @@ class AllocationDecision(BaseModel):
     def _validate_skip_size(self) -> Self:
         if self.status in {"skip", "risk_rejected"} and (self.allocated_size or self.allocated_notional_usd or self.risk_usd):
             raise ValueError("skipped/risk-rejected allocations cannot carry size or risk")
+        return self
+
+
+class CandidateTradePacket(BaseModel):
+    packet_id: str
+    candidate_id: str
+    strategy_id: str
+    strategy_version: str = "unknown"
+    strategy_family: str = "unknown"
+    asset: str
+    side: EngineSide
+    horizon: str
+    feature_snapshot_id: str
+    regime_snapshot_id: str
+    candidate: dict[str, Any] = Field(default_factory=dict)
+    ev_estimate: dict[str, Any] = Field(default_factory=dict)
+    allocation: dict[str, Any] = Field(default_factory=dict)
+    order_intent: dict[str, Any] | None = None
+    risk_decision: dict[str, Any] = Field(default_factory=dict)
+    replay_context: dict[str, Any] = Field(default_factory=dict)
+    created_at_ms: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("asset")
+    @classmethod
+    def _uppercase_asset(cls, value: str) -> str:
+        return value.upper().strip()
+
+
+class CouncilVote(BaseModel):
+    vote_id: str
+    review_id: str
+    role: str
+    decision: CouncilVoteDecision
+    rationale: str
+    vetoes: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    required_evidence: list[str] = Field(default_factory=list)
+    scores: dict[str, float] = Field(default_factory=dict)
+    created_at_ms: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CouncilReview(BaseModel):
+    review_id: str
+    packet_id: str
+    candidate_id: str
+    strategy_id: str
+    decision: CouncilReviewDecision
+    vetoes: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    required_evidence: list[str] = Field(default_factory=list)
+    regime_fit_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    strategy_regime_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    portfolio_impact_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    votes: list[CouncilVote] = Field(default_factory=list)
+    created_at_ms: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_reject_has_reason(self) -> Self:
+        if self.decision == "reject" and not self.vetoes:
+            raise ValueError("rejected council reviews require at least one veto")
         return self
 
 

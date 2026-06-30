@@ -3,6 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 from hyperliquid_trading_agent.app.engine.candidate_book import CandidateBook
+from hyperliquid_trading_agent.app.engine.council import (
+    DeterministicCouncil,
+    build_candidate_trade_packet,
+    council_allows_execution,
+)
 from hyperliquid_trading_agent.app.engine.debate_adjudicator import (
     DebateAdjudicator,
     EvidencePackBuilder,
@@ -60,6 +65,7 @@ class InstitutionalEngineService:
             repository=repository,
         )
         self.pack_builder = EvidencePackBuilder()
+        self.council = DeterministicCouncil()
         self.debate = DebateAdjudicator(repository)
         self.execution = ExecutionGateway(repository=repository)
         self.positions = PositionManager(repository)
@@ -74,6 +80,7 @@ class InstitutionalEngineService:
         self.order_intents_created = 0
         self.execution_reports_created = 0
         self.debate_count_today = 0
+        self.council_reviews_created = 0
         self.last_throttle_summary: dict[str, Any] = {}
         self.last_diversity_summary: dict[str, Any] = {}
 
@@ -88,6 +95,7 @@ class InstitutionalEngineService:
             "order_intents_created": self.order_intents_created,
             "execution_reports_created": self.execution_reports_created,
             "debate_count_today": self.debate_count_today,
+            "council_reviews_created": self.council_reviews_created,
             "last_throttle_summary": self.last_throttle_summary,
             "throttles": self.throttles.status(),
             "diversity": {**self.diversity.status(), "last_summary": self.last_diversity_summary},
@@ -178,6 +186,31 @@ class InstitutionalEngineService:
                     if allocation.status not in {"allocate", "reduce", "require_debate"}:
                         continue
                     current_loop_allocations.append(allocation)
+                    intent = self._order_intent(candidate, ev.model_version_id, allocation.allocation_id, allocation.allocated_size, allocation.allocated_notional_usd, ts)
+                    risk = await self.risk_gateway.check_order_intent(
+                        intent,
+                        market_snapshot={"last_price_at_ms": ts, "last_orderbook_at_ms": ts, "spread_bps": snapshot.features.get("spread_bps")},
+                        portfolio_snapshot=self._portfolio_snapshot(),
+                        strategy_snapshot={"net_ev_bps": ev.net_ev_bps, "regime_permission": True},
+                        operator_context={"kill_switch_active": False, "config_approved": True, "model_approved": ev.model_version_id == "deterministic_fallback_v1" or bool(self.settings.engine_approved_scorer_model_id)},
+                    )
+                    packet = build_candidate_trade_packet(candidate=candidate, ev=ev, allocation=allocation, order_intent=intent, risk_decision=risk, replay_context=await self._latest_replay_context(), created_at_ms=ts)
+                    await self._persist_candidate_trade_packet(packet)
+                    council_review = self.council.review(packet, regime)
+                    self.council_reviews_created += 1
+                    await self._persist_council_review(council_review)
+                    if not risk.allowed:
+                        allocation = allocation.model_copy(update={"status": "risk_rejected", "allocated_size": 0.0, "allocated_notional_usd": 0.0, "risk_usd": 0.0, "reason_codes": [*allocation.reason_codes, "risk_gateway_reject"]})
+                        allocation = self._enrich_allocation_metadata(allocation, candidate)
+                        current_loop_allocations.pop()
+                        await self._persist_allocation(allocation)
+                        continue
+                    if not council_allows_execution(council_review, execution_mode=intent.execution_mode):
+                        allocation = allocation.model_copy(update={"status": "skip", "allocated_size": 0.0, "allocated_notional_usd": 0.0, "risk_usd": 0.0, "reason_codes": [*allocation.reason_codes, f"council_{council_review.decision}"]})
+                        allocation = self._enrich_allocation_metadata(allocation, candidate)
+                        current_loop_allocations.pop()
+                        await self._persist_allocation(allocation)
+                        continue
                     priority = debate_priority(candidate, ev, allocation, regime, portfolio_equity=float(self._portfolio_snapshot().get("equity_usd") or 100_000))
                     if self.settings.engine_debate_enabled and self.debate_count_today < self.settings.engine_debate_max_per_day and priority >= self.settings.engine_debate_priority_min:
                         pack = self.pack_builder.build(candidate, ev, allocation, regime, feature_snapshot=snapshot.features)
@@ -204,16 +237,7 @@ class InstitutionalEngineService:
                         await self._persist_allocation(allocation)
                         if allocation.allocated_size <= 0:
                             continue
-                    intent = self._order_intent(candidate, ev.model_version_id, allocation.allocation_id, allocation.allocated_size, allocation.allocated_notional_usd, ts)
-                    risk = await self.risk_gateway.check_order_intent(
-                        intent,
-                        market_snapshot={"last_price_at_ms": ts, "last_orderbook_at_ms": ts, "spread_bps": snapshot.features.get("spread_bps")},
-                        portfolio_snapshot=self._portfolio_snapshot(),
-                        strategy_snapshot={"net_ev_bps": ev.net_ev_bps, "regime_permission": True},
-                        operator_context={"kill_switch_active": False, "config_approved": True, "model_approved": ev.model_version_id == "deterministic_fallback_v1" or bool(self.settings.engine_approved_scorer_model_id)},
-                    )
-                    if not risk.allowed:
-                        continue
+                        intent = self._order_intent(candidate, ev.model_version_id, allocation.allocation_id, allocation.allocated_size, allocation.allocated_notional_usd, ts)
                     report = await self.execution.submit(intent)
                     self.order_intents_created += 1
                     self.execution_reports_created += 1
@@ -402,6 +426,28 @@ class InstitutionalEngineService:
             record = getattr(self.repository, "record_evidence_pack", None)
             if callable(record):
                 await record(pack.model_dump(mode="json"))
+
+    async def _persist_candidate_trade_packet(self, packet) -> None:
+        if self.repository is not None and getattr(self.repository, "enabled", False):
+            record = getattr(self.repository, "record_candidate_trade_packet", None)
+            if callable(record):
+                await record(packet.model_dump(mode="json"))
+
+    async def _persist_council_review(self, review) -> None:
+        if self.repository is not None and getattr(self.repository, "enabled", False):
+            record = getattr(self.repository, "record_council_review", None)
+            if callable(record):
+                await record(review.model_dump(mode="json"))
+
+    async def _latest_replay_context(self) -> dict[str, Any]:
+        if self.repository is not None and getattr(self.repository, "enabled", False):
+            latest = getattr(self.repository, "get_latest_replay_comparison", None)
+            if callable(latest):
+                try:
+                    return dict(await latest() or {})
+                except Exception:
+                    return {}
+        return {}
 
     async def _persist_allocation(self, allocation) -> None:
         if self.repository is not None and getattr(self.repository, "enabled", False):
