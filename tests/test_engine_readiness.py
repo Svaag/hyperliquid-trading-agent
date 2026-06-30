@@ -98,6 +98,15 @@ class FakeReadinessRepository:
         return []
 
 
+def test_engine_settings_defaults_are_shadow_only():
+    settings = Settings(environment="test", _env_file=None)
+
+    assert settings.engine_shadow_enabled is True
+    assert settings.engine_paper_enabled is False
+    assert settings.engine_live_enabled is False
+    assert settings.engine_execution_mode_list == ["shadow"]
+
+
 def readiness_settings(**overrides) -> Settings:
     defaults = dict(
         environment="test",

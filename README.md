@@ -240,10 +240,12 @@ NEWS_SIGNAL_GENERATION_ENABLED=true
 NEWS_EVENT_RISK_BLOCKS_ENABLED=true
 NEWSWIRE_QUERIES=BTC,ETH,HYPE,Hyperliquid,Fed,CPI,FOMC,crypto liquidation
 
-# Institutional engine scaffold (paper/shadow only; live execution remains rejected)
+# Institutional engine scaffold (shadow-first; paper requires readiness promotion; live execution remains rejected)
 ENGINE_ENABLED=false
 ENGINE_MODE=paper_shadow
-ENGINE_EXECUTION_MODES=paper,shadow
+ENGINE_EXECUTION_MODES=shadow
+ENGINE_SHADOW_ENABLED=true
+ENGINE_PAPER_ENABLED=false
 ENGINE_LIVE_ENABLED=false
 ENGINE_MIN_NET_EV_BPS=8
 ENGINE_MIN_RISK_ADJUSTED_UTILITY=0.25

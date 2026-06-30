@@ -300,7 +300,7 @@ class Settings(BaseSettings):
 
     engine_enabled: bool = False
     engine_mode: Literal["paper_shadow"] = "paper_shadow"
-    engine_execution_modes: str = "paper,shadow"
+    engine_execution_modes: str = "shadow"
     engine_event_retention_days: int = 7
     engine_feature_retention_days: int = 14
     engine_rollup_retention_days: int = 365
@@ -315,7 +315,7 @@ class Settings(BaseSettings):
     engine_approved_scorer_model_id: str = ""
     engine_scorer_fallback_mode: Literal["deterministic"] = "deterministic"
     engine_shadow_enabled: bool = True
-    engine_paper_enabled: bool = True
+    engine_paper_enabled: bool = False
     engine_live_enabled: bool = False
     engine_validation_digest_enabled: bool = True
     engine_validation_digest_interval_seconds: int = 3600

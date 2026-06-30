@@ -4,8 +4,9 @@ This document tracks the new paper/shadow institutional trading engine path.
 
 ## Safety posture
 
-The engine is **paper/shadow only**:
+The engine is **shadow-first and paper/shadow only**:
 
+- defaults and examples keep paper disabled until readiness passes
 - no private-key handling
 - no signed exchange adapter
 - no route capable of submitting live orders
@@ -54,7 +55,9 @@ Key modules:
 ```env
 ENGINE_ENABLED=false
 ENGINE_MODE=paper_shadow
-ENGINE_EXECUTION_MODES=paper,shadow
+ENGINE_EXECUTION_MODES=shadow
+ENGINE_SHADOW_ENABLED=true
+ENGINE_PAPER_ENABLED=false
 ENGINE_LIVE_ENABLED=false
 ENGINE_VALIDATION_DIGEST_ENABLED=true
 ENGINE_VALIDATION_DIGEST_INTERVAL_SECONDS=3600
