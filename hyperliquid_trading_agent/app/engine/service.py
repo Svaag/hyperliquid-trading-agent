@@ -37,6 +37,7 @@ class InstitutionalEngineService:
         risk_gateway: RiskGateway,
         portfolio_service: Any | None = None,
         world_model_service: Any | None = None,
+        liquidation_bridge: Any | None = None,
     ):
         self.settings = settings
         self.repository = repository
@@ -44,6 +45,7 @@ class InstitutionalEngineService:
         self.risk_gateway = risk_gateway
         self.portfolio_service = portfolio_service
         self.world_model_service = world_model_service
+        self.liquidation_bridge = liquidation_bridge
         self.ledger = EventLedger(repository)
         self.feature_store = FeatureStore(repository)
         self.regime_engine = RegimeEngine()
@@ -105,6 +107,7 @@ class InstitutionalEngineService:
                     received_ts_ms=ts,
                 )
                 await self.feature_store.features_for_event(event)
+            await self._record_meta_and_asset_ctx_features(symbols=symbols, received_ts_ms=ts)
             # Add L2 for a bounded hot set to produce execution/microstructure features.
             for symbol in symbols[: max(1, self.settings.autonomy_max_hot_l2_assets)]:
                 try:
@@ -130,6 +133,7 @@ class InstitutionalEngineService:
             throttle_events = []
             for symbol in symbols:
                 await self._record_world_model_features(symbol)
+                await self._record_liquidation_features(symbol)
                 features = await self.feature_store.latest(asset=symbol, limit=200)
                 if not features:
                     continue
@@ -231,6 +235,53 @@ class InstitutionalEngineService:
         except Exception:
             return {}
 
+    async def _record_meta_and_asset_ctx_features(self, *, symbols: list[str], received_ts_ms: int) -> None:
+        fetch = getattr(self.hyperliquid, "meta_and_asset_ctxs", None)
+        if not callable(fetch):
+            return
+        try:
+            raw = await fetch()
+        except Exception:
+            return
+        payload = _meta_and_asset_payload(raw)
+        event = await self.ledger.normalize_and_record(
+            event_type="meta_and_asset_ctxs",
+            source="hyperliquid",
+            provider="rest",
+            payload=payload,
+            asset_class="crypto",
+            symbols=symbols,
+            received_ts_ms=received_ts_ms,
+            metadata={"read_only": True},
+        )
+        await self.feature_store.features_for_event(event)
+
+    async def _record_liquidation_features(self, symbol: str) -> None:
+        if self.liquidation_bridge is None:
+            return
+        named_signals = getattr(self.liquidation_bridge, "named_signals", None)
+        if not callable(named_signals):
+            return
+        try:
+            payload = named_signals(symbol)
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        ts = now_ms()
+        event = await self.ledger.normalize_and_record(
+            event_type="liquidation_signal",
+            source="liquidation_signal_bridge",
+            provider=str(payload.get("venue") or "all"),
+            payload=payload,
+            asset_class="crypto",
+            symbols=[symbol],
+            event_ts_ms=_int_or_none(payload.get("as_of_ms")),
+            received_ts_ms=ts,
+            metadata={"read_only": True, "advisory_only": True},
+        )
+        await self.feature_store.features_for_event(event)
+
     def _portfolio_snapshot(self) -> dict[str, Any]:
         if self.portfolio_service is not None and callable(getattr(self.portfolio_service, "latest_snapshot", None)):
             snapshot = self.portfolio_service.latest_snapshot()
@@ -295,3 +346,18 @@ class InstitutionalEngineService:
             record = getattr(self.repository, "record_allocation_decision", None)
             if callable(record):
                 await record(allocation.model_dump(mode="json"))
+
+
+def _meta_and_asset_payload(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, list) and len(raw) >= 2:
+        return {"meta": raw[0], "asset_ctxs": raw[1]}
+    return {"raw": raw}
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None

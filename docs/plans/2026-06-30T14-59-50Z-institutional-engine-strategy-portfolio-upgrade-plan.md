@@ -684,6 +684,8 @@ Implementation is complete when:
 
 
 
+
+
 <!-- pi-plan-progress:start -->
 ## Progress
 
@@ -691,7 +693,7 @@ Status legend: `[x]` done, `[~]` in progress, `[-]` skipped, `[>]` deferred, `[!
 
 - [x] 1. Make engine defaults and examples shadow-only. _(done)_
 - [x] 2. Add strategy metadata contracts and a strategy registry. _(done)_
-- [ ] 3. Expand feature ingestion and deterministic regime labeling. _(pending)_
+- [x] 3. Expand feature ingestion and deterministic regime labeling. _(done)_
 - [ ] 4. Implement Wave 1A strategies and adapters. _(pending)_
 - [ ] 5. Add allocation diversity control and fix allocation metadata persistence. _(pending)_
 - [ ] 6. Add CandidateTradePacket and deterministic Agentic Council reviews. _(pending)_

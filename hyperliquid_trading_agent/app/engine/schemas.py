@@ -209,6 +209,16 @@ class RegimeVector(BaseModel):
     implied_vol_percentile: float | None = Field(default=None, ge=0.0, le=1.0)
     liquidity_state: LiquidityState = "unknown"
     spread_state: SpreadState = "unknown"
+    volatility_state: str = "unknown"
+    funding_state: str = "unknown"
+    oi_state: str = "unknown"
+    liquidation_state: str = "unknown"
+    orderflow_state: str = "unknown"
+    news_state: str = "no_event"
+    correlation_state: str = "unknown"
+    session_state: str = "unknown"
+    feature_coverage_pct: float = Field(default=0.0, ge=0.0, le=100.0)
+    regime_label: str = "unknown"
     funding_stress_z: float | None = None
     open_interest_velocity_z: float | None = None
     liquidation_imbalance_z: float | None = None

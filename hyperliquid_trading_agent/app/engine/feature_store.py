@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import statistics
+from itertools import pairwise
 from typing import Any
 
 from hyperliquid_trading_agent.app.engine.event_ledger import now_ms
@@ -29,7 +30,12 @@ class FeatureStore:
         features = derive_features(event)
         for feature in features:
             await self.record(feature)
-        return features
+        rollups: list[FeatureValue] = []
+        for asset in sorted({feature.asset for feature in features}):
+            rollups.extend(derive_rolling_features(asset=asset, features=list(self._features.values())))
+        for feature in rollups:
+            await self.record(feature)
+        return [*features, *rollups]
 
     async def features_for_world_model_snapshot(self, *, asset: str, snapshot: Any) -> list[FeatureValue]:
         features = derive_world_model_features(asset=asset, snapshot=snapshot)
@@ -78,6 +84,8 @@ def derive_features(event: NormalizedEvent) -> list[FeatureValue]:
         return _news_features(event)
     if event.event_type in {"asset_ctx", "meta_and_asset_ctxs", "funding_oi"}:
         return _funding_oi_features(event)
+    if event.event_type in {"liquidation_signal", "liquidation_features"}:
+        return _liquidation_features(event)
     return []
 
 
@@ -217,17 +225,136 @@ def _news_features(event: NormalizedEvent) -> list[FeatureValue]:
 
 
 def _funding_oi_features(event: NormalizedEvent) -> list[FeatureValue]:
-    symbol = (event.symbols[0] if event.symbols else str(event.payload.get("coin") or event.payload.get("symbol") or "")).upper()
+    out: list[FeatureValue] = []
+    for symbol, ctx in _iter_asset_contexts(event):
+        funding = _float(ctx.get("funding") or ctx.get("funding_hourly"))
+        oi = _float(ctx.get("openInterest") or ctx.get("open_interest"))
+        day_volume = _float(ctx.get("dayNtlVlm") or ctx.get("day_volume_usd") or ctx.get("day_volume"))
+        if funding is not None:
+            out.append(_feature(event, asset=symbol, group="funding_oi", name="funding_hourly", value={"funding_hourly": funding}, scalar=funding))
+        if oi is not None:
+            out.append(_feature(event, asset=symbol, group="funding_oi", name="open_interest", value={"open_interest": oi}, scalar=oi))
+        if day_volume is not None:
+            out.append(_feature(event, asset=symbol, group="funding_oi", name="day_volume_usd", value={"day_volume_usd": day_volume}, scalar=day_volume))
+    return out
+
+
+def _iter_asset_contexts(event: NormalizedEvent) -> list[tuple[str, dict[str, Any]]]:
+    payload = event.payload or {}
+    contexts: list[Any] = []
+    universe: list[Any] = []
+    if isinstance(payload.get("asset_ctxs"), list):
+        contexts = payload.get("asset_ctxs") or []
+        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else payload
+        universe = meta.get("universe", []) if isinstance(meta.get("universe"), list) else []
+    elif isinstance(payload.get("contexts"), list):
+        contexts = payload.get("contexts") or []
+        universe = payload.get("universe", []) if isinstance(payload.get("universe"), list) else []
+    elif isinstance(payload.get("raw"), list) and len(payload["raw"]) >= 2:
+        meta = payload["raw"][0] if isinstance(payload["raw"][0], dict) else {}
+        contexts = payload["raw"][1] if isinstance(payload["raw"][1], list) else []
+        universe = meta.get("universe", []) if isinstance(meta.get("universe"), list) else []
+    else:
+        contexts = [payload]
+    out: list[tuple[str, dict[str, Any]]] = []
+    for idx, raw_ctx in enumerate(contexts):
+        if not isinstance(raw_ctx, dict):
+            continue
+        symbol = str(raw_ctx.get("coin") or raw_ctx.get("symbol") or raw_ctx.get("name") or "").upper()
+        if not symbol and idx < len(universe) and isinstance(universe[idx], dict):
+            symbol = str(universe[idx].get("name") or universe[idx].get("coin") or universe[idx].get("symbol") or "").upper()
+        if not symbol and idx < len(event.symbols):
+            symbol = event.symbols[idx]
+        if symbol:
+            out.append((symbol.upper(), raw_ctx))
+    return out
+
+
+def _liquidation_features(event: NormalizedEvent) -> list[FeatureValue]:
+    symbol = (event.symbols[0] if event.symbols else str(event.payload.get("symbol") or event.payload.get("coin") or "")).upper()
     if not symbol:
         return []
     out: list[FeatureValue] = []
-    funding = _float(event.payload.get("funding") or event.payload.get("funding_hourly"))
-    oi = _float(event.payload.get("openInterest") or event.payload.get("open_interest"))
-    if funding is not None:
-        out.append(_feature(event, asset=symbol, group="funding_oi", name="funding_hourly", value={"funding_hourly": funding}, scalar=funding))
-    if oi is not None:
-        out.append(_feature(event, asset=symbol, group="funding_oi", name="open_interest", value={"open_interest": oi}, scalar=oi))
+    feature_map = {
+        "liq_notional_1m": "liq_notional_1m",
+        "liq_notional_5m": "liq_notional_5m",
+        "long_vs_short_liq_imbalance_5m": "long_vs_short_liq_imbalance_5m",
+        "largest_single_liq_5m": "largest_single_liq_5m",
+        "confirmed_only_liq_score_5m": "confirmed_only_liq_score_5m",
+        "event_count_5m": "liq_event_count_5m",
+        "liq_event_count_5m": "liq_event_count_5m",
+    }
+    for source_key, feature_name in feature_map.items():
+        value = _float(event.payload.get(source_key))
+        if value is not None:
+            out.append(_feature(event, asset=symbol, group="liquidations", name=feature_name, value={feature_name: value}, scalar=value))
+    source_mix = event.payload.get("source_mix_5m")
+    if isinstance(source_mix, dict):
+        out.append(_feature(event, asset=symbol, group="liquidations", name="source_mix_5m", value={"source_mix_5m": source_mix}, scalar=None))
     return out
+
+
+def derive_rolling_features(*, asset: str, features: list[FeatureValue], as_of_ms: int | None = None) -> list[FeatureValue]:
+    asset = asset.upper()
+    cutoff = as_of_ms or max((item.computed_ts_ms for item in features if item.asset == asset), default=now_ms())
+    mids = _series(features, asset=asset, feature_name="mid", as_of_ms=cutoff)
+    oi = _series(features, asset=asset, feature_name="open_interest", as_of_ms=cutoff)
+    out: list[FeatureValue] = []
+    if len(mids) >= 2:
+        latest_ts, latest_mid = mids[-1]
+        for window_ms, name in ((60_000, "mid_return_1m_bps"), (300_000, "mid_return_5m_bps"), (900_000, "mid_return_15m_bps")):
+            baseline = _baseline(mids, latest_ts - window_ms)
+            if baseline is not None and baseline > 0:
+                value = (latest_mid - baseline) / baseline * 10_000
+                out.append(_rollup_feature(asset=asset, name=name, value=value, computed_ts_ms=cutoff))
+        for window_ms, name in ((300_000, "realized_vol_5m_bps"), (900_000, "realized_vol_15m_bps")):
+            values = [mid for ts, mid in mids if ts >= latest_ts - window_ms]
+            returns = [(cur - prev) / prev * 10_000 for prev, cur in pairwise(values) if prev > 0]
+            if len(returns) >= 2:
+                out.append(_rollup_feature(asset=asset, name=name, value=statistics.pstdev(returns), computed_ts_ms=cutoff))
+    if len(oi) >= 2:
+        latest_ts, latest_oi = oi[-1]
+        baseline = _baseline(oi, latest_ts - 300_000)
+        if baseline is not None and baseline > 0:
+            out.append(_rollup_feature(asset=asset, name="oi_delta_5m_pct", value=(latest_oi - baseline) / baseline * 100.0, computed_ts_ms=cutoff))
+        changes = [cur - prev for prev, cur in pairwise([value for _, value in oi[-12:]])]
+        velocity = zscore(changes)
+        if velocity is not None:
+            out.append(_rollup_feature(asset=asset, name="oi_velocity_z", value=velocity, computed_ts_ms=cutoff))
+    return out
+
+
+def _series(features: list[FeatureValue], *, asset: str, feature_name: str, as_of_ms: int) -> list[tuple[int, float]]:
+    points = [
+        (item.computed_ts_ms, float(item.scalar_value))
+        for item in features
+        if item.asset == asset and item.feature_name == feature_name and item.scalar_value is not None and item.computed_ts_ms <= as_of_ms
+    ]
+    return sorted(points, key=lambda item: item[0])
+
+
+def _baseline(series: list[tuple[int, float]], target_ts_ms: int) -> float | None:
+    before = [value for ts, value in series if ts <= target_ts_ms]
+    if before:
+        return before[-1]
+    return series[0][1] if series else None
+
+
+def _rollup_feature(*, asset: str, name: str, value: float, computed_ts_ms: int) -> FeatureValue:
+    fid = "feat_" + hashlib.sha1(f"engine_rollup:{asset}:{name}:{computed_ts_ms}".encode()).hexdigest()[:24]
+    return FeatureValue(
+        feature_id=fid,
+        asset=asset,
+        feature_group="rollup",
+        feature_name=name,
+        value={name: value},
+        scalar_value=value,
+        received_ts_ms=computed_ts_ms,
+        computed_ts_ms=computed_ts_ms,
+        source="engine_rollup",
+        version=FEATURE_VERSION,
+        metadata={"deterministic": True},
+    )
 
 
 def percentile_rank(values: list[float], latest: float) -> float | None:

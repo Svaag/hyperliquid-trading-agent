@@ -51,6 +51,7 @@ from hyperliquid_trading_agent.app.hyperliquid.sdk_info_client import SDKInfoCli
 from hyperliquid_trading_agent.app.hyperliquid.ws_worker import HyperliquidWebSocketWorker
 from hyperliquid_trading_agent.app.liquidations.routes import register_liquidation_routes
 from hyperliquid_trading_agent.app.liquidations.service import LiquidationService
+from hyperliquid_trading_agent.app.liquidations.signals import LiquidationSignalBridge
 from hyperliquid_trading_agent.app.logging import configure_logging, get_logger
 from hyperliquid_trading_agent.app.metrics import SERVICE_INFO, UP
 from hyperliquid_trading_agent.app.news.service import NewsService
@@ -124,6 +125,7 @@ async def lifespan(app: FastAPI):
     # Liquidation flow monitor: independent of the trading runtime profiles — it is
     # a public observability surface, gated only by its own feature flag.
     liquidation_service = LiquidationService(settings, sessionmaker) if settings.liquidations_enabled else None
+    liquidation_signal_bridge = LiquidationSignalBridge(liquidation_service) if liquidation_service is not None else None
     decision_context_recorder = DecisionContextRecorder(settings=settings, repository=repository, code_version=__version__)
     await decision_context_recorder.snapshot_startup()
     hyperliquid = HyperliquidClient(settings=settings)
@@ -235,6 +237,7 @@ async def lifespan(app: FastAPI):
         risk_gateway=risk_gateway,
         portfolio_service=autonomy_service.portfolio,
         world_model_service=world_model_service,
+        liquidation_bridge=liquidation_signal_bridge,
     )
     autonomy_service.engine_service = engine_service
     report_service.portfolio_service = autonomy_service.portfolio
