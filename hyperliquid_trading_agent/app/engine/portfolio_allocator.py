@@ -36,6 +36,9 @@ class PortfolioAllocator:
         equity = float(portfolio_state.get("equity_usd") or portfolio_state.get("initial_equity_usd") or 100_000)
         reason_codes: list[str] = []
         status = "allocate"
+        if candidate.side == "flat":
+            reason_codes.append("defensive_flat_no_trade")
+            status = "skip"
         if ev.net_ev_bps < self.min_net_ev_bps:
             reason_codes.append("net_ev_below_minimum")
             status = "skip"

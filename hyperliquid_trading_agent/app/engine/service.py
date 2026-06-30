@@ -142,6 +142,7 @@ class InstitutionalEngineService:
                 snapshot = self.feature_store.snapshot(asset=symbol)
                 symbol_candidates = []
                 for strategy in self.strategies:
+                    await self._prepare_strategy(strategy, timestamp_ms=ts)
                     symbol_candidates.extend(strategy.generate(snapshot, regime, timestamp_ms=ts))
                 symbol_candidates = symbol_candidates[: self.settings.engine_max_candidates_per_loop]
                 symbol_candidates, symbol_throttle_events = await self.throttles.filter_candidates(symbol_candidates, repository=self.repository, timestamp_ms=ts)
@@ -234,6 +235,11 @@ class InstitutionalEngineService:
             return out
         except Exception:
             return {}
+
+    async def _prepare_strategy(self, strategy: Any, *, timestamp_ms: int) -> None:
+        refresh = getattr(strategy, "refresh_from_repository", None)
+        if callable(refresh):
+            await refresh(self.repository, now_ms=timestamp_ms)
 
     async def _record_meta_and_asset_ctx_features(self, *, symbols: list[str], received_ts_ms: int) -> None:
         fetch = getattr(self.hyperliquid, "meta_and_asset_ctxs", None)

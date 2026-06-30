@@ -12,6 +12,7 @@ from hyperliquid_trading_agent.app.engine.alpha.directional import (
 from hyperliquid_trading_agent.app.engine.alpha.equity import EquityOptionsFlowStrategy
 from hyperliquid_trading_agent.app.engine.alpha.microstructure import MicrostructureOFIStrategy
 from hyperliquid_trading_agent.app.engine.alpha.news_event import NewsEventAlphaStrategy
+from hyperliquid_trading_agent.app.engine.alpha.wave1a import wave_1a_specs, wave_1a_strategy_instances
 from hyperliquid_trading_agent.app.engine.schemas import StrategySpec
 
 
@@ -101,6 +102,7 @@ def default_strategy_instances() -> list[AlphaStrategy]:
         SupportResistanceReversionStrategy(),
         MicrostructureOFIStrategy(),
         NewsEventAlphaStrategy(),
+        *wave_1a_strategy_instances(),
         EquityOptionsFlowStrategy(),
     ]
 
@@ -116,121 +118,6 @@ def create_default_strategy_registry(*, include_planned_wave_1a_specs: bool = Tr
 
 
 def planned_wave_1a_specs() -> list[StrategySpec]:
-    """Specs for the accepted Wave 1A nucleus before implementation lands."""
+    """Specs for the accepted Wave 1A nucleus."""
 
-    return [
-        StrategySpec(
-            strategy_id="microstructure_ofi_v2",
-            version="2.0.0",
-            family="microstructure_orderflow",
-            supported_assets=["BTC", "ETH", "HYPE"],
-            supported_venues=["hyperliquid"],
-            supported_horizons=["3m", "5m"],
-            required_features=["mid", "spread_bps", "top_imbalance", "realized_vol_5m_bps"],
-            valid_regimes=["balanced", "buy_pressure", "sell_pressure"],
-            max_candidates_per_run=1,
-            max_allocation_share_pct=45.0,
-            cooldown_ms=45_000,
-            min_confidence=0.30,
-            min_ev_bps=8.0,
-            risk_tags=["microstructure", "ofi", "short_horizon"],
-        ),
-        StrategySpec(
-            strategy_id="liquidation_cascade_v1",
-            version="1.0.0",
-            family="liquidation_pressure",
-            supported_assets=["BTC", "ETH", "HYPE"],
-            supported_venues=["hyperliquid"],
-            supported_horizons=["5m", "15m"],
-            required_features=["mid", "spread_bps", "liq_notional_5m", "long_vs_short_liq_imbalance_5m"],
-            valid_regimes=["long_flush", "short_squeeze", "mixed"],
-            max_candidates_per_run=1,
-            max_allocation_share_pct=45.0,
-            cooldown_ms=120_000,
-            min_confidence=0.35,
-            min_ev_bps=10.0,
-            risk_tags=["liquidation", "cascade", "momentum"],
-        ),
-        StrategySpec(
-            strategy_id="liquidation_mean_revert_v1",
-            version="1.0.0",
-            family="liquidation_pressure",
-            supported_assets=["BTC", "ETH", "HYPE"],
-            supported_venues=["hyperliquid"],
-            supported_horizons=["15m"],
-            required_features=["mid", "spread_bps", "liq_notional_5m", "largest_single_liq_5m"],
-            valid_regimes=["long_flush", "short_squeeze", "mixed"],
-            max_candidates_per_run=1,
-            max_allocation_share_pct=45.0,
-            cooldown_ms=300_000,
-            min_confidence=0.35,
-            min_ev_bps=8.0,
-            risk_tags=["liquidation", "mean_reversion", "flush_exhaustion"],
-        ),
-        StrategySpec(
-            strategy_id="funding_carry_v1",
-            version="1.0.0",
-            family="funding_basis",
-            supported_assets=["BTC", "ETH", "HYPE"],
-            supported_venues=["hyperliquid"],
-            supported_horizons=["1h", "4h"],
-            required_features=["mid", "funding_hourly", "realized_vol_15m_bps"],
-            valid_regimes=["positive_extreme", "negative_extreme", "neutral"],
-            max_candidates_per_run=1,
-            max_allocation_share_pct=45.0,
-            cooldown_ms=900_000,
-            min_confidence=0.40,
-            min_ev_bps=8.0,
-            risk_tags=["funding", "carry", "basis"],
-        ),
-        StrategySpec(
-            strategy_id="oi_breakout_v1",
-            version="1.0.0",
-            family="trend_following",
-            supported_assets=["BTC", "ETH", "HYPE"],
-            supported_venues=["hyperliquid"],
-            supported_horizons=["15m", "30m"],
-            required_features=["mid", "mid_return_5m_bps", "oi_delta_5m_pct", "spread_bps"],
-            valid_regimes=["expanding", "bull", "bear"],
-            max_candidates_per_run=1,
-            max_allocation_share_pct=45.0,
-            cooldown_ms=300_000,
-            min_confidence=0.35,
-            min_ev_bps=8.0,
-            risk_tags=["open_interest", "breakout", "trend"],
-        ),
-        StrategySpec(
-            strategy_id="legacy_signal_adapter_v1",
-            version="1.0.0",
-            family="legacy_bridge",
-            supported_assets=["BTC", "ETH", "HYPE"],
-            supported_venues=["hyperliquid"],
-            supported_horizons=["15m", "30m", "1h"],
-            required_features=["mid"],
-            valid_regimes=["unknown", "bull", "bear", "range"],
-            max_candidates_per_run=5,
-            max_allocation_share_pct=25.0,
-            cooldown_ms=60_000,
-            min_confidence=0.30,
-            min_ev_bps=8.0,
-            risk_tags=["legacy", "adapter"],
-            counts_for_breadth=False,
-        ),
-        StrategySpec(
-            strategy_id="regime_defensive_flat_v1",
-            version="1.0.0",
-            family="risk_off_defensive",
-            supported_assets=["BTC", "ETH", "HYPE"],
-            supported_venues=["hyperliquid"],
-            supported_horizons=["loop"],
-            required_features=["mid"],
-            valid_regimes=["extreme", "impaired", "risk_off"],
-            max_candidates_per_run=3,
-            max_allocation_share_pct=0.0,
-            cooldown_ms=60_000,
-            min_confidence=0.0,
-            min_ev_bps=0.0,
-            risk_tags=["defensive", "flat", "risk_off"],
-            counts_for_breadth=False,
-        ),
-    ]
+    return wave_1a_specs()
