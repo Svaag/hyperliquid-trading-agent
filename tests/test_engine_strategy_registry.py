@@ -4,8 +4,8 @@ import pytest
 
 from hyperliquid_trading_agent.app.engine.alpha.directional import DirectionalMomentumStrategy
 from hyperliquid_trading_agent.app.engine.strategy_registry import (
-    StrategyRegistry,
     WAVE_1A_NUCLEUS_IDS,
+    StrategyRegistry,
     create_default_strategy_registry,
     planned_wave_1a_specs,
 )

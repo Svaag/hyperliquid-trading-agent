@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import anyio
 
-from hyperliquid_trading_agent.app.engine.attribution import CandidateOutcomeAttributionService, OUTCOME_WINDOWS_MS
+from hyperliquid_trading_agent.app.engine.attribution import OUTCOME_WINDOWS_MS, CandidateOutcomeAttributionService
 from hyperliquid_trading_agent.app.engine.schemas import AllocationDecision, AlphaCandidate, CouncilReview, EVEstimate
 
 

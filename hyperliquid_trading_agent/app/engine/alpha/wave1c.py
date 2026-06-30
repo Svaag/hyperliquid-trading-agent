@@ -3,7 +3,11 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-from hyperliquid_trading_agent.app.engine.alpha.base import CORE_CRYPTO_ASSETS, HYPERLIQUID_VENUES, candidate_contract_fields
+from hyperliquid_trading_agent.app.engine.alpha.base import (
+    CORE_CRYPTO_ASSETS,
+    HYPERLIQUID_VENUES,
+    candidate_contract_fields,
+)
 from hyperliquid_trading_agent.app.engine.schemas import AlphaCandidate, FeatureSnapshot, RegimeVector, StrategySpec
 
 

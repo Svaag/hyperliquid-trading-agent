@@ -9,7 +9,11 @@ from hyperliquid_trading_agent.app.engine.alpha.wave1c import (
     VolatilityCompressionBreakoutStrategy,
 )
 from hyperliquid_trading_agent.app.engine.schemas import FeatureSnapshot, RegimeVector
-from hyperliquid_trading_agent.app.engine.strategy_registry import WAVE_1C_DETERMINISTIC_IDS, create_default_strategy_registry, planned_wave_1c_specs
+from hyperliquid_trading_agent.app.engine.strategy_registry import (
+    WAVE_1C_DETERMINISTIC_IDS,
+    create_default_strategy_registry,
+    planned_wave_1c_specs,
+)
 
 
 def _snapshot(features: dict) -> FeatureSnapshot:

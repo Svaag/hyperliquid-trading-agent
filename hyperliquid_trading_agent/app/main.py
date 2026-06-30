@@ -60,6 +60,8 @@ from hyperliquid_trading_agent.app.newswire.consumers.discord_news import Discor
 from hyperliquid_trading_agent.app.newswire.enrich import Enricher
 from hyperliquid_trading_agent.app.newswire.gateway import register_newswire_routes
 from hyperliquid_trading_agent.app.newswire.service import NewswireService
+from hyperliquid_trading_agent.app.orchestration.routes import register_orchestration_routes
+from hyperliquid_trading_agent.app.orchestration.wave_supervisor import WaveSupervisor
 from hyperliquid_trading_agent.app.tracking.alerts import DiscordAlertSink
 from hyperliquid_trading_agent.app.tracking.service import PositionTrackingService
 from hyperliquid_trading_agent.app.tradfi.alpaca_provider import AlpacaTradFiProvider
@@ -279,6 +281,7 @@ async def lifespan(app: FastAPI):
     )
     world_model_adapter_service = WorldModelAdapterService(settings=settings, world_model_service=world_model_service)
     world_model_stream_service = WorldModelStreamService(settings=settings, world_model_service=world_model_service)
+    wave_supervisor = WaveSupervisor(settings=settings, repository=repository, engine_service=engine_service)
 
     app.state.engine = engine
     app.state.repository = repository
@@ -313,6 +316,7 @@ async def lifespan(app: FastAPI):
     app.state.flow_enricher = flow_enricher
     app.state.equity_paper = equity_paper
     app.state.equity_signal_generator = equity_signal_generator
+    app.state.wave_supervisor = wave_supervisor
 
     bot_task: asyncio.Task | None = None
     ws_task: asyncio.Task | None = None
@@ -347,6 +351,8 @@ async def lifespan(app: FastAPI):
         log.info("newswire_started")
     if settings.world_model_streams_enabled and not dashboard_only:
         await world_model_stream_service.start()
+    if settings.orchestration_wave_supervisor_enabled and not restricted_runtime:
+        await wave_supervisor.start()
     if liquidation_service is not None:
         await liquidation_service.start()
         log.info("liquidation_service_task_started")
@@ -356,6 +362,8 @@ async def lifespan(app: FastAPI):
         UP.set(0)
         if liquidation_service is not None:
             await liquidation_service.stop()
+        if settings.orchestration_wave_supervisor_enabled and not restricted_runtime:
+            await wave_supervisor.stop()
         if not restricted_runtime:
             await bot.stop()
         if settings.world_model_streams_enabled and not dashboard_only:
@@ -486,6 +494,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "debate_priority_min": settings.engine_debate_priority_min,
                 "min_net_ev_bps": settings.engine_min_net_ev_bps,
                 "min_risk_adjusted_utility": settings.engine_min_risk_adjusted_utility,
+            },
+            "orchestration": {
+                "wave_supervisor": app.state.wave_supervisor.status() if getattr(app.state, "wave_supervisor", None) is not None else {
+                    "enabled": settings.orchestration_wave_supervisor_enabled,
+                    "running": False,
+                    "handoff_repo": settings.orchestration_wave_supervisor_handoff_repo,
+                }
             },
             "world_model": app.state.world_model_service.status() if getattr(app.state, "world_model_service", None) is not None else {},
             "world_model_streams": app.state.world_model_stream_service.status() if getattr(app.state, "world_model_stream_service", None) is not None else {},
@@ -1212,6 +1227,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     register_engine_routes(app, settings, _require_agent_api)
+    register_orchestration_routes(app, settings, _require_agent_api)
     register_hip4_routes(app, settings, _require_agent_api)
     register_newswire_routes(app)
     return app

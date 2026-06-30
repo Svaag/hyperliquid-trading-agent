@@ -117,6 +117,22 @@ The engine PnL attribution loop marks simulated paper/shadow positions from Hype
 
 See `docs/engine-paper-readiness-runbook.md` for promotion and rollback steps.
 
+## Agentic wave orchestration
+
+The optional Wave Supervisor automates observation, diagnosis, report-only maintenance, bounded blocker escalation, and verification prep without directly mutating config. It may refresh strategy-regime performance, run current-config replay comparisons, emit `agent-core` traces, and render LHP-compatible handoff payloads for Engineering Loop/NOC review. Actual Wave 1C enablement, paper promotion, deploys, and any Wave 2 work still require a draft PR or signed operator change; the supervisor never flips `ENGINE_WAVE1C_ENABLED`, `ENGINE_WAVE2_ENABLED`, paper, or live flags by itself.
+
+Key flags:
+
+- `ORCHESTRATION_WAVE_SUPERVISOR_ENABLED=false`
+- `ORCHESTRATION_WAVE_SUPERVISOR_ESCALATION_ENABLED=false`
+- `ORCHESTRATION_WAVE_SUPERVISOR_ESCALATION_TRANSPORT=disabled|github_issue`
+- `AGENT_CORE_TRACE_ENABLED=false`
+
+Endpoints:
+
+- `GET /orchestration/wave/status`
+- `POST /orchestration/wave/run-once`
+
 ## Read-only API
 
 Protected by the existing agent API token outside dev/test/local:
@@ -160,6 +176,8 @@ GET /engine/readiness
 GET /engine/replay-comparisons
 GET /engine/replay-comparisons/latest
 POST /engine/replay-comparisons/run
+GET /orchestration/wave/status
+POST /orchestration/wave/run-once
 GET /engine/dashboard
 GET /dashboard
 GET /dashboard/data

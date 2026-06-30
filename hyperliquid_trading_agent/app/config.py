@@ -385,6 +385,24 @@ class Settings(BaseSettings):
     engine_pnl_attribution_max_position_age_hours: int = 48
     engine_pnl_attribution_min_mark_interval_seconds: int = 60
 
+    # Agentic wave orchestration. These flags enable observation/diagnosis,
+    # report-only maintenance, trace emission, and bounded handoff escalation.
+    # They must not directly mutate runtime wave, paper, or live-execution flags.
+    orchestration_wave_supervisor_enabled: bool = False
+    orchestration_wave_supervisor_interval_seconds: int = 900
+    orchestration_wave_supervisor_maintenance_enabled: bool = True
+    orchestration_wave_supervisor_bandit_enabled: bool = False
+    orchestration_wave_supervisor_escalation_enabled: bool = False
+    orchestration_wave_supervisor_escalation_transport: Literal["disabled", "github_issue"] = "disabled"
+    orchestration_wave_supervisor_handoff_repo: str = "Svaag/hyperliquid-trading-agent"
+    orchestration_wave_supervisor_handoff_labels: str = "loop:candidate,hyperliquid-wave"
+    orchestration_wave_supervisor_github_token: str = ""
+    orchestration_wave_supervisor_request_timeout_seconds: float = 10.0
+    agent_core_trace_enabled: bool = False
+    agent_core_trace_path: str = ""
+    agent_core_trace_collector_url: str = ""
+    agent_core_trace_collector_token: str = ""
+
     autonomy_evaluation_enabled: bool = True
     autonomy_event_evaluation_enabled: bool = True
     autonomy_memory_enabled: bool = True
