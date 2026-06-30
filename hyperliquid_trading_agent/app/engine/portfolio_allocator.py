@@ -77,10 +77,6 @@ class PortfolioAllocator:
             reason_codes=reason_codes,
             created_at_ms=now_ms(),
         )
-        if self.repository is not None and getattr(self.repository, "enabled", False):
-            record = getattr(self.repository, "record_allocation_decision", None)
-            if callable(record):
-                await record(allocation.model_dump(mode="json"))
         return allocation
 
 

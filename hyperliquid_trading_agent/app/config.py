@@ -340,6 +340,15 @@ class Settings(BaseSettings):
     engine_readiness_min_allocation_rate_pct: float = 5.0
     engine_readiness_max_allocation_rate_pct: float = 60.0
     engine_readiness_max_strategy_allocation_share_pct: float = 55.0
+    engine_diversity_controller_enabled: bool = True
+    engine_diversity_lookback_hours: int = 24
+    engine_diversity_strategy_target_share_pct: float = 45.0
+    engine_diversity_strategy_hard_share_pct: float = 55.0
+    engine_diversity_family_hard_share_pct: float = 60.0
+    engine_diversity_symbol_strategy_hard_share_pct: float = 35.0
+    engine_diversity_min_active_strategies_24h: int = 5
+    engine_diversity_min_active_families_24h: int = 3
+    engine_diversity_min_window_samples: int = 10
     engine_readiness_max_avg_slippage_bps: float = 8.0
     engine_readiness_max_fill_failure_rate_pct: float = 5.0
     engine_readiness_min_score_to_pass: int = 85

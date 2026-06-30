@@ -8,6 +8,7 @@ from hyperliquid_trading_agent.app.engine.debate_adjudicator import (
     EvidencePackBuilder,
     debate_priority,
 )
+from hyperliquid_trading_agent.app.engine.diversity import PortfolioDiversityController
 from hyperliquid_trading_agent.app.engine.event_ledger import EventLedger, now_ms
 from hyperliquid_trading_agent.app.engine.execution import ExecutionGateway
 from hyperliquid_trading_agent.app.engine.feature_store import FeatureStore
@@ -62,6 +63,7 @@ class InstitutionalEngineService:
         self.debate = DebateAdjudicator(repository)
         self.execution = ExecutionGateway(repository=repository)
         self.positions = PositionManager(repository)
+        self.diversity = PortfolioDiversityController(settings)
         self.throttles = StrategyThrottleController(settings)
         self.strategy_registry = create_default_strategy_registry()
         self.strategies = self.strategy_registry.strategies(enabled_only=True)
@@ -73,6 +75,7 @@ class InstitutionalEngineService:
         self.execution_reports_created = 0
         self.debate_count_today = 0
         self.last_throttle_summary: dict[str, Any] = {}
+        self.last_diversity_summary: dict[str, Any] = {}
 
     def status(self) -> dict[str, Any]:
         return {
@@ -87,6 +90,7 @@ class InstitutionalEngineService:
             "debate_count_today": self.debate_count_today,
             "last_throttle_summary": self.last_throttle_summary,
             "throttles": self.throttles.status(),
+            "diversity": {**self.diversity.status(), "last_summary": self.last_diversity_summary},
             "strategy_registry": self.strategy_registry.metadata(),
         }
 
@@ -131,6 +135,7 @@ class InstitutionalEngineService:
             executed = []
             current_loop_allocations = []
             throttle_events = []
+            diversity_decisions = []
             for symbol in symbols:
                 await self._record_world_model_features(symbol)
                 await self._record_liquidation_features(symbol)
@@ -153,7 +158,7 @@ class InstitutionalEngineService:
                     ev = await self.scorer.score(candidate, regime)
                     estimates[candidate.candidate_id] = ev
                     allocation = await self.allocator.allocate(candidate, ev, regime=regime, portfolio_state=self._portfolio_snapshot())
-                    allocation = allocation.model_copy(update={"metadata": {**allocation.metadata, "strategy_id": candidate.strategy_id}})
+                    allocation = self._enrich_allocation_metadata(allocation, candidate)
                     allowed_by_throttle, throttle_reasons, throttle_metadata = await self.throttles.allow_allocation(candidate, current_loop_allocations=current_loop_allocations, repository=self.repository, timestamp_ms=ts)
                     if not allowed_by_throttle:
                         allocation = allocation.model_copy(
@@ -166,8 +171,10 @@ class InstitutionalEngineService:
                                 "metadata": {**allocation.metadata, **throttle_metadata},
                             }
                         )
-                        await self._persist_allocation(allocation)
+                    allocation = await self.diversity.apply(candidate, allocation, current_loop_allocations=current_loop_allocations, repository=self.repository, timestamp_ms=ts)
+                    diversity_decisions.append(allocation.metadata.get("diversity", {}))
                     allocations[candidate.candidate_id] = allocation
+                    await self._persist_allocation(allocation)
                     if allocation.status not in {"allocate", "reduce", "require_debate"}:
                         continue
                     current_loop_allocations.append(allocation)
@@ -178,8 +185,23 @@ class InstitutionalEngineService:
                         debate = await self.debate.adjudicate_fallback(pack)
                         self.debate_count_today += 1
                         if debate.decision == "block":
+                            allocation = allocation.model_copy(
+                                update={
+                                    "status": "skip",
+                                    "allocated_size": 0.0,
+                                    "allocated_notional_usd": 0.0,
+                                    "risk_usd": 0.0,
+                                    "reason_codes": [*allocation.reason_codes, "debate_blocked"],
+                                }
+                            )
+                            allocation = self._enrich_allocation_metadata(allocation, candidate)
+                            current_loop_allocations.pop()
+                            await self._persist_allocation(allocation)
                             continue
                         allocation = allocation.model_copy(update={"allocated_size": allocation.allocated_size * debate.max_size_multiplier, "allocated_notional_usd": allocation.allocated_notional_usd * debate.max_size_multiplier, "risk_usd": allocation.risk_usd * debate.max_size_multiplier})
+                        allocation = self._enrich_allocation_metadata(allocation, candidate)
+                        current_loop_allocations[-1] = allocation
+                        await self._persist_allocation(allocation)
                         if allocation.allocated_size <= 0:
                             continue
                     intent = self._order_intent(candidate, ev.model_version_id, allocation.allocation_id, allocation.allocated_size, allocation.allocated_notional_usd, ts)
@@ -200,9 +222,10 @@ class InstitutionalEngineService:
             book = await self.candidate_book.snapshot(estimates, as_of_ms=ts)
             self.candidates_created += len(all_candidates)
             self.last_throttle_summary = self._throttle_summary(throttle_events=throttle_events, timestamp_ms=ts)
+            self.last_diversity_summary = self._diversity_summary(diversity_decisions=diversity_decisions, timestamp_ms=ts)
             self.last_run_at_ms = ts
             self.run_count += 1
-            return {"candidate_book_id": book.candidate_book_id, "candidates": len(all_candidates), "executed": len(executed), "throttle_events": len(throttle_events), "throttle_summary": self.last_throttle_summary}
+            return {"candidate_book_id": book.candidate_book_id, "candidates": len(all_candidates), "executed": len(executed), "throttle_events": len(throttle_events), "throttle_summary": self.last_throttle_summary, "diversity_summary": self.last_diversity_summary}
         except Exception as exc:
             self.last_error = type(exc).__name__
             raise
@@ -222,6 +245,39 @@ class InstitutionalEngineService:
             "by_strategy": by_strategy,
             "controller": self.throttles.status(),
         }
+
+    def _diversity_summary(self, *, diversity_decisions: list[dict[str, Any]], timestamp_ms: int) -> dict[str, Any]:
+        by_decision: dict[str, int] = {}
+        by_reason: dict[str, int] = {}
+        for item in diversity_decisions:
+            decision = str(item.get("decision") or "unknown")
+            by_decision[decision] = by_decision.get(decision, 0) + 1
+            for reason in item.get("reason_codes") or []:
+                by_reason[str(reason)] = by_reason.get(str(reason), 0) + 1
+        return {
+            "timestamp_ms": timestamp_ms,
+            "decision_count": len(diversity_decisions),
+            "by_decision": by_decision,
+            "by_reason": by_reason,
+            "controller": self.diversity.status(),
+        }
+
+    def _enrich_allocation_metadata(self, allocation, candidate: AlphaCandidate):
+        return allocation.model_copy(
+            update={
+                "metadata": {
+                    **allocation.metadata,
+                    "strategy_id": candidate.strategy_id,
+                    "strategy_version": candidate.strategy_version,
+                    "strategy_family": candidate.strategy_family,
+                    "asset": candidate.asset,
+                    "venue": candidate.venue,
+                    "counts_for_breadth": candidate.counts_for_breadth,
+                    "regime_snapshot_id": candidate.regime_snapshot_id,
+                    "feature_coverage_pct": candidate.feature_coverage_pct,
+                }
+            }
+        )
 
     async def _safe_all_mids(self) -> dict[str, float]:
         try:
