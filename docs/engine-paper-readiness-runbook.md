@@ -29,9 +29,12 @@ Paper mode may be promoted only when all are true:
 - Feature and regime coverage are at least 95% for core symbols.
 - Risk reject rate is at most 25%.
 - Allocation rate is between 5% and 60%.
-- Strategy allocation share is at most 55%.
+- Strategy allocation share is at most 55%, family share at most 60%, and symbol+strategy share at most 35%.
+- Candidate strategy metadata coverage is 100%.
+- RiskGateway coverage is 100% and Council review coverage is at least 95% for allocated candidates.
+- Strategy-regime evidence coverage is at least 80% with minimum score/sample thresholds.
 - Average simulated slippage is at most 8 bps.
-- Latest engine replay comparison is not `candidate_worse`.
+- Latest engine replay comparison is `passed` or `advisory_pass` for a >=24h, >=50-candidate window.
 - Discord engine validation digest is operational.
 - Unified `/dashboard` and `/engine/dashboard` are accessible.
 
@@ -41,8 +44,10 @@ Paper mode may be promoted only when all are true:
 2. Open `/engine/readiness` and save the JSON artifact.
 3. Open `/engine/validation-report` and save the JSON artifact.
 4. Run or inspect a 24h replay comparison via `/engine/replay-comparisons/latest`.
-5. Confirm the latest Discord digest has no critical alerts.
-6. Confirm no live execution configuration is present.
+5. Inspect `/engine/strategy-regime-performance`, `/engine/council-reviews`, and `/engine/diversity-events`.
+6. Optionally run `/engine/bandit-recommendations/run`; confirm all recommendations are report-only with `auto_apply_allowed=false`.
+7. Confirm the latest Discord digest has no critical alerts.
+8. Confirm no live execution configuration is present.
 
 ## Promotion to paper/shadow
 
@@ -61,6 +66,9 @@ Then rebuild/reload the service and immediately verify:
 GET /engine/status
 GET /engine/readiness
 GET /engine/validation-report
+GET /engine/strategy-regime-performance
+GET /engine/council-reviews
+GET /engine/replay-comparisons/latest
 ```
 
 ## Rollback to shadow-only

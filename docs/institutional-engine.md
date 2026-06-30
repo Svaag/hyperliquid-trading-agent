@@ -81,13 +81,19 @@ Alert conditions include stale engine loop, engine runtime errors, paper intents
 
 `GET /engine/readiness` returns a deterministic conservative promotion scorecard. Paper readiness is blocked by live flags, paper leakage during shadow-only mode, stale engine loops, runtime errors, insufficient shadow observation/sample size, missing core feature/regime data, critical risk-reject spikes, failed replay comparisons, and unhealthy PnL marking.
 
-The default gate requires 24h shadow observation, at least 100 engine runs, 250 candidates, 50 shadow intents, 95% EV/feature/regime coverage, risk rejects <=25%, allocation rate between 5% and 60%, strategy allocation share <=55%, average simulated slippage <=8 bps, no hard blocks, and score >=85.
+The default gate requires 24h shadow observation, at least 100 engine runs, 250 candidates, 50 shadow intents, 95% EV/feature/regime coverage, 100% candidate strategy metadata coverage, 95%+ Council review coverage, 100% RiskGateway coverage, at least 5 non-legacy alpha strategies across 3 families, strategy/family/symbol-strategy concentration below 55%/60%/35%, a latest replay with `passed` or `advisory_pass`, strategy-regime evidence, no hard blocks, and score >=85.
+
+## Strategy portfolio, Council, replay, and bandit reports
+
+Wave 1A registers `microstructure_ofi_v2`, `liquidation_cascade_v1`, `liquidation_mean_revert_v1`, `funding_carry_v1`, and `oi_breakout_v1` as alpha breadth. `legacy_signal_adapter_v1` and `regime_defensive_flat_v1` are registered but do not count as independent alpha breadth.
+
+Every allocated non-flat candidate builds a `CandidateTradePacket`, receives a deterministic role-based Council review, and must pass RiskGateway plus Council before a paper/shadow execution report can exist. The offline contextual-bandit endpoint is report-only: it writes recommendations with `auto_apply_allowed=false` and never mutates config, risk limits, or orders.
 
 ## Shadow replay, throttles, and PnL marking
 
 `POST /engine/replay-comparisons/run` stores immutable engine shadow comparison summaries in the existing `replay_results` storage shape with `proposal_id="engine:{variant_id}"` and `metadata.artifact_type="engine_shadow_comparison"`.
 
-Strategy throttles cap candidates and allocations per strategy and annotate throttled candidates/allocations without creating exchange actions.
+Strategy throttles cap candidates and allocations per strategy and annotate throttled candidates/allocations without creating exchange actions. The diversity controller additionally enforces 45% target strategy share, 55% hard strategy share, 60% family share, and 35% symbol+strategy share once the evidence window has enough samples.
 
 The engine PnL attribution loop marks simulated paper/shadow positions from Hyperliquid `all_mids`, records `pnl_attribution_records`, and closes simulated theses on stop/target/max-age conditions.
 
@@ -108,6 +114,16 @@ GET /engine/candidates/{candidate_id}
 GET /engine/candidate-book/latest
 GET /engine/ev-estimates
 GET /engine/allocations
+GET /engine/strategies
+GET /engine/strategies/{strategy_id}
+GET /engine/strategy-regime-performance
+GET /engine/strategy-regime-performance/{strategy_id}
+POST /engine/strategy-regime-performance/refresh
+GET /engine/candidate-trade-packets
+GET /engine/council-reviews
+GET /engine/diversity-events
+GET /engine/bandit-recommendations
+POST /engine/bandit-recommendations/run
 GET /engine/evidence-packs/{evidence_pack_id}
 GET /engine/debate-decisions
 GET /engine/order-intents
@@ -136,5 +152,6 @@ Alembic revisions:
 - `0012_candidate_ev_allocation_debate`
 - `0013_execution_position_reconciliation`
 - `0014_model_registry_retention`
+- `0019_engine_strategy_regime_council_learning`
 
-High-frequency event/feature data is intended for bounded retention and rollups; candidates, decisions, risk checks, evidence packs, execution reports, position theses, attribution, and governance records are durable audit artifacts.
+High-frequency event/feature data is intended for bounded retention and rollups; candidates, strategy specs, strategy-regime scorecards, Council reviews/votes, diversity events, bandit report-only recommendations, risk checks, evidence packs, execution reports, position theses, attribution, and governance records are durable audit artifacts.
