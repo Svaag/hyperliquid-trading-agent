@@ -14,6 +14,7 @@ from hyperliquid_trading_agent.app.engine.replay_compare import (
     latest_engine_replay_comparison,
     list_engine_replay_comparisons,
 )
+from hyperliquid_trading_agent.app.engine.strategy_performance import refresh_strategy_regime_performance
 from hyperliquid_trading_agent.app.engine.validation_report import (
     build_engine_validation_report,
     render_engine_validation_dashboard,
@@ -177,7 +178,10 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
     @app.post("/engine/strategy-regime-performance/refresh")
     async def engine_strategy_regime_performance_refresh(request: EngineStrategyRegimeRefreshRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _auth(authorization)
-        return {"status": "accepted", "report_only": True, "window_hours": request.window_hours, "created_at_ms": now_ms(), "refreshed_count": 0}
+        end_ms = now_ms()
+        start_ms = end_ms - request.window_hours * 3_600_000
+        rows = await refresh_strategy_regime_performance(_repo(), window_start_ms=start_ms, window_end_ms=end_ms)
+        return {"status": "completed", "report_only": True, "window_hours": request.window_hours, "created_at_ms": end_ms, "refreshed_count": len(rows), "rows": rows}
 
     @app.get("/engine/candidate-trade-packets")
     async def engine_candidate_trade_packets(candidate_id: str | None = None, strategy_id: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:

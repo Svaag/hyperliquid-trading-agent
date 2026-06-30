@@ -818,6 +818,17 @@ class Repository:
         return items[0] if items else None
 
     async def record_alpha_candidate(self, candidate: dict[str, Any]) -> str | None:
+        metadata = {
+            **dict(candidate.get("metadata") or {}),
+            "strategy_version": candidate.get("strategy_version", "unknown"),
+            "strategy_family": candidate.get("strategy_family", "unknown"),
+            "valid_regimes": list(candidate.get("valid_regimes") or []),
+            "required_features": list(candidate.get("required_features") or []),
+            "feature_coverage_pct": candidate.get("feature_coverage_pct", 0.0),
+            "expected_edge_bps": candidate.get("expected_edge_bps", 0.0),
+            "risk_tags": list(candidate.get("risk_tags") or []),
+            "counts_for_breadth": candidate.get("counts_for_breadth", True),
+        }
         return await self._merge_engine_record(
             AlphaCandidateRecord(
                 candidate_id=str(candidate["candidate_id"]),
@@ -840,7 +851,7 @@ class Repository:
                 status=str(candidate.get("status") or "new"),
                 created_at_ms=int(candidate.get("created_at_ms") or 0),
                 expires_at_ms=int(candidate.get("expires_at_ms") or 0),
-                metadata_json=redact_secrets(dict(candidate.get("metadata") or {})),
+                metadata_json=redact_secrets(metadata),
             ),
             "candidate_id",
         )
