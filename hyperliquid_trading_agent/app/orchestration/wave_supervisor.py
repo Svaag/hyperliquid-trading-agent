@@ -344,9 +344,10 @@ def classify_wave_state(settings: Settings, readiness: dict[str, Any], replay: d
     spine_blocks = [item for item in hard_blocks if _is_spine_code(str(item.get("code") or ""))]
     other_blocks = [item for item in hard_blocks if item not in wait_blocks and item not in breadth_blocks and item not in spine_blocks]
     replay_status = str((replay or {}).get("status") or "missing")
-    if replay is None and settings.engine_readiness_require_latest_replay:
+    existing_codes = {str(item.get("code") or "") for item in hard_blocks}
+    if replay is None and settings.engine_readiness_require_latest_replay and "replay_comparison_missing" not in existing_codes:
         spine_blocks.append({"code": "replay_comparison_missing", "severity": "critical", "detail": "Latest replay comparison is missing."})
-    elif replay_status == "failed":
+    elif replay_status == "failed" and "replay_comparison_failed" not in existing_codes:
         spine_blocks.append({"code": "replay_comparison_failed", "severity": "critical", "detail": f"Latest replay status={replay_status}."})
 
     if not settings.engine_enabled:
