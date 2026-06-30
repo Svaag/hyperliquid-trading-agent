@@ -51,6 +51,7 @@ ReplayMode = Literal["signal", "decision", "execution"]
 ReplayStatus = Literal["passed", "advisory_pass", "failed", "insufficient_data", "audit_only"]
 KillSwitchScope = Literal["strategy", "asset", "venue", "account", "global", "human_emergency", "deadman"]
 KillSwitchAction = Literal["armed", "triggered", "released", "expired"]
+OutcomeWindow = Literal["5m", "15m", "1h", "4h", "24h"]
 
 
 class NormalizedEvent(BaseModel):
@@ -367,6 +368,126 @@ class AllocationDecision(BaseModel):
         return self
 
 
+class CandidateEvidenceLink(BaseModel):
+    link_id: str
+    candidate_id: str
+    strategy_id: str
+    strategy_version: str = "unknown"
+    strategy_family: str = "unknown"
+    asset: str
+    venue: str = "hyperliquid"
+    horizon: str
+    regime_snapshot_id: str
+    feature_snapshot_id: str
+    risk_decision_id: str | None = None
+    council_review_id: str | None = None
+    replay_context_id: str | None = None
+    allocation_id: str | None = None
+    packet_id: str | None = None
+    outcome_window_ids: list[str] = Field(default_factory=list)
+    created_at_ms: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("asset")
+    @classmethod
+    def _uppercase_asset(cls, value: str) -> str:
+        return value.upper().strip()
+
+
+class CandidateOutcomeAttribution(BaseModel):
+    attribution_id: str
+    candidate_id: str
+    strategy_id: str
+    strategy_version: str = "unknown"
+    strategy_family: str = "unknown"
+    asset: str
+    venue: str = "hyperliquid"
+    side: EngineSide
+    candidate_horizon: str
+    regime_snapshot_id: str
+    feature_snapshot_id: str
+    risk_decision_id: str | None = None
+    council_review_id: str | None = None
+    replay_context_id: str | None = None
+    allocation_id: str | None = None
+    outcome_window: OutcomeWindow
+    window_start_ms: int
+    window_end_ms: int
+    entry_px: float = Field(gt=0)
+    mark_px: float | None = Field(default=None, gt=0)
+    gross_return_bps: float = 0.0
+    fees_bps: float = 0.0
+    slippage_bps: float = 0.0
+    funding_bps: float = 0.0
+    net_return_bps: float = 0.0
+    realized_r: float = 0.0
+    mfe_bps: float = 0.0
+    mae_bps: float = 0.0
+    risk_decision: str = "unknown"
+    council_decision: str = "unknown"
+    allocation_status: str = "unknown"
+    terminal_state: str = "pending"
+    quality_flags: list[str] = Field(default_factory=list)
+    created_at_ms: int
+    updated_at_ms: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("asset")
+    @classmethod
+    def _uppercase_asset(cls, value: str) -> str:
+        return value.upper().strip()
+
+    @model_validator(mode="after")
+    def _validate_window(self) -> Self:
+        if self.window_end_ms <= self.window_start_ms:
+            raise ValueError("outcome window end must be after start")
+        return self
+
+
+class ReplayResultLink(BaseModel):
+    link_id: str
+    replay_id: str
+    candidate_id: str | None = None
+    strategy_id: str = "unknown"
+    strategy_version: str = "unknown"
+    strategy_family: str = "unknown"
+    asset: str = "GLOBAL"
+    venue: str = "unknown"
+    regime_snapshot_id: str | None = None
+    horizon: str = "unknown"
+    outcome_window: str = "unknown"
+    created_at_ms: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("asset")
+    @classmethod
+    def _uppercase_asset(cls, value: str) -> str:
+        return value.upper().strip() or "GLOBAL"
+
+
+class PortfolioConcentrationEvent(BaseModel):
+    event_id: str
+    candidate_id: str
+    allocation_id: str | None = None
+    strategy_id: str
+    strategy_version: str = "unknown"
+    strategy_family: str = "unknown"
+    asset: str
+    venue: str = "hyperliquid"
+    decision: str
+    reason_codes: list[str] = Field(default_factory=list)
+    strategy_share_pct: float = 0.0
+    family_share_pct: float = 0.0
+    symbol_strategy_share_pct: float = 0.0
+    created_at_ms: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("asset")
+    @classmethod
+    def _uppercase_asset(cls, value: str) -> str:
+        return value.upper().strip()
+
+
 class StrategyRegimePerformance(BaseModel):
     performance_id: str
     strategy_id: str
@@ -374,12 +495,22 @@ class StrategyRegimePerformance(BaseModel):
     strategy_family: str = "unknown"
     regime_label: str
     asset: str = "GLOBAL"
+    venue: str = "unknown"
+    outcome_window: str = "unknown"
     window_start_ms: int
     window_end_ms: int
     candidate_count: int = Field(default=0, ge=0)
     allocation_count: int = Field(default=0, ge=0)
+    risk_reject_count: int = Field(default=0, ge=0)
+    council_veto_count: int = Field(default=0, ge=0)
+    concentration_event_count: int = Field(default=0, ge=0)
     win_rate_pct: float = 0.0
     avg_net_ev_bps: float = 0.0
+    avg_net_return_bps: float = 0.0
+    avg_realized_r: float = 0.0
+    avg_drawdown_bps: float = 0.0
+    avg_fees_bps: float = 0.0
+    avg_slippage_bps: float = 0.0
     realized_pnl_usd: float = 0.0
     score: float = 0.0
     created_at_ms: int

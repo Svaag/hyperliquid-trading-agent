@@ -801,6 +801,7 @@ class StrategyRegimePerformanceRecord(TimestampMixin, Base):
         Index("ix_strategy_regime_performance_strategy", "strategy_id"),
         Index("ix_strategy_regime_performance_regime", "regime_label"),
         Index("ix_strategy_regime_performance_window", "window_end_ms"),
+        Index("ix_strategy_regime_performance_group", "strategy_id", "regime_label", "asset", "venue", "outcome_window"),
     )
 
     performance_id: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -809,12 +810,22 @@ class StrategyRegimePerformanceRecord(TimestampMixin, Base):
     strategy_family: Mapped[str] = mapped_column(String(96), nullable=False, default="unknown")
     regime_label: Mapped[str] = mapped_column(String(255), nullable=False)
     asset: Mapped[str] = mapped_column(String(64), nullable=False, default="GLOBAL")
+    venue: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    outcome_window: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")
     window_start_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     window_end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     allocation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    risk_reject_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    council_veto_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    concentration_event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     win_rate_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     avg_net_ev_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    avg_net_return_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    avg_realized_r: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    avg_drawdown_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    avg_fees_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    avg_slippage_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     realized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -937,6 +948,132 @@ class AllocationDiversityEventRecord(TimestampMixin, Base):
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
     decision: Mapped[str] = mapped_column(String(32), nullable=False)
     reason_codes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class CandidateEvidenceLinkRecord(TimestampMixin, Base):
+    __tablename__ = "candidate_evidence_links"
+    __table_args__ = (
+        Index("ix_candidate_evidence_links_candidate", "candidate_id"),
+        Index("ix_candidate_evidence_links_strategy", "strategy_id"),
+        Index("ix_candidate_evidence_links_created", "created_at_ms"),
+    )
+
+    link_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    strategy_family: Mapped[str] = mapped_column(String(96), nullable=False, default="unknown")
+    asset: Mapped[str] = mapped_column(String(64), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False, default="hyperliquid")
+    horizon: Mapped[str] = mapped_column(String(32), nullable=False)
+    regime_snapshot_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    feature_snapshot_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    risk_decision_id: Mapped[str | None] = mapped_column(String(96))
+    council_review_id: Mapped[str | None] = mapped_column(String(128))
+    replay_context_id: Mapped[str | None] = mapped_column(String(128))
+    allocation_id: Mapped[str | None] = mapped_column(String(96))
+    packet_id: Mapped[str | None] = mapped_column(String(128))
+    outcome_window_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class CandidateOutcomeAttributionRecord(TimestampMixin, Base):
+    __tablename__ = "candidate_outcome_attributions"
+    __table_args__ = (
+        Index("ix_candidate_outcome_attributions_candidate", "candidate_id"),
+        Index("ix_candidate_outcome_attributions_strategy", "strategy_id"),
+        Index("ix_candidate_outcome_attributions_window", "outcome_window", "window_end_ms"),
+        Index("ix_candidate_outcome_attributions_group", "strategy_id", "asset", "venue", "outcome_window"),
+        Index("ix_candidate_outcome_attributions_terminal", "terminal_state"),
+    )
+
+    attribution_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    strategy_family: Mapped[str] = mapped_column(String(96), nullable=False, default="unknown")
+    asset: Mapped[str] = mapped_column(String(64), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False, default="hyperliquid")
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    candidate_horizon: Mapped[str] = mapped_column(String(32), nullable=False)
+    regime_snapshot_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    feature_snapshot_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    risk_decision_id: Mapped[str | None] = mapped_column(String(96))
+    council_review_id: Mapped[str | None] = mapped_column(String(128))
+    replay_context_id: Mapped[str | None] = mapped_column(String(128))
+    allocation_id: Mapped[str | None] = mapped_column(String(96))
+    outcome_window: Mapped[str] = mapped_column(String(16), nullable=False)
+    window_start_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    window_end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    entry_px: Mapped[float] = mapped_column(Float, nullable=False)
+    mark_px: Mapped[float | None] = mapped_column(Float)
+    gross_return_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    fees_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    slippage_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    funding_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    net_return_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    realized_r: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    mfe_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    mae_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    risk_decision: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    council_decision: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    allocation_status: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    terminal_state: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    quality_flags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class ReplayResultLinkRecord(TimestampMixin, Base):
+    __tablename__ = "replay_result_links"
+    __table_args__ = (
+        Index("ix_replay_result_links_replay", "replay_id"),
+        Index("ix_replay_result_links_candidate", "candidate_id"),
+        Index("ix_replay_result_links_strategy", "strategy_id"),
+        Index("ix_replay_result_links_created", "created_at_ms"),
+    )
+
+    link_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    replay_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    candidate_id: Mapped[str | None] = mapped_column(String(96))
+    strategy_id: Mapped[str] = mapped_column(String(96), nullable=False, default="unknown")
+    strategy_version: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    strategy_family: Mapped[str] = mapped_column(String(96), nullable=False, default="unknown")
+    asset: Mapped[str] = mapped_column(String(64), nullable=False, default="GLOBAL")
+    venue: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    regime_snapshot_id: Mapped[str | None] = mapped_column(String(96))
+    horizon: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    outcome_window: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class PortfolioConcentrationEventRecord(TimestampMixin, Base):
+    __tablename__ = "portfolio_concentration_events"
+    __table_args__ = (
+        Index("ix_portfolio_concentration_events_candidate", "candidate_id"),
+        Index("ix_portfolio_concentration_events_strategy", "strategy_id"),
+        Index("ix_portfolio_concentration_events_created", "created_at_ms"),
+        Index("ix_portfolio_concentration_events_decision", "decision"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    allocation_id: Mapped[str | None] = mapped_column(String(96))
+    strategy_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    strategy_family: Mapped[str] = mapped_column(String(96), nullable=False, default="unknown")
+    asset: Mapped[str] = mapped_column(String(64), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False, default="hyperliquid")
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason_codes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    strategy_share_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    family_share_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    symbol_strategy_share_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 

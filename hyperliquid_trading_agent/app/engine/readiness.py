@@ -109,6 +109,9 @@ async def build_paper_readiness_scorecard(
     positions_all = await repository.list_position_theses(limit=limit)
     pnl_all = await repository.list_pnl_attribution(limit=limit)
     council_all = await _maybe_list(repository, "list_council_reviews", limit=limit)
+    candidate_evidence_links_all = await _maybe_list(repository, "list_candidate_evidence_links", limit=limit)
+    candidate_outcomes_all = await _maybe_list(repository, "list_candidate_outcome_attributions", limit=limit)
+    portfolio_concentration_events_all = await _maybe_list(repository, "list_portfolio_concentration_events", limit=limit)
     strategy_regime_performance_all = await _maybe_list(repository, "list_strategy_regime_performance", limit=limit)
     latest_replay_comparison = await latest_engine_replay_comparison(repository)
 
@@ -122,6 +125,9 @@ async def build_paper_readiness_scorecard(
     positions = _in_window(positions_all, start_ms, "updated_at_ms", "opened_at_ms")
     pnl_records = _in_window(pnl_all, start_ms, "window_end_ms")
     council_reviews = _in_window(council_all, start_ms, "created_at_ms")
+    candidate_evidence_links = _in_window(candidate_evidence_links_all, start_ms, "created_at_ms")
+    candidate_outcomes = _in_window(candidate_outcomes_all, start_ms, "created_at_ms", "window_end_ms")
+    portfolio_concentration_events = _in_window(portfolio_concentration_events_all, start_ms, "created_at_ms")
     strategy_regime_performance = _in_window(strategy_regime_performance_all, start_ms, "created_at_ms", "window_end_ms")
 
     hard_blocks: list[dict[str, str]] = []
@@ -252,6 +258,35 @@ async def build_paper_readiness_scorecard(
         "allocation_rate_pct": allocation_rate_pct,
         "candidate_strategy_metadata_coverage_pct": candidate_strategy_metadata_coverage_pct,
         "council_review_coverage_pct": council_review_coverage_pct,
+    }
+
+    # Wave 1B evidence spine coverage.
+    evidence_candidate_ids = {str(item.get("candidate_id")) for item in candidate_evidence_links if item.get("candidate_id")}
+    candidate_evidence_link_coverage_pct = _pct(len(candidate_ids & evidence_candidate_ids), len(candidate_ids))
+    if candidate_evidence_link_coverage_pct < settings.engine_readiness_min_candidate_evidence_link_coverage_pct:
+        hard_blocks.append(_issue("candidate_evidence_link_coverage_low", f"Candidate evidence link coverage {candidate_evidence_link_coverage_pct}% below {settings.engine_readiness_min_candidate_evidence_link_coverage_pct}%."))
+    council_packet_candidate_ids = {str(item.get("candidate_id")) for item in candidate_evidence_links if item.get("candidate_id") and (item.get("council_review_id") or (_metadata(item).get("council_decision") in {"reject", "allow_shadow", "allow_paper", "needs_more_evidence"}))}
+    council_packet_coverage_pct = _pct(len(candidate_ids & council_packet_candidate_ids), len(candidate_ids))
+    if council_packet_coverage_pct < settings.engine_readiness_min_council_packet_coverage_pct:
+        hard_blocks.append(_issue("council_packet_coverage_low", f"Council packet coverage {council_packet_coverage_pct}% below {settings.engine_readiness_min_council_packet_coverage_pct}%."))
+    non_flat_candidate_ids = {str(item.get("candidate_id")) for item in candidates if item.get("candidate_id") and item.get("side") != "flat"}
+    candidate_risk_ids = {str(item.get("candidate_id")) for item in candidate_evidence_links if item.get("candidate_id") and item.get("risk_decision_id")}
+    candidate_risk_gateway_coverage_pct = _pct(len(non_flat_candidate_ids & candidate_risk_ids), len(non_flat_candidate_ids))
+    if candidate_risk_gateway_coverage_pct < settings.engine_readiness_min_candidate_risk_gateway_coverage_pct:
+        hard_blocks.append(_issue("candidate_risk_gateway_coverage_low", f"Candidate-level RiskGateway coverage {candidate_risk_gateway_coverage_pct}% below {settings.engine_readiness_min_candidate_risk_gateway_coverage_pct}%."))
+    outcome_candidate_ids = {str(item.get("candidate_id")) for item in candidate_outcomes if item.get("candidate_id") and str(item.get("terminal_state") or "") in {"matured", "missing_mark"}}
+    matured_candidate_ids = {str(item.get("candidate_id")) for item in candidates if item.get("candidate_id") and generated_at_ms - _ts(item, "created_at_ms") >= 5 * 60 * 1000}
+    matured_outcome_attribution_coverage_pct = _pct(len(matured_candidate_ids & outcome_candidate_ids), len(matured_candidate_ids))
+    if matured_outcome_attribution_coverage_pct < settings.engine_readiness_min_matured_outcome_attribution_coverage_pct:
+        hard_blocks.append(_issue("matured_outcome_attribution_coverage_low", f"Matured outcome attribution coverage {matured_outcome_attribution_coverage_pct}% below {settings.engine_readiness_min_matured_outcome_attribution_coverage_pct}%."))
+    checks["wave1b_evidence_spine"] = {
+        "candidate_evidence_link_count": len(candidate_evidence_links),
+        "candidate_evidence_link_coverage_pct": candidate_evidence_link_coverage_pct,
+        "council_packet_coverage_pct": council_packet_coverage_pct,
+        "candidate_risk_gateway_coverage_pct": candidate_risk_gateway_coverage_pct,
+        "candidate_outcome_attribution_count": len(candidate_outcomes),
+        "matured_candidate_count": len(matured_candidate_ids),
+        "matured_outcome_attribution_coverage_pct": matured_outcome_attribution_coverage_pct,
     }
 
     stale_or_invalid_rejects = 0
@@ -456,6 +491,14 @@ async def build_paper_readiness_scorecard(
         score -= 10
     if council_review_coverage_pct < settings.engine_readiness_min_council_review_coverage_pct:
         score -= 10
+    if candidate_evidence_link_coverage_pct < settings.engine_readiness_min_candidate_evidence_link_coverage_pct:
+        score -= 10
+    if council_packet_coverage_pct < settings.engine_readiness_min_council_packet_coverage_pct:
+        score -= 8
+    if candidate_risk_gateway_coverage_pct < settings.engine_readiness_min_candidate_risk_gateway_coverage_pct:
+        score -= 10
+    if matured_outcome_attribution_coverage_pct < settings.engine_readiness_min_matured_outcome_attribution_coverage_pct:
+        score -= 10
     if strategy_regime_evidence_coverage_pct < settings.engine_readiness_min_strategy_regime_evidence_coverage_pct:
         score -= 10
     if avg_slippage_bps > settings.engine_readiness_max_avg_slippage_bps:
@@ -478,6 +521,16 @@ async def build_paper_readiness_scorecard(
 
     recommendation = _recommendation(hard_blocks, warnings, ready_for_paper)
     next_actions = _next_actions(hard_blocks, warnings, recommendation)
+    reports = _wave1d_reports(
+        candidates=candidates,
+        allocations=allocations,
+        council_reviews=council_reviews,
+        risk_decisions=risk_decisions,
+        candidate_outcomes=candidate_outcomes,
+        strategy_regime_performance=strategy_regime_performance,
+        portfolio_concentration_events=portfolio_concentration_events,
+        latest_replay=latest_replay,
+    )
     metrics = {
         "candidate_count": len(candidates),
         "ev_estimate_count": len(ev_estimates),
@@ -500,6 +553,10 @@ async def build_paper_readiness_scorecard(
         "active_alpha_strategy_count": len(active_alpha_strategies),
         "active_alpha_family_count": len(active_alpha_families),
         "candidate_strategy_metadata_coverage_pct": candidate_strategy_metadata_coverage_pct,
+        "candidate_evidence_link_coverage_pct": candidate_evidence_link_coverage_pct,
+        "council_packet_coverage_pct": council_packet_coverage_pct,
+        "candidate_risk_gateway_coverage_pct": candidate_risk_gateway_coverage_pct,
+        "matured_outcome_attribution_coverage_pct": matured_outcome_attribution_coverage_pct,
         "council_review_coverage_pct": council_review_coverage_pct,
         "risk_gateway_coverage_pct": risk_gateway_coverage_pct,
         "strategy_regime_evidence_coverage_pct": strategy_regime_evidence_coverage_pct,
@@ -520,8 +577,69 @@ async def build_paper_readiness_scorecard(
         "warnings": warnings,
         "checks": checks,
         "metrics": metrics,
+        "reports": reports,
         "recommendation": recommendation,
         "next_actions": next_actions,
+    }
+
+
+def _wave1d_reports(
+    *,
+    candidates: list[dict[str, Any]],
+    allocations: list[dict[str, Any]],
+    council_reviews: list[dict[str, Any]],
+    risk_decisions: list[dict[str, Any]],
+    candidate_outcomes: list[dict[str, Any]],
+    strategy_regime_performance: list[dict[str, Any]],
+    portfolio_concentration_events: list[dict[str, Any]],
+    latest_replay: dict[str, Any] | None,
+) -> dict[str, Any]:
+    by_family: dict[str, dict[str, Any]] = defaultdict(lambda: {"candidate_count": 0, "outcome_count": 0, "avg_score": 0.0, "scores": []})
+    by_regime: dict[str, dict[str, Any]] = defaultdict(lambda: {"candidate_count": 0, "outcome_count": 0, "avg_net_return_bps": 0.0, "returns": []})
+    for candidate in candidates:
+        metadata = _metadata(candidate)
+        family = str(metadata.get("strategy_family") or candidate.get("strategy_family") or "unknown")
+        by_family[family]["candidate_count"] += 1
+        regime = str(metadata.get("regime_label") or candidate.get("regime_snapshot_id") or "unknown")
+        by_regime[regime]["candidate_count"] += 1
+    for row in strategy_regime_performance:
+        family = str(row.get("strategy_family") or "unknown")
+        by_family[family]["scores"].append(_f(row.get("score")))
+    for outcome in candidate_outcomes:
+        family = str(outcome.get("strategy_family") or "unknown")
+        by_family[family]["outcome_count"] += 1
+        metadata = _metadata(outcome)
+        regime = str(metadata.get("regime_label") or outcome.get("regime_snapshot_id") or "unknown")
+        by_regime[regime]["outcome_count"] += 1
+        by_regime[regime]["returns"].append(_f(outcome.get("net_return_bps")))
+    for family, data in by_family.items():
+        scores = data.pop("scores")
+        data["avg_score"] = round(sum(scores) / len(scores), 4) if scores else 0.0
+    for regime, data in by_regime.items():
+        returns = data.pop("returns")
+        data["avg_net_return_bps"] = round(sum(returns) / len(returns), 4) if returns else 0.0
+    council_counts = Counter(str(item.get("decision") or "unknown") for item in council_reviews)
+    risk_counts = Counter(str(item.get("decision") or "unknown") for item in risk_decisions)
+    outcome_counts = Counter(str(item.get("terminal_state") or "unknown") for item in candidate_outcomes)
+    allocation_notional_by_strategy: dict[str, float] = defaultdict(float)
+    for allocation in allocations:
+        metadata = _metadata(allocation)
+        strategy = str(metadata.get("strategy_id") or allocation.get("strategy_id") or "unknown")
+        allocation_notional_by_strategy[strategy] += _f(allocation.get("allocated_notional_usd"))
+    total_notional = sum(allocation_notional_by_strategy.values())
+    strategy_concentration = {
+        strategy: {"notional_usd": round(value, 4), "share_pct": _pct(value, total_notional)}
+        for strategy, value in sorted(allocation_notional_by_strategy.items(), key=lambda item: item[1], reverse=True)
+    }
+    return {
+        "readiness_by_strategy_family": dict(by_family),
+        "readiness_by_market_regime": dict(by_regime),
+        "latest_clean_replay_comparison": latest_replay,
+        "strategy_concentration_report": strategy_concentration,
+        "council_veto_reject_report": dict(council_counts),
+        "risk_gateway_coverage_report": dict(risk_counts),
+        "shadow_mode_outcome_report": dict(outcome_counts),
+        "portfolio_concentration_event_count": len(portfolio_concentration_events),
     }
 
 

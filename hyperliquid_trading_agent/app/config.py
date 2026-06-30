@@ -314,6 +314,8 @@ class Settings(BaseSettings):
     engine_model_artifact_dir: str = "/var/lib/hyperliquid-trading-agent/models"
     engine_approved_scorer_model_id: str = ""
     engine_scorer_fallback_mode: Literal["deterministic"] = "deterministic"
+    engine_wave1c_enabled: bool = False
+    engine_wave2_enabled: bool = False
     engine_shadow_enabled: bool = True
     engine_paper_enabled: bool = False
     engine_live_enabled: bool = False
@@ -358,9 +360,13 @@ class Settings(BaseSettings):
     engine_readiness_max_strategy_family_allocation_share_pct: float = 60.0
     engine_readiness_max_symbol_strategy_allocation_share_pct: float = 35.0
     engine_readiness_min_candidate_strategy_metadata_coverage_pct: float = 100.0
+    engine_readiness_min_candidate_evidence_link_coverage_pct: float = 100.0
+    engine_readiness_min_council_packet_coverage_pct: float = 95.0
+    engine_readiness_min_candidate_risk_gateway_coverage_pct: float = 100.0
+    engine_readiness_min_matured_outcome_attribution_coverage_pct: float = 95.0
     engine_readiness_min_council_review_coverage_pct: float = 95.0
     engine_readiness_min_risk_gateway_coverage_pct: float = 100.0
-    engine_readiness_min_strategy_regime_evidence_coverage_pct: float = 80.0
+    engine_readiness_min_strategy_regime_evidence_coverage_pct: float = 95.0
     engine_readiness_min_strategy_regime_sample_count: int = 5
     engine_readiness_min_strategy_regime_score: float = 45.0
     engine_readiness_require_latest_replay: bool = True
@@ -542,6 +548,13 @@ class Settings(BaseSettings):
     def engine_live_must_remain_disabled(cls, value: bool) -> bool:
         if value:
             raise ValueError("ENGINE_LIVE_ENABLED must remain false until a separate live-execution project is approved")
+        return value
+
+    @field_validator("engine_wave2_enabled")
+    @classmethod
+    def engine_wave2_must_remain_deferred(cls, value: bool) -> bool:
+        if value:
+            raise ValueError("ENGINE_WAVE2_ENABLED must remain false until Wave 1 outcome attribution, replay, and readiness gates are reliable")
         return value
 
     @field_validator("hyperliquid_exchange_enabled")

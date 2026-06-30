@@ -4,6 +4,7 @@ import time
 from typing import Any
 
 import anyio
+import pytest
 from fastapi.testclient import TestClient
 
 from hyperliquid_trading_agent.app.config import Settings
@@ -63,6 +64,15 @@ class FakeReadinessRepository:
             {"review_id": "council_1", "candidate_id": "cand_1", "strategy_id": "directional_momentum_v2", "decision": "allow_shadow", "created_at_ms": old},
             {"review_id": "council_2", "candidate_id": "cand_2", "strategy_id": "microstructure_ofi_v2", "decision": "allow_shadow", "created_at_ms": now_ms - 1000},
         ]
+        self.candidate_evidence_links = [
+            {"link_id": "cel_1", "candidate_id": "cand_1", "strategy_id": "directional_momentum_v2", "risk_decision_id": "risk_pre_1", "council_review_id": "council_1", "outcome_window_ids": ["coa_1"], "created_at_ms": old, "metadata": {"council_decision": "allow_shadow"}},
+            {"link_id": "cel_2", "candidate_id": "cand_2", "strategy_id": "microstructure_ofi_v2", "risk_decision_id": "risk_pre_2", "council_review_id": "council_2", "outcome_window_ids": ["coa_2"], "created_at_ms": now_ms - 1000, "metadata": {"council_decision": "allow_shadow"}},
+        ]
+        self.candidate_outcomes = [
+            {"attribution_id": "coa_1", "candidate_id": "cand_1", "strategy_id": "directional_momentum_v2", "strategy_family": "trend_following", "asset": "BTC", "venue": "hyperliquid", "regime_snapshot_id": "reg_1", "outcome_window": "5m", "net_return_bps": 20, "terminal_state": "matured", "created_at_ms": old, "window_end_ms": old, "metadata": {"regime_label": "trend=bull"}},
+            {"attribution_id": "coa_2", "candidate_id": "cand_2", "strategy_id": "microstructure_ofi_v2", "strategy_family": "microstructure_orderflow", "asset": "ETH", "venue": "hyperliquid", "regime_snapshot_id": "reg_2", "outcome_window": "5m", "net_return_bps": 10, "terminal_state": "matured", "created_at_ms": old, "window_end_ms": old, "metadata": {"regime_label": "orderflow=sell_pressure"}},
+        ]
+        self.portfolio_concentration_events: list[dict[str, Any]] = []
         self.strategy_regime_performance = [
             {"performance_id": "perf_1", "strategy_id": "directional_momentum_v2", "strategy_family": "trend_following", "regime_label": "trend=bull", "candidate_count": 2, "score": 60, "created_at_ms": old, "window_end_ms": old},
             {"performance_id": "perf_2", "strategy_id": "microstructure_ofi_v2", "strategy_family": "microstructure_orderflow", "regime_label": "orderflow=sell_pressure", "candidate_count": 2, "score": 60, "created_at_ms": old, "window_end_ms": old},
@@ -115,6 +125,15 @@ class FakeReadinessRepository:
     async def list_council_reviews(self, **kwargs):
         return self.council_reviews[: kwargs.get("limit", 100)]
 
+    async def list_candidate_evidence_links(self, **kwargs):
+        return self.candidate_evidence_links[: kwargs.get("limit", 100)]
+
+    async def list_candidate_outcome_attributions(self, **kwargs):
+        return self.candidate_outcomes[: kwargs.get("limit", 100)]
+
+    async def list_portfolio_concentration_events(self, **kwargs):
+        return self.portfolio_concentration_events[: kwargs.get("limit", 100)]
+
     async def list_strategy_regime_performance(self, **kwargs):
         return self.strategy_regime_performance[: kwargs.get("limit", 100)]
 
@@ -128,7 +147,13 @@ def test_engine_settings_defaults_are_shadow_only():
     assert settings.engine_shadow_enabled is True
     assert settings.engine_paper_enabled is False
     assert settings.engine_live_enabled is False
+    assert settings.engine_wave2_enabled is False
     assert settings.engine_execution_mode_list == ["shadow"]
+
+
+def test_engine_wave2_flag_is_deferred_until_wave1_evidence_is_reliable():
+    with pytest.raises(ValueError, match="ENGINE_WAVE2_ENABLED"):
+        Settings(environment="test", engine_wave2_enabled=True)
 
 
 def readiness_settings(**overrides) -> Settings:
@@ -152,6 +177,10 @@ def readiness_settings(**overrides) -> Settings:
         engine_readiness_min_active_strategy_family_count_24h=2,
         engine_readiness_max_symbol_strategy_allocation_share_pct=60,
         engine_readiness_min_candidate_strategy_metadata_coverage_pct=100,
+        engine_readiness_min_candidate_evidence_link_coverage_pct=100,
+        engine_readiness_min_council_packet_coverage_pct=100,
+        engine_readiness_min_candidate_risk_gateway_coverage_pct=100,
+        engine_readiness_min_matured_outcome_attribution_coverage_pct=100,
         engine_readiness_min_council_review_coverage_pct=100,
         engine_readiness_min_risk_gateway_coverage_pct=100,
         engine_readiness_min_strategy_regime_evidence_coverage_pct=100,

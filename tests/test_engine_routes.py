@@ -48,11 +48,23 @@ class FakeEngineRepository:
     async def list_candidate_trade_packets(self, **kwargs):
         return [{"packet_id": "packet_1"}]
 
+    async def list_candidate_evidence_links(self, **kwargs):
+        return [{"link_id": "cel_1"}]
+
+    async def list_candidate_outcome_attributions(self, **kwargs):
+        return [{"attribution_id": "coa_1", "outcome_window": kwargs.get("outcome_window") or "5m"}]
+
     async def list_council_reviews(self, **kwargs):
         return [{"review_id": "council_1"}]
 
     async def list_allocation_diversity_events(self, **kwargs):
         return [{"event_id": "div_1"}]
+
+    async def list_portfolio_concentration_events(self, **kwargs):
+        return [{"event_id": "pce_1"}]
+
+    async def list_replay_result_links(self, **kwargs):
+        return [{"link_id": "rrl_1"}]
 
     async def list_bandit_recommendations(self, **kwargs):
         return [{"recommendation_id": "bandit_1", "auto_apply_allowed": False}]
@@ -115,8 +127,12 @@ def test_engine_readonly_routes_are_registered_and_auth_protected_in_dev():
     assert client.get("/engine/strategy-regime-performance/microstructure_ofi_v2").json()[0]["strategy_id"] == "microstructure_ofi_v2"
     assert client.post("/engine/strategy-regime-performance/refresh", json={"window_hours": 24}).json()["report_only"] is True
     assert client.get("/engine/candidate-trade-packets").json()[0]["packet_id"] == "packet_1"
+    assert client.get("/engine/candidate-evidence-links").json()[0]["link_id"] == "cel_1"
+    assert client.get("/engine/candidate-outcome-attributions").json()[0]["attribution_id"] == "coa_1"
     assert client.get("/engine/council-reviews").json()[0]["review_id"] == "council_1"
     assert client.get("/engine/diversity-events").json()[0]["event_id"] == "div_1"
+    assert client.get("/engine/portfolio-concentration-events").json()[0]["event_id"] == "pce_1"
+    assert client.get("/engine/replay-result-links").json()[0]["link_id"] == "rrl_1"
     assert client.get("/engine/bandit-recommendations").json()[0]["recommendation_id"] == "bandit_1"
     assert client.post("/engine/bandit-recommendations/run", json={"window_hours": 24}).json()["auto_apply_allowed"] is False
     assert client.get("/engine/evidence-packs/ep_1").json()["evidence_pack_id"] == "ep_1"

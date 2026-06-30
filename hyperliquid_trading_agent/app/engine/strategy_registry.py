@@ -13,7 +13,38 @@ from hyperliquid_trading_agent.app.engine.alpha.equity import EquityOptionsFlowS
 from hyperliquid_trading_agent.app.engine.alpha.microstructure import MicrostructureOFIStrategy
 from hyperliquid_trading_agent.app.engine.alpha.news_event import NewsEventAlphaStrategy
 from hyperliquid_trading_agent.app.engine.alpha.wave1a import wave_1a_specs, wave_1a_strategy_instances
+from hyperliquid_trading_agent.app.engine.alpha.wave1c import wave_1c_specs, wave_1c_strategy_instances
 from hyperliquid_trading_agent.app.engine.schemas import StrategySpec
+
+WAVE_1A_NUCLEUS_IDS = {
+    "microstructure_ofi_v2",
+    "liquidation_cascade_v1",
+    "liquidation_mean_revert_v1",
+    "funding_carry_v1",
+    "oi_breakout_v1",
+    "legacy_signal_adapter_v1",
+    "regime_defensive_flat_v1",
+}
+
+PRE_WAVE1A_COMPARISON_IDS = {
+    "directional_momentum_v2",
+    "support_resistance_reversion_v2",
+    "microstructure_ofi_v1",
+    "news_event_alpha_v1",
+    "equity_options_flow_v1",
+}
+
+WAVE_1C_DETERMINISTIC_IDS = {
+    "microstructure_absorption_v1",
+    "funding_squeeze_v1",
+    "basis_reversion_v1",
+    "news_impulse_v1",
+}
+
+WAVE_1C_OPTIONAL_IDS = {
+    "range_rotation_v1",
+    "volatility_compression_breakout_v1",
+}
 
 
 @dataclass
@@ -97,21 +128,63 @@ def _strategy_spec(strategy: AlphaStrategy) -> StrategySpec:
 
 
 def default_strategy_instances() -> list[AlphaStrategy]:
-    return [
+    """Runtime strategy instances for the locked Wave 1A nucleus.
+
+    Wave 1 is intentionally evidence-first. Pre-Wave1A strategies remain available
+    as disabled comparison specs, but they are not active runtime alpha and do not
+    count as breadth until a later controlled Wave 1C/1D promotion.
+    """
+
+    return wave_1a_strategy_instances()
+
+
+def pre_wave1a_comparison_specs() -> list[StrategySpec]:
+    """Disabled specs retained for historical/replay comparison only."""
+
+    strategies = [
         DirectionalMomentumStrategy(),
         SupportResistanceReversionStrategy(),
         MicrostructureOFIStrategy(),
         NewsEventAlphaStrategy(),
-        *wave_1a_strategy_instances(),
         EquityOptionsFlowStrategy(),
+    ]
+    return [
+        strategy.spec.model_copy(
+            update={
+                "enabled": False,
+                "counts_for_breadth": False,
+                "metadata": {
+                    **strategy.spec.metadata,
+                    "wave_status": "pre_wave1a_comparison_only",
+                    "runtime_enabled_reason": "wave1a_nucleus_locked",
+                },
+            }
+        )
+        for strategy in strategies
     ]
 
 
-def create_default_strategy_registry(*, include_planned_wave_1a_specs: bool = True) -> StrategyRegistry:
+def create_default_strategy_registry(
+    *,
+    include_planned_wave_1a_specs: bool = True,
+    include_pre_wave1a_comparison_specs: bool = True,
+    include_planned_wave_1c_specs: bool = True,
+    enable_wave_1c: bool = False,
+) -> StrategyRegistry:
     registry = StrategyRegistry()
     registry.register_many(default_strategy_instances())
+    if enable_wave_1c:
+        registry.register_many(wave_1c_strategy_instances())
     if include_planned_wave_1a_specs:
         for spec in planned_wave_1a_specs():
+            if registry.spec(spec.strategy_id) is None:
+                registry.register_spec(spec)
+    if include_planned_wave_1c_specs:
+        for spec in planned_wave_1c_specs(enabled=enable_wave_1c):
+            if registry.spec(spec.strategy_id) is None:
+                registry.register_spec(spec)
+    if include_pre_wave1a_comparison_specs:
+        for spec in pre_wave1a_comparison_specs():
             if registry.spec(spec.strategy_id) is None:
                 registry.register_spec(spec)
     return registry
@@ -121,3 +194,9 @@ def planned_wave_1a_specs() -> list[StrategySpec]:
     """Specs for the accepted Wave 1A nucleus."""
 
     return wave_1a_specs()
+
+
+def planned_wave_1c_specs(*, enabled: bool = False) -> list[StrategySpec]:
+    """Specs for deterministic Wave 1C breadth, gated behind evidence readiness."""
+
+    return wave_1c_specs(enabled=enabled)

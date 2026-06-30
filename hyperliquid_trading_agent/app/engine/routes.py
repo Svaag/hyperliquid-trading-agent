@@ -67,6 +67,11 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
             "paper_enabled": settings.engine_paper_enabled,
             "shadow_enabled": settings.engine_shadow_enabled,
             "live_enabled": settings.engine_live_enabled,
+            "wave_policy": {
+                "wave1c_enabled": settings.engine_wave1c_enabled,
+                "wave2_enabled": settings.engine_wave2_enabled,
+                "wave2_status": "deferred_until_wave1_evidence_replay_readiness",
+            },
             "repository_enabled": getattr(repository, "enabled", False),
             "service": service_status,
             "validation_monitor": monitor_status,
@@ -189,6 +194,16 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
         _auth(authorization)
         return await _repo().list_candidate_trade_packets(candidate_id=candidate_id, strategy_id=strategy_id, limit=limit)
 
+    @app.get("/engine/candidate-evidence-links")
+    async def engine_candidate_evidence_links(candidate_id: str | None = None, strategy_id: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        _auth(authorization)
+        return await _repo().list_candidate_evidence_links(candidate_id=candidate_id, strategy_id=strategy_id, limit=limit)
+
+    @app.get("/engine/candidate-outcome-attributions")
+    async def engine_candidate_outcome_attributions(candidate_id: str | None = None, strategy_id: str | None = None, outcome_window: str | None = None, terminal_state: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        _auth(authorization)
+        return await _repo().list_candidate_outcome_attributions(candidate_id=candidate_id, strategy_id=strategy_id, outcome_window=outcome_window, terminal_state=terminal_state, limit=limit)
+
     @app.get("/engine/council-reviews")
     async def engine_council_reviews(candidate_id: str | None = None, strategy_id: str | None = None, decision: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
         _auth(authorization)
@@ -198,6 +213,16 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
     async def engine_diversity_events(strategy_id: str | None = None, decision: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
         _auth(authorization)
         return await _repo().list_allocation_diversity_events(strategy_id=strategy_id, decision=decision, limit=limit)
+
+    @app.get("/engine/portfolio-concentration-events")
+    async def engine_portfolio_concentration_events(strategy_id: str | None = None, decision: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        _auth(authorization)
+        return await _repo().list_portfolio_concentration_events(strategy_id=strategy_id, decision=decision, limit=limit)
+
+    @app.get("/engine/replay-result-links")
+    async def engine_replay_result_links(replay_id: str | None = None, candidate_id: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        _auth(authorization)
+        return await _repo().list_replay_result_links(replay_id=replay_id, candidate_id=candidate_id, limit=limit)
 
     @app.get("/engine/bandit-recommendations")
     async def engine_bandit_recommendations(strategy_id: str | None = None, policy_id: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:

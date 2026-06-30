@@ -146,6 +146,9 @@ class PortfolioDiversityController:
             "venue": candidate.venue,
             "decision": decision,
             "reason_codes": reasons,
+            "strategy_share_pct": float(projected.get("strategy_share_pct") or 0.0),
+            "family_share_pct": float(projected.get("family_share_pct") or 0.0),
+            "symbol_strategy_share_pct": float(projected.get("symbol_strategy_share_pct") or 0.0),
             "created_at_ms": timestamp_ms,
             "metadata": metadata,
         }
@@ -156,6 +159,9 @@ class PortfolioDiversityController:
             record = getattr(repository, "record_allocation_diversity_event", None)
             if callable(record):
                 await record(event)
+            record_concentration = getattr(repository, "record_portfolio_concentration_event", None)
+            if callable(record_concentration):
+                await record_concentration(event)
 
 
 def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:

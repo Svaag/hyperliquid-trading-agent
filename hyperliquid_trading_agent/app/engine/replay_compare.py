@@ -66,13 +66,15 @@ class EngineReplayComparisonService:
         reports = await self.repository.list_execution_reports(limit=5000)
         risk_rejects = await self.repository.list_risk_gateway_decisions(limit=5000, decision="reject")
         pnl = await self.repository.list_pnl_attribution(limit=5000)
+        outcomes = await _list_candidate_outcomes(self.repository, limit=5000)
         candidates = [item for item in candidates if window_start_ms <= int(item.get("created_at_ms") or 0) <= window_end_ms and (not universe or str(item.get("asset") or "").upper() in universe)]
         ev_by_candidate = {str(item.get("candidate_id")): item for item in evs if window_start_ms <= int(item.get("created_at_ms") or 0) <= window_end_ms}
         reports = [item for item in reports if window_start_ms <= int(item.get("created_at_ms") or 0) <= window_end_ms]
         risk_rejects = [item for item in risk_rejects if window_start_ms <= int(item.get("created_at_ms") or 0) <= window_end_ms]
         pnl = [item for item in pnl if window_start_ms <= int(item.get("window_end_ms") or 0) <= window_end_ms]
-        baseline_metrics = self._metrics_for_config(candidates, ev_by_candidate, reports, risk_rejects, pnl, baseline_config)
-        candidate_metrics = self._metrics_for_config(candidates, ev_by_candidate, reports, risk_rejects, pnl, candidate_config)
+        outcomes = [item for item in outcomes if window_start_ms <= int(item.get("window_end_ms") or item.get("created_at_ms") or 0) <= window_end_ms and (not universe or str(item.get("asset") or "").upper() in universe)]
+        baseline_metrics = self._metrics_for_config(candidates, ev_by_candidate, reports, risk_rejects, pnl, outcomes, baseline_config)
+        candidate_metrics = self._metrics_for_config(candidates, ev_by_candidate, reports, risk_rejects, pnl, outcomes, candidate_config)
         diffs = _diff_metrics(baseline_metrics, candidate_metrics)
         verdict = _verdict(baseline_metrics, candidate_metrics, diffs, self.settings.engine_readiness_max_strategy_allocation_share_pct)
         status = "passed" if verdict == "candidate_better" else "failed" if verdict == "candidate_worse" else "advisory_pass"
@@ -110,6 +112,7 @@ class EngineReplayComparisonService:
         }
         if getattr(self.repository, "enabled", False):
             await self.repository.record_replay_result(artifact)
+            await self._record_replay_links(artifact, candidate_metrics)
         return artifact
 
     def _normalize_config(self, value: dict[str, Any]) -> dict[str, Any]:
@@ -130,6 +133,7 @@ class EngineReplayComparisonService:
         reports: list[dict[str, Any]],
         risk_rejects: list[dict[str, Any]],
         pnl: list[dict[str, Any]],
+        outcomes: list[dict[str, Any]],
         config: dict[str, Any],
     ) -> dict[str, Any]:
         eligible: list[dict[str, Any]] = []
@@ -159,6 +163,10 @@ class EngineReplayComparisonService:
                     active_alpha_strategies.add(strategy_id)
                     active_alpha_families.add(family)
         allocated_count = len(eligible)
+        eligible_ids = {str(item.get("candidate_id") or "") for item in eligible}
+        eligible_outcomes = [item for item in outcomes if str(item.get("candidate_id") or "") in eligible_ids]
+        outcome_groups = _outcome_groups(eligible_outcomes)
+        outcome_candidate_ids = {str(item.get("candidate_id") or "") for item in eligible_outcomes if item.get("candidate_id")}
         risk_denominator = allocated_count + len(risk_rejects)
         strategy_share = {strategy: round(count / allocated_count * 100, 4) for strategy, count in strategy_counts.items()} if allocated_count else {}
         return {
@@ -180,7 +188,35 @@ class EngineReplayComparisonService:
             "active_alpha_family_count": len(active_alpha_families),
             "active_alpha_strategies": sorted(active_alpha_strategies),
             "active_alpha_families": sorted(active_alpha_families),
+            "outcome_attribution_count": len(eligible_outcomes),
+            "outcome_attribution_coverage_pct": round(len(outcome_candidate_ids) / allocated_count * 100, 4) if allocated_count else 0.0,
+            "strategy_regime_outcome_groups": outcome_groups,
         }
+
+    async def _record_replay_links(self, artifact: dict[str, Any], candidate_metrics: dict[str, Any]) -> None:
+        record = getattr(self.repository, "record_replay_result_link", None)
+        if not callable(record):
+            return
+        replay_id = str(artifact.get("replay_id") or "")
+        ts = int(artifact.get("created_at_ms") or _now_ms())
+        for group_key, group in (candidate_metrics.get("strategy_regime_outcome_groups") or {}).items():
+            for candidate_id in group.get("candidate_ids") or [None]:
+                link = {
+                    "link_id": "rrl_" + stable_hash({"replay_id": replay_id, "group_key": group_key, "candidate_id": candidate_id}),
+                    "replay_id": replay_id,
+                    "candidate_id": candidate_id,
+                    "strategy_id": group.get("strategy_id") or "unknown",
+                    "strategy_version": group.get("strategy_version") or "unknown",
+                    "strategy_family": group.get("strategy_family") or "unknown",
+                    "asset": group.get("asset") or "GLOBAL",
+                    "venue": group.get("venue") or "unknown",
+                    "regime_snapshot_id": group.get("regime_snapshot_id"),
+                    "horizon": group.get("candidate_horizon") or "unknown",
+                    "outcome_window": group.get("outcome_window") or "unknown",
+                    "created_at_ms": ts,
+                    "metadata": {"group_key": group_key, "replay_status": artifact.get("status"), "artifact_type": "engine_replay_result_link"},
+                }
+                await record(link)
 
 
 async def list_engine_replay_comparisons(repository: Any, *, limit: int = 100) -> list[dict[str, Any]]:
@@ -194,6 +230,71 @@ async def list_engine_replay_comparisons(repository: Any, *, limit: int = 100) -
 async def latest_engine_replay_comparison(repository: Any) -> dict[str, Any] | None:
     items = await list_engine_replay_comparisons(repository, limit=1)
     return items[0] if items else None
+
+
+async def _list_candidate_outcomes(repository: Any, *, limit: int) -> list[dict[str, Any]]:
+    method = getattr(repository, "list_candidate_outcome_attributions", None)
+    if not callable(method):
+        return []
+    try:
+        return await method(limit=limit)
+    except TypeError:
+        return await method()
+
+
+def _outcome_groups(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
+    groups: dict[str, dict[str, Any]] = {}
+    for outcome in outcomes:
+        metadata = outcome.get("metadata") if isinstance(outcome.get("metadata"), dict) else {}
+        strategy_id = str(outcome.get("strategy_id") or "unknown")
+        strategy_version = str(outcome.get("strategy_version") or "unknown")
+        strategy_family = str(outcome.get("strategy_family") or "unknown")
+        regime = str(metadata.get("regime_label") or outcome.get("regime_snapshot_id") or "unknown")
+        asset = str(outcome.get("asset") or "GLOBAL").upper()
+        venue = str(outcome.get("venue") or "unknown")
+        outcome_window = str(outcome.get("outcome_window") or "unknown")
+        key = "|".join([strategy_id, regime, asset, venue, outcome_window])
+        group = groups.setdefault(
+            key,
+            {
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+                "strategy_family": strategy_family,
+                "regime_label": regime,
+                "regime_snapshot_id": outcome.get("regime_snapshot_id"),
+                "asset": asset,
+                "venue": venue,
+                "candidate_horizon": str(outcome.get("candidate_horizon") or "unknown"),
+                "outcome_window": outcome_window,
+                "candidate_ids": set(),
+                "net_return_bps": [],
+                "realized_r": [],
+                "risk_reject_count": 0,
+                "council_veto_count": 0,
+            },
+        )
+        if outcome.get("candidate_id"):
+            group["candidate_ids"].add(str(outcome["candidate_id"]))
+        group["net_return_bps"].append(float(outcome.get("net_return_bps") or 0.0))
+        group["realized_r"].append(float(outcome.get("realized_r") or 0.0))
+        if str(outcome.get("risk_decision") or "") in {"reject", "halt", "tighten"}:
+            group["risk_reject_count"] += 1
+        if str(outcome.get("council_decision") or "") in {"reject", "needs_more_evidence"}:
+            group["council_veto_count"] += 1
+    out: dict[str, Any] = {}
+    for key, group in groups.items():
+        net_values = group.pop("net_return_bps")
+        r_values = group.pop("realized_r")
+        candidate_ids = sorted(group.pop("candidate_ids"))
+        out[key] = {
+            **group,
+            "candidate_ids": candidate_ids,
+            "candidate_count": len(candidate_ids),
+            "avg_net_return_bps": round(sum(net_values) / len(net_values), 4) if net_values else 0.0,
+            "avg_realized_r": round(sum(r_values) / len(r_values), 4) if r_values else 0.0,
+            "win_rate_pct": round(sum(1 for value in net_values if value > 0) / len(net_values) * 100, 4) if net_values else 0.0,
+        }
+    return out
 
 
 def _diff_metrics(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:

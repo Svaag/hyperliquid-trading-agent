@@ -20,7 +20,9 @@ from hyperliquid_trading_agent.app.db.models import (
     CacheItem,
     CandidateBookSnapshotRecord,
     CandidateConfigDiffRecord,
+    CandidateEvidenceLinkRecord,
     CandidateLessonRecord,
+    CandidateOutcomeAttributionRecord,
     CandidateTradePacketRecord,
     ConfigVersionRecord,
     ConversationMessage,
@@ -80,6 +82,7 @@ from hyperliquid_trading_agent.app.db.models import (
     PaperTradeIdea,
     PaperTradeSnapshot,
     PnLAttributionRecord,
+    PortfolioConcentrationEventRecord,
     PortfolioSnapshotRecord,
     PositionThesisRecord,
     PositionTracker,
@@ -89,6 +92,7 @@ from hyperliquid_trading_agent.app.db.models import (
     PromptVersionRecord,
     ReconciliationRunRecord,
     RegimeSnapshotRecord,
+    ReplayResultLinkRecord,
     ReplayResultRecord,
     RetentionRunRecord,
     ReviewPacketRecord,
@@ -969,6 +973,161 @@ class Repository:
             filters.append(AllocationDiversityEventRecord.decision == decision)
         return await self._list_engine_records(AllocationDiversityEventRecord, order_by=AllocationDiversityEventRecord.created_at_ms, limit=limit, filters=filters)
 
+    async def record_portfolio_concentration_event(self, event: dict[str, Any]) -> str | None:
+        projected = event.get("metadata", {}).get("projected", {}) if isinstance(event.get("metadata"), dict) else {}
+        return await self._merge_engine_record(
+            PortfolioConcentrationEventRecord(
+                event_id=str(event["event_id"]),
+                candidate_id=str(event.get("candidate_id") or ""),
+                allocation_id=event.get("allocation_id"),
+                strategy_id=str(event.get("strategy_id") or "unknown"),
+                strategy_version=str(event.get("strategy_version") or "unknown"),
+                strategy_family=str(event.get("strategy_family") or "unknown"),
+                asset=str(event.get("asset") or "").upper(),
+                venue=str(event.get("venue") or "unknown"),
+                decision=str(event.get("decision") or "allow"),
+                reason_codes_json=list(event.get("reason_codes") or []),
+                strategy_share_pct=float(event.get("strategy_share_pct") or projected.get("strategy_share_pct") or 0),
+                family_share_pct=float(event.get("family_share_pct") or projected.get("family_share_pct") or 0),
+                symbol_strategy_share_pct=float(event.get("symbol_strategy_share_pct") or projected.get("symbol_strategy_share_pct") or 0),
+                created_at_ms=int(event.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(event.get("metadata") or {})),
+            ),
+            "event_id",
+        )
+
+    async def list_portfolio_concentration_events(self, *, strategy_id: str | None = None, decision: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = []
+        if strategy_id:
+            filters.append(PortfolioConcentrationEventRecord.strategy_id == strategy_id)
+        if decision:
+            filters.append(PortfolioConcentrationEventRecord.decision == decision)
+        return await self._list_engine_records(PortfolioConcentrationEventRecord, order_by=PortfolioConcentrationEventRecord.created_at_ms, limit=limit, filters=filters)
+
+    async def upsert_candidate_evidence_link(self, link: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            CandidateEvidenceLinkRecord(
+                link_id=str(link["link_id"]),
+                candidate_id=str(link.get("candidate_id") or ""),
+                strategy_id=str(link.get("strategy_id") or "unknown"),
+                strategy_version=str(link.get("strategy_version") or "unknown"),
+                strategy_family=str(link.get("strategy_family") or "unknown"),
+                asset=str(link.get("asset") or "").upper(),
+                venue=str(link.get("venue") or "unknown"),
+                horizon=str(link.get("horizon") or ""),
+                regime_snapshot_id=str(link.get("regime_snapshot_id") or ""),
+                feature_snapshot_id=str(link.get("feature_snapshot_id") or ""),
+                risk_decision_id=link.get("risk_decision_id"),
+                council_review_id=link.get("council_review_id"),
+                replay_context_id=link.get("replay_context_id"),
+                allocation_id=link.get("allocation_id"),
+                packet_id=link.get("packet_id"),
+                outcome_window_ids_json=list(link.get("outcome_window_ids") or []),
+                created_at_ms=int(link.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(link.get("metadata") or {})),
+            ),
+            "link_id",
+        )
+
+    async def list_candidate_evidence_links(self, *, candidate_id: str | None = None, strategy_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = []
+        if candidate_id:
+            filters.append(CandidateEvidenceLinkRecord.candidate_id == candidate_id)
+        if strategy_id:
+            filters.append(CandidateEvidenceLinkRecord.strategy_id == strategy_id)
+        return await self._list_engine_records(CandidateEvidenceLinkRecord, order_by=CandidateEvidenceLinkRecord.created_at_ms, limit=limit, filters=filters)
+
+    async def upsert_candidate_outcome_attribution(self, item: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            CandidateOutcomeAttributionRecord(
+                attribution_id=str(item["attribution_id"]),
+                candidate_id=str(item.get("candidate_id") or ""),
+                strategy_id=str(item.get("strategy_id") or "unknown"),
+                strategy_version=str(item.get("strategy_version") or "unknown"),
+                strategy_family=str(item.get("strategy_family") or "unknown"),
+                asset=str(item.get("asset") or "").upper(),
+                venue=str(item.get("venue") or "unknown"),
+                side=str(item.get("side") or ""),
+                candidate_horizon=str(item.get("candidate_horizon") or item.get("horizon") or ""),
+                regime_snapshot_id=str(item.get("regime_snapshot_id") or ""),
+                feature_snapshot_id=str(item.get("feature_snapshot_id") or ""),
+                risk_decision_id=item.get("risk_decision_id"),
+                council_review_id=item.get("council_review_id"),
+                replay_context_id=item.get("replay_context_id"),
+                allocation_id=item.get("allocation_id"),
+                outcome_window=str(item.get("outcome_window") or "unknown"),
+                window_start_ms=int(item.get("window_start_ms") or 0),
+                window_end_ms=int(item.get("window_end_ms") or 0),
+                entry_px=float(item.get("entry_px") or 0),
+                mark_px=item.get("mark_px"),
+                gross_return_bps=float(item.get("gross_return_bps") or 0),
+                fees_bps=float(item.get("fees_bps") or 0),
+                slippage_bps=float(item.get("slippage_bps") or 0),
+                funding_bps=float(item.get("funding_bps") or 0),
+                net_return_bps=float(item.get("net_return_bps") or 0),
+                realized_r=float(item.get("realized_r") or 0),
+                mfe_bps=float(item.get("mfe_bps") or 0),
+                mae_bps=float(item.get("mae_bps") or 0),
+                risk_decision=str(item.get("risk_decision") or "unknown"),
+                council_decision=str(item.get("council_decision") or "unknown"),
+                allocation_status=str(item.get("allocation_status") or "unknown"),
+                terminal_state=str(item.get("terminal_state") or "pending"),
+                quality_flags_json=list(item.get("quality_flags") or []),
+                created_at_ms=int(item.get("created_at_ms") or 0),
+                updated_at_ms=int(item.get("updated_at_ms") or item.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(item.get("metadata") or {})),
+            ),
+            "attribution_id",
+        )
+
+    async def list_candidate_outcome_attributions(
+        self,
+        *,
+        candidate_id: str | None = None,
+        strategy_id: str | None = None,
+        outcome_window: str | None = None,
+        terminal_state: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        filters = []
+        if candidate_id:
+            filters.append(CandidateOutcomeAttributionRecord.candidate_id == candidate_id)
+        if strategy_id:
+            filters.append(CandidateOutcomeAttributionRecord.strategy_id == strategy_id)
+        if outcome_window:
+            filters.append(CandidateOutcomeAttributionRecord.outcome_window == outcome_window)
+        if terminal_state:
+            filters.append(CandidateOutcomeAttributionRecord.terminal_state == terminal_state)
+        return await self._list_engine_records(CandidateOutcomeAttributionRecord, order_by=CandidateOutcomeAttributionRecord.window_end_ms, limit=limit, filters=filters)
+
+    async def record_replay_result_link(self, link: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            ReplayResultLinkRecord(
+                link_id=str(link["link_id"]),
+                replay_id=str(link.get("replay_id") or ""),
+                candidate_id=link.get("candidate_id"),
+                strategy_id=str(link.get("strategy_id") or "unknown"),
+                strategy_version=str(link.get("strategy_version") or "unknown"),
+                strategy_family=str(link.get("strategy_family") or "unknown"),
+                asset=str(link.get("asset") or "GLOBAL").upper(),
+                venue=str(link.get("venue") or "unknown"),
+                regime_snapshot_id=link.get("regime_snapshot_id"),
+                horizon=str(link.get("horizon") or "unknown"),
+                outcome_window=str(link.get("outcome_window") or "unknown"),
+                created_at_ms=int(link.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(link.get("metadata") or {})),
+            ),
+            "link_id",
+        )
+
+    async def list_replay_result_links(self, *, replay_id: str | None = None, candidate_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = []
+        if replay_id:
+            filters.append(ReplayResultLinkRecord.replay_id == replay_id)
+        if candidate_id:
+            filters.append(ReplayResultLinkRecord.candidate_id == candidate_id)
+        return await self._list_engine_records(ReplayResultLinkRecord, order_by=ReplayResultLinkRecord.created_at_ms, limit=limit, filters=filters)
+
     async def record_candidate_trade_packet(self, packet: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
             CandidateTradePacketRecord(
@@ -1065,12 +1224,22 @@ class Repository:
                 strategy_family=str(item.get("strategy_family") or "unknown"),
                 regime_label=str(item.get("regime_label") or "unknown"),
                 asset=str(item.get("asset") or "GLOBAL").upper(),
+                venue=str(item.get("venue") or "unknown"),
+                outcome_window=str(item.get("outcome_window") or "unknown"),
                 window_start_ms=int(item.get("window_start_ms") or 0),
                 window_end_ms=int(item.get("window_end_ms") or 0),
                 candidate_count=int(item.get("candidate_count") or 0),
                 allocation_count=int(item.get("allocation_count") or 0),
+                risk_reject_count=int(item.get("risk_reject_count") or 0),
+                council_veto_count=int(item.get("council_veto_count") or 0),
+                concentration_event_count=int(item.get("concentration_event_count") or 0),
                 win_rate_pct=float(item.get("win_rate_pct") or 0),
                 avg_net_ev_bps=float(item.get("avg_net_ev_bps") or 0),
+                avg_net_return_bps=float(item.get("avg_net_return_bps") or 0),
+                avg_realized_r=float(item.get("avg_realized_r") or 0),
+                avg_drawdown_bps=float(item.get("avg_drawdown_bps") or 0),
+                avg_fees_bps=float(item.get("avg_fees_bps") or 0),
+                avg_slippage_bps=float(item.get("avg_slippage_bps") or 0),
                 realized_pnl_usd=float(item.get("realized_pnl_usd") or 0),
                 score=float(item.get("score") or 0),
                 created_at_ms=int(item.get("created_at_ms") or 0),

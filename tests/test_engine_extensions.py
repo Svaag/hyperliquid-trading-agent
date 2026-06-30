@@ -20,6 +20,8 @@ class ReplayRepo:
     def __init__(self, now_ms: int):
         self.now_ms = now_ms
         self.recorded: dict[str, Any] | None = None
+        self.outcomes: list[dict[str, Any]] = []
+        self.replay_links: list[dict[str, Any]] = []
 
     async def list_alpha_candidates(self, **kwargs):
         return [
@@ -41,6 +43,13 @@ class ReplayRepo:
 
     async def list_pnl_attribution(self, **kwargs):
         return []
+
+    async def list_candidate_outcome_attributions(self, **kwargs):
+        return self.outcomes[: kwargs.get("limit", 100)]
+
+    async def record_replay_result_link(self, link):
+        self.replay_links.append(link)
+        return link["link_id"]
 
     async def record_replay_result(self, item):
         self.recorded = item
@@ -69,7 +78,51 @@ def test_engine_replay_compare_persists_immutable_artifact():
     assert artifact["metadata"]["artifact_type"] == "engine_shadow_comparison"
     assert artifact["metadata"]["exchange_actions"] == []
     assert artifact["status"] in {"passed", "advisory_pass", "failed"}
+    assert artifact["candidate_metrics"]["outcome_attribution_count"] == 0
     assert stable_hash({"a": 1}) == stable_hash({"a": 1})
+
+
+def test_engine_replay_groups_candidate_outcomes_by_strategy_regime_asset_venue_window():
+    now_ms = int(time.time() * 1000)
+    repo = ReplayRepo(now_ms)
+    repo.outcomes = [
+        {
+            "attribution_id": "coa_1",
+            "candidate_id": "cand_2",
+            "strategy_id": "microstructure_ofi",
+            "strategy_version": "1.0.0",
+            "strategy_family": "microstructure_orderflow",
+            "asset": "BTC",
+            "venue": "hyperliquid",
+            "candidate_horizon": "5m",
+            "regime_snapshot_id": "reg_1",
+            "outcome_window": "5m",
+            "window_end_ms": now_ms - 500,
+            "net_return_bps": 25,
+            "realized_r": 0.5,
+            "risk_decision": "allow",
+            "council_decision": "allow_shadow",
+            "metadata": {"regime_label": "orderflow=buy_pressure"},
+        }
+    ]
+    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_readiness_max_strategy_allocation_share_pct=100))
+
+    async def run():
+        return await service.compare_variant(
+            baseline_config={"current": True},
+            candidate_config={"current": True},
+            window_start_ms=now_ms - 60_000,
+            window_end_ms=now_ms,
+            universe=["BTC"],
+            variant_id="outcome_groups_v1",
+        )
+
+    artifact = anyio.run(run)
+
+    groups = artifact["candidate_metrics"]["strategy_regime_outcome_groups"]
+    assert "microstructure_ofi|orderflow=buy_pressure|BTC|hyperliquid|5m" in groups
+    assert groups["microstructure_ofi|orderflow=buy_pressure|BTC|hyperliquid|5m"]["avg_net_return_bps"] == 25
+    assert repo.replay_links
 
 
 def _candidate(cid: str, strategy: str, score: float) -> AlphaCandidate:

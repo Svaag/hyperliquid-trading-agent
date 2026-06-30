@@ -5,23 +5,28 @@ import pytest
 from hyperliquid_trading_agent.app.engine.alpha.directional import DirectionalMomentumStrategy
 from hyperliquid_trading_agent.app.engine.strategy_registry import (
     StrategyRegistry,
+    WAVE_1A_NUCLEUS_IDS,
     create_default_strategy_registry,
     planned_wave_1a_specs,
 )
 
 
-def test_default_strategy_registry_registers_existing_strategies_and_specs():
+def test_default_strategy_registry_locks_wave_1a_nucleus_only():
     registry = create_default_strategy_registry()
 
-    assert registry.get("directional_momentum_v2") is not None
-    assert registry.get("support_resistance_reversion_v2") is not None
-    assert registry.get("microstructure_ofi_v1") is not None
-    assert registry.get("news_event_alpha_v1") is not None
+    runtime_ids = {strategy.strategy_id for strategy in registry.strategies(enabled_only=True)}
+    assert runtime_ids == WAVE_1A_NUCLEUS_IDS
+    assert registry.get("directional_momentum_v2") is None
+    assert registry.spec("directional_momentum_v2") is not None
+    assert registry.spec("directional_momentum_v2").enabled is False
+    assert registry.spec("directional_momentum_v2").counts_for_breadth is False
     assert registry.spec("equity_options_flow_v1") is not None
+    assert registry.spec("equity_options_flow_v1").enabled is False
 
     metadata = registry.metadata()
-    assert metadata["enabled_strategy_count"] >= 4
-    assert "trend_following" in metadata["alpha_families"]
+    assert metadata["enabled_strategy_count"] == len(WAVE_1A_NUCLEUS_IDS)
+    assert metadata["alpha_breadth_count"] == 5
+    assert "liquidation_pressure" in metadata["alpha_families"]
     assert "microstructure_orderflow" in metadata["alpha_families"]
 
 

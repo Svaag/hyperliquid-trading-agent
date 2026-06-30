@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.engine.attribution import CandidateOutcomeAttributionService
 from hyperliquid_trading_agent.app.logging import get_logger
 
 log = get_logger(__name__)
@@ -32,6 +33,7 @@ class EnginePnLAttributionLoopService:
         self.last_error: str | None = None
         self.records_created = 0
         self.positions_marked = 0
+        self.candidate_outcomes = CandidateOutcomeAttributionService(repository)
 
     def status(self) -> dict[str, Any]:
         return {
@@ -77,6 +79,7 @@ class EnginePnLAttributionLoopService:
         active = [item for item in positions if item.get("position_state") in {"open", "approved", "de_risking", "trailing", "time_stop_pending"}]
         created = 0
         closed = 0
+        matured_outcomes = await self.candidate_outcomes.refresh_matured_outcomes(marks=mids, timestamp_ms=ts, limit=1000)
         for position in active:
             asset = str(position.get("asset") or "").upper()
             mark_px = _f(mids.get(asset))
@@ -137,7 +140,7 @@ class EnginePnLAttributionLoopService:
                 closed += 1
         self.last_run_at_ms = ts
         self.records_created += created
-        return {"positions_seen": len(active), "records_created": created, "positions_closed": closed}
+        return {"positions_seen": len(active), "records_created": created, "positions_closed": closed, "candidate_outcomes_matured": len(matured_outcomes)}
 
     async def _safe_all_mids(self) -> dict[str, float]:
         try:

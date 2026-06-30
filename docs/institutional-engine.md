@@ -85,9 +85,27 @@ The default gate requires 24h shadow observation, at least 100 engine runs, 250 
 
 ## Strategy portfolio, Council, replay, and bandit reports
 
-Wave 1A registers `microstructure_ofi_v2`, `liquidation_cascade_v1`, `liquidation_mean_revert_v1`, `funding_carry_v1`, and `oi_breakout_v1` as alpha breadth. `legacy_signal_adapter_v1` and `regime_defensive_flat_v1` are registered but do not count as independent alpha breadth.
+Wave 1 is the **evidence-producing strategy base**. Wave 2 is the deferred **proprietary perp-DEX edge layer**.
 
-Every allocated non-flat candidate builds a `CandidateTradePacket`, receives a deterministic role-based Council review, and must pass RiskGateway plus Council before a paper/shadow execution report can exist. The offline contextual-bandit endpoint is report-only: it writes recommendations with `auto_apply_allowed=false` and never mutates config, risk limits, or orders.
+Wave 1A locks the strategy-regime candidate nucleus:
+
+- `microstructure_ofi_v2`
+- `liquidation_cascade_v1`
+- `liquidation_mean_revert_v1`
+- `funding_carry_v1`
+- `oi_breakout_v1`
+- `legacy_signal_adapter_v1`
+- `regime_defensive_flat_v1`
+
+Only the five non-legacy/non-defensive Wave 1A strategies count as active alpha breadth by default. Pre-Wave1A strategies remain registered only as disabled comparison specs. `legacy_signal_adapter_v1` and `regime_defensive_flat_v1` do not count as independent alpha breadth.
+
+Wave 1B adds the evidence spine: every candidate receives candidate evidence links, fixed delayed outcome windows (`5m`, `15m`, `1h`, `4h`, `24h`), candidate-level RiskGateway coverage for non-flat candidates, Council packet/no-trade coverage, replay context links, and strategy-regime performance rows sourced from outcome attribution.
+
+Wave 1C deterministic strategies are implemented but gated behind `ENGINE_WAVE1C_ENABLED=false` by default until Wave 1B outcome evidence is reliable. The gated active set is `microstructure_absorption_v1`, `funding_squeeze_v1`, `basis_reversion_v1`, and `news_impulse_v1`; optional `range_rotation_v1` and `volatility_compression_breakout_v1` remain disabled pending replay depth.
+
+Every candidate builds a `CandidateTradePacket`, receives a deterministic role-based Council review, and must pass RiskGateway plus Council before a paper/shadow execution report can exist. The offline contextual-bandit endpoint is report-only: it writes recommendations with `auto_apply_allowed=false` and never mutates config, risk limits, or orders.
+
+Wave 2 is explicitly deferred. `ENGINE_WAVE2_ENABLED=true` is rejected until Wave 1 outcome attribution, replay grouping, and readiness gates are reliable. Wave 2 is not “more simple strategies”; it is reserved for DEX-native, cross-venue, regime-aware proprietary strategies: lead/lag, liquidity vacuum, stop-cluster, liquidation divergence, crowded long/short unwind, perp-basis momentum/reversion, carry-risk intelligence, and constrained policy recommendations.
 
 ## Shadow replay, throttles, and PnL marking
 
@@ -120,8 +138,12 @@ GET /engine/strategy-regime-performance
 GET /engine/strategy-regime-performance/{strategy_id}
 POST /engine/strategy-regime-performance/refresh
 GET /engine/candidate-trade-packets
+GET /engine/candidate-evidence-links
+GET /engine/candidate-outcome-attributions
 GET /engine/council-reviews
 GET /engine/diversity-events
+GET /engine/portfolio-concentration-events
+GET /engine/replay-result-links
 GET /engine/bandit-recommendations
 POST /engine/bandit-recommendations/run
 GET /engine/evidence-packs/{evidence_pack_id}
@@ -153,5 +175,6 @@ Alembic revisions:
 - `0013_execution_position_reconciliation`
 - `0014_model_registry_retention`
 - `0019_engine_strategy_regime_council_learning`
+- `0020_engine_candidate_outcome_evidence_spine`
 
-High-frequency event/feature data is intended for bounded retention and rollups; candidates, strategy specs, strategy-regime scorecards, Council reviews/votes, diversity events, bandit report-only recommendations, risk checks, evidence packs, execution reports, position theses, attribution, and governance records are durable audit artifacts.
+High-frequency event/feature data is intended for bounded retention and rollups; candidates, candidate evidence links, delayed outcome attributions, replay result links, strategy specs, strategy-regime scorecards, Council reviews/votes, diversity/concentration events, bandit report-only recommendations, risk checks, evidence packs, execution reports, position theses, attribution, and governance records are durable audit artifacts.
