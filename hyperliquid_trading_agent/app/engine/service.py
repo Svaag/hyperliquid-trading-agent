@@ -2,12 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperliquid_trading_agent.app.engine.alpha.directional import (
-    DirectionalMomentumStrategy,
-    SupportResistanceReversionStrategy,
-)
-from hyperliquid_trading_agent.app.engine.alpha.microstructure import MicrostructureOFIStrategy
-from hyperliquid_trading_agent.app.engine.alpha.news_event import NewsEventAlphaStrategy
 from hyperliquid_trading_agent.app.engine.candidate_book import CandidateBook
 from hyperliquid_trading_agent.app.engine.debate_adjudicator import (
     DebateAdjudicator,
@@ -22,6 +16,7 @@ from hyperliquid_trading_agent.app.engine.position_manager import PositionManage
 from hyperliquid_trading_agent.app.engine.regime import RegimeEngine
 from hyperliquid_trading_agent.app.engine.schemas import AlphaCandidate, OrderIntent
 from hyperliquid_trading_agent.app.engine.scorer import EVScorerService
+from hyperliquid_trading_agent.app.engine.strategy_registry import create_default_strategy_registry
 from hyperliquid_trading_agent.app.engine.throttles import StrategyThrottleController
 from hyperliquid_trading_agent.app.governance.risk_gateway import RiskGateway
 
@@ -66,12 +61,8 @@ class InstitutionalEngineService:
         self.execution = ExecutionGateway(repository=repository)
         self.positions = PositionManager(repository)
         self.throttles = StrategyThrottleController(settings)
-        self.strategies = [
-            DirectionalMomentumStrategy(),
-            SupportResistanceReversionStrategy(),
-            MicrostructureOFIStrategy(),
-            NewsEventAlphaStrategy(),
-        ]
+        self.strategy_registry = create_default_strategy_registry()
+        self.strategies = self.strategy_registry.strategies(enabled_only=True)
         self.last_run_at_ms: int | None = None
         self.last_error: str | None = None
         self.run_count = 0
@@ -94,6 +85,7 @@ class InstitutionalEngineService:
             "debate_count_today": self.debate_count_today,
             "last_throttle_summary": self.last_throttle_summary,
             "throttles": self.throttles.status(),
+            "strategy_registry": self.strategy_registry.metadata(),
         }
 
     async def run_once(self, *, symbols: list[str] | None = None) -> dict[str, Any]:

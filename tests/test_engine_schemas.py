@@ -17,6 +17,7 @@ from hyperliquid_trading_agent.app.engine.schemas import (
     PositionThesis,
     RegimeVector,
     StrategyPermissions,
+    StrategySpec,
 )
 
 
@@ -95,6 +96,30 @@ def test_regime_vector_contains_permissions_and_quality_flags():
     assert regime.quality_flags == ["implied_vol_unavailable"]
 
 
+def test_strategy_spec_contract_normalizes_assets_and_rejects_empty_ids():
+    spec = StrategySpec(
+        strategy_id="example_alpha_v1",
+        version="1.0.0",
+        family="test_family",
+        supported_assets=["btc", "BTC", " eth "],
+        supported_venues=["hyperliquid"],
+        supported_horizons=["15m"],
+        required_features=["mid"],
+        valid_regimes=["bull"],
+        max_candidates_per_run=1,
+        max_allocation_share_pct=45.0,
+        cooldown_ms=1000,
+        min_confidence=0.25,
+        min_ev_bps=8.0,
+        risk_tags=["test"],
+    )
+
+    assert spec.supported_assets == ["BTC", "ETH"]
+
+    with pytest.raises(ValidationError):
+        StrategySpec(strategy_id=" ", version="1", family="x")
+
+
 def test_alpha_candidate_lifecycle_and_invalidation_contract():
     candidate = AlphaCandidate(
         candidate_id="cand_1",
@@ -119,6 +144,8 @@ def test_alpha_candidate_lifecycle_and_invalidation_contract():
     )
 
     assert candidate.asset == "ETH"
+    assert candidate.strategy_version == "unknown"
+    assert candidate.counts_for_breadth is True
 
     with pytest.raises(ValidationError):
         AlphaCandidate(

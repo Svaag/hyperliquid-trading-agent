@@ -150,6 +150,52 @@ class StrategyPermissions(BaseModel):
     reason_codes: list[str] = Field(default_factory=list)
 
 
+class StrategySpec(BaseModel):
+    """Declarative contract for an institutional alpha strategy.
+
+    The registry uses this metadata for breadth accounting, allocation caps,
+    readiness evidence, and deterministic replay.  Defaults are intentionally
+    conservative so legacy candidates can be adapted without silently counting
+    as independent alpha breadth.
+    """
+
+    strategy_id: str
+    version: str
+    family: str
+    supported_assets: list[str] = Field(default_factory=list)
+    supported_venues: list[str] = Field(default_factory=list)
+    supported_horizons: list[str] = Field(default_factory=list)
+    required_features: list[str] = Field(default_factory=list)
+    valid_regimes: list[str] = Field(default_factory=list)
+    max_candidates_per_run: int = Field(default=1, ge=0)
+    max_allocation_share_pct: float = Field(default=45.0, ge=0.0, le=100.0)
+    cooldown_ms: int = Field(default=0, ge=0)
+    min_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    min_ev_bps: float = 0.0
+    risk_tags: list[str] = Field(default_factory=list)
+    counts_for_breadth: bool = True
+    enabled: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("strategy_id", "version", "family")
+    @classmethod
+    def _required_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("strategy_id, version, and family are required")
+        return value
+
+    @field_validator("supported_assets")
+    @classmethod
+    def _uppercase_supported_assets(cls, value: list[str]) -> list[str]:
+        return sorted({item.upper().strip() for item in value if item and item.strip()})
+
+    @field_validator("supported_venues", "supported_horizons", "required_features", "valid_regimes", "risk_tags")
+    @classmethod
+    def _dedupe_text_lists(cls, value: list[str]) -> list[str]:
+        return sorted({item.strip() for item in value if item and item.strip()})
+
+
 class RegimeVector(BaseModel):
     """Probabilistic regime snapshot replacing the legacy single risk-regime label."""
 
@@ -194,6 +240,16 @@ class RegimeVector(BaseModel):
 class AlphaCandidate(BaseModel):
     candidate_id: str
     strategy_id: str
+    strategy_version: str = "unknown"
+    strategy_family: str = "unknown"
+    valid_regimes: list[str] = Field(default_factory=list)
+    required_features: list[str] = Field(default_factory=list)
+    feature_coverage_pct: float = Field(default=0.0, ge=0.0, le=100.0)
+    expected_edge_bps: float = 0.0
+    risk_tags: list[str] = Field(default_factory=list)
+    counts_for_breadth: bool = True
+    portfolio_concentration_impact: dict[str, Any] = Field(default_factory=dict)
+    source_integrity: dict[str, Any] = Field(default_factory=dict)
     asset: str
     asset_class: AssetClass = "crypto"
     venue: str

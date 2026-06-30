@@ -2,11 +2,32 @@ from __future__ import annotations
 
 import hashlib
 
-from hyperliquid_trading_agent.app.engine.schemas import AlphaCandidate, FeatureSnapshot, RegimeVector
+from hyperliquid_trading_agent.app.engine.alpha.base import (
+    CORE_CRYPTO_ASSETS,
+    HYPERLIQUID_VENUES,
+    candidate_contract_fields,
+)
+from hyperliquid_trading_agent.app.engine.schemas import AlphaCandidate, FeatureSnapshot, RegimeVector, StrategySpec
 
 
 class NewsEventAlphaStrategy:
-    strategy_id = "news_event_alpha_v1"
+    spec = StrategySpec(
+        strategy_id="news_event_alpha_v1",
+        version="1.0.0",
+        family="event_driven_news",
+        supported_assets=CORE_CRYPTO_ASSETS,
+        supported_venues=HYPERLIQUID_VENUES,
+        supported_horizons=["1h"],
+        required_features=["mid", "catalyst_pressure"],
+        valid_regimes=["news_catalyst", "event_risk"],
+        max_candidates_per_run=1,
+        max_allocation_share_pct=45.0,
+        cooldown_ms=900_000,
+        min_confidence=0.35,
+        min_ev_bps=8.0,
+        risk_tags=["event_driven", "news", "catalyst"],
+    )
+    strategy_id = spec.strategy_id
 
     def generate(self, snapshot: FeatureSnapshot, regime: RegimeVector, *, timestamp_ms: int) -> list[AlphaCandidate]:
         if not regime.permissions.news_event_allowed:
@@ -24,6 +45,7 @@ class NewsEventAlphaStrategy:
             AlphaCandidate(
                 candidate_id="cand_" + digest,
                 strategy_id=self.strategy_id,
+                **candidate_contract_fields(self.spec, snapshot, expected_edge_bps=max(0.0, score - 50.0) / 2.0),
                 asset=snapshot.asset,
                 asset_class="crypto",
                 venue="hyperliquid",

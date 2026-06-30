@@ -2,11 +2,32 @@ from __future__ import annotations
 
 import hashlib
 
-from hyperliquid_trading_agent.app.engine.schemas import AlphaCandidate, FeatureSnapshot, RegimeVector
+from hyperliquid_trading_agent.app.engine.alpha.base import (
+    CORE_CRYPTO_ASSETS,
+    HYPERLIQUID_VENUES,
+    candidate_contract_fields,
+)
+from hyperliquid_trading_agent.app.engine.schemas import AlphaCandidate, FeatureSnapshot, RegimeVector, StrategySpec
 
 
 class DirectionalMomentumStrategy:
-    strategy_id = "directional_momentum_v2"
+    spec = StrategySpec(
+        strategy_id="directional_momentum_v2",
+        version="2.0.0",
+        family="trend_following",
+        supported_assets=CORE_CRYPTO_ASSETS,
+        supported_venues=HYPERLIQUID_VENUES,
+        supported_horizons=["30m"],
+        required_features=["mid"],
+        valid_regimes=["bull", "bear"],
+        max_candidates_per_run=1,
+        max_allocation_share_pct=45.0,
+        cooldown_ms=300_000,
+        min_confidence=0.35,
+        min_ev_bps=8.0,
+        risk_tags=["directional", "momentum", "trend"],
+    )
+    strategy_id = spec.strategy_id
 
     def generate(self, snapshot: FeatureSnapshot, regime: RegimeVector, *, timestamp_ms: int) -> list[AlphaCandidate]:
         if not regime.permissions.momentum_allowed:
@@ -27,6 +48,7 @@ class DirectionalMomentumStrategy:
             AlphaCandidate(
                 candidate_id=cid,
                 strategy_id=self.strategy_id,
+                **candidate_contract_fields(self.spec, snapshot, expected_edge_bps=max(0.0, score - 50.0) / 2.0),
                 asset=snapshot.asset,
                 asset_class="crypto",
                 venue="hyperliquid",
@@ -50,7 +72,23 @@ class DirectionalMomentumStrategy:
 
 
 class SupportResistanceReversionStrategy:
-    strategy_id = "support_resistance_reversion_v2"
+    spec = StrategySpec(
+        strategy_id="support_resistance_reversion_v2",
+        version="2.0.0",
+        family="mean_reversion",
+        supported_assets=CORE_CRYPTO_ASSETS,
+        supported_venues=HYPERLIQUID_VENUES,
+        supported_horizons=["15m"],
+        required_features=["mid", "top_imbalance"],
+        valid_regimes=["range"],
+        max_candidates_per_run=1,
+        max_allocation_share_pct=45.0,
+        cooldown_ms=180_000,
+        min_confidence=0.30,
+        min_ev_bps=8.0,
+        risk_tags=["mean_reversion", "orderflow", "support_resistance"],
+    )
+    strategy_id = spec.strategy_id
 
     def generate(self, snapshot: FeatureSnapshot, regime: RegimeVector, *, timestamp_ms: int) -> list[AlphaCandidate]:
         if not regime.permissions.mean_reversion_allowed:
@@ -70,6 +108,7 @@ class SupportResistanceReversionStrategy:
             AlphaCandidate(
                 candidate_id=cid,
                 strategy_id=self.strategy_id,
+                **candidate_contract_fields(self.spec, snapshot, expected_edge_bps=max(0.0, score - 50.0) / 2.5),
                 asset=snapshot.asset,
                 asset_class="crypto",
                 venue="hyperliquid",
