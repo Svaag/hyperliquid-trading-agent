@@ -697,6 +697,8 @@ Implementation is complete when:
 
 
 
+
+
 <!-- pi-plan-progress:start -->
 ## Progress
 
@@ -711,7 +713,7 @@ Status legend: `[x]` done, `[~]` in progress, `[-]` skipped, `[>]` deferred, `[!
 - [x] 7. Add first-class persistence, repository methods, and API routes. _(done)_
 - [x] 8. Build strategy-regime performance scorecards. _(done)_
 - [x] 9. Upgrade replay comparison and readiness gate checks. _(done)_
-- [ ] 10. Add offline contextual-bandit report-only recommendations. _(pending)_
+- [x] 10. Add offline contextual-bandit report-only recommendations. _(done)_
 - [ ] 11. Update tests, docs, and runbooks. _(pending)_
 - [ ] 12. Execute the clean shadow observation and paper-promotion package. _(pending)_
 

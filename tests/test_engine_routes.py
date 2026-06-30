@@ -57,6 +57,12 @@ class FakeEngineRepository:
     async def list_bandit_recommendations(self, **kwargs):
         return [{"recommendation_id": "bandit_1", "auto_apply_allowed": False}]
 
+    async def upsert_bandit_policy_snapshot(self, snapshot):
+        return snapshot["policy_id"]
+
+    async def record_bandit_recommendation(self, recommendation):
+        return recommendation["recommendation_id"]
+
     async def get_evidence_pack(self, evidence_pack_id):
         return {"evidence_pack_id": evidence_pack_id} if evidence_pack_id == "ep_1" else None
 

@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.engine.bandit import OfflineContextualBanditReporter
 from hyperliquid_trading_agent.app.engine.event_ledger import now_ms
 from hyperliquid_trading_agent.app.engine.readiness import build_paper_readiness_scorecard
 from hyperliquid_trading_agent.app.engine.replay_compare import (
@@ -206,7 +207,10 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
     @app.post("/engine/bandit-recommendations/run")
     async def engine_bandit_recommendations_run(request: EngineBanditRecommendationRunRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _auth(authorization)
-        return {"status": "accepted", "report_only": True, "auto_apply_allowed": False, "window_hours": request.window_hours, "created_at_ms": now_ms(), "recommendation_count": 0}
+        end_ms = now_ms()
+        start_ms = end_ms - request.window_hours * 3_600_000
+        result = await OfflineContextualBanditReporter(_repo()).run(window_start_ms=start_ms, window_end_ms=end_ms)
+        return {"status": "completed", "window_hours": request.window_hours, "created_at_ms": end_ms, **result}
 
     @app.get("/engine/evidence-packs/{evidence_pack_id}")
     async def engine_evidence_pack(evidence_pack_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
