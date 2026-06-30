@@ -68,6 +68,7 @@ def test_engine_replay_compare_persists_immutable_artifact():
     assert artifact["proposal_id"] == "engine:tighten_ev_thresholds_v1"
     assert artifact["metadata"]["artifact_type"] == "engine_shadow_comparison"
     assert artifact["metadata"]["exchange_actions"] == []
+    assert artifact["status"] in {"passed", "advisory_pass", "failed"}
     assert stable_hash({"a": 1}) == stable_hash({"a": 1})
 
 
@@ -91,6 +92,27 @@ def _candidate(cid: str, strategy: str, score: float) -> AlphaCandidate:
         created_at_ms=1,
         expires_at_ms=999,
     )
+
+
+def test_engine_replay_compare_marks_safe_inconclusive_as_advisory_pass():
+    now_ms = int(time.time() * 1000)
+    repo = ReplayRepo(now_ms)
+    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_readiness_max_strategy_allocation_share_pct=100))
+
+    async def run():
+        return await service.compare_variant(
+            baseline_config={"current": True},
+            candidate_config={"current": True},
+            window_start_ms=now_ms - 60_000,
+            window_end_ms=now_ms,
+            universe=["BTC"],
+            variant_id="same_config_v1",
+        )
+
+    artifact = anyio.run(run)
+
+    assert artifact["status"] == "advisory_pass"
+    assert artifact["metadata"]["promotion_decision"] == "eligible_for_review"
 
 
 def test_strategy_throttle_filters_candidates_and_blocks_loop_allocations():

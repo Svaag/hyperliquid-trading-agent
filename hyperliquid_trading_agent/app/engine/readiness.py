@@ -5,6 +5,7 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.engine.replay_compare import latest_engine_replay_comparison
 from hyperliquid_trading_agent.app.engine.validation_report import build_engine_validation_report
 
 
@@ -42,8 +43,38 @@ def _in_window(items: list[dict[str, Any]], start_ms: int, *timestamp_keys: str)
     return [item for item in items if _ts(item, *timestamp_keys) >= start_ms]
 
 
+def _metadata(item: dict[str, Any]) -> dict[str, Any]:
+    return item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+
+
+def _candidate_metadata_complete(item: dict[str, Any]) -> bool:
+    metadata = _metadata(item)
+    strategy_version = metadata.get("strategy_version") or item.get("strategy_version")
+    strategy_family = metadata.get("strategy_family") or item.get("strategy_family")
+    feature_coverage = metadata.get("feature_coverage_pct", item.get("feature_coverage_pct"))
+    return bool(
+        item.get("strategy_id")
+        and strategy_version
+        and strategy_version != "unknown"
+        and strategy_family
+        and strategy_family != "unknown"
+        and item.get("regime_snapshot_id")
+        and feature_coverage is not None
+    )
+
+
 def _issue(code: str, detail: str, *, severity: str = "critical") -> dict[str, str]:
     return {"code": code, "severity": severity, "detail": detail}
+
+
+async def _maybe_list(repository: Any, method_name: str, **kwargs) -> list[dict[str, Any]]:
+    method = getattr(repository, method_name, None)
+    if not callable(method):
+        return []
+    try:
+        return await method(**kwargs)
+    except TypeError:
+        return await method()
 
 
 async def build_paper_readiness_scorecard(
@@ -64,7 +95,7 @@ async def build_paper_readiness_scorecard(
     generated_at_ms = _now_ms()
     hours = int(window_hours or settings.engine_readiness_window_hours)
     window_ms = max(1, hours) * 60 * 60 * 1000
-    start_ms = generated_at_ms - window_ms
+    start_ms = max(generated_at_ms - window_ms, int(getattr(settings, "engine_readiness_clean_window_start_ms", 0) or 0))
     service_status = engine_service.status() if engine_service is not None and callable(getattr(engine_service, "status", None)) else {}
 
     report = await build_engine_validation_report(repository, limit=limit)
@@ -73,18 +104,25 @@ async def build_paper_readiness_scorecard(
     allocations_all = await repository.list_allocation_decisions(limit=limit)
     intents_all = await repository.list_order_intents(limit=limit)
     reports_all = await repository.list_execution_reports(limit=limit)
-    risk_rejects_all = await repository.list_risk_gateway_decisions(limit=limit, decision="reject")
+    risk_all = await repository.list_risk_gateway_decisions(limit=limit)
+    risk_rejects_all = [item for item in risk_all if item.get("decision") == "reject"]
     positions_all = await repository.list_position_theses(limit=limit)
     pnl_all = await repository.list_pnl_attribution(limit=limit)
+    council_all = await _maybe_list(repository, "list_council_reviews", limit=limit)
+    strategy_regime_performance_all = await _maybe_list(repository, "list_strategy_regime_performance", limit=limit)
+    latest_replay_comparison = await latest_engine_replay_comparison(repository)
 
     candidates = _in_window(candidates_all, start_ms, "created_at_ms")
     ev_estimates = _in_window(ev_all, start_ms, "created_at_ms")
     allocations = _in_window(allocations_all, start_ms, "created_at_ms")
     intents = _in_window(intents_all, start_ms, "created_at_ms")
     reports = _in_window(reports_all, start_ms, "created_at_ms")
+    risk_decisions = _in_window(risk_all, start_ms, "created_at_ms")
     risk_rejects = _in_window(risk_rejects_all, start_ms, "created_at_ms")
     positions = _in_window(positions_all, start_ms, "updated_at_ms", "opened_at_ms")
     pnl_records = _in_window(pnl_all, start_ms, "window_end_ms")
+    council_reviews = _in_window(council_all, start_ms, "created_at_ms")
+    strategy_regime_performance = _in_window(strategy_regime_performance_all, start_ms, "created_at_ms", "window_end_ms")
 
     hard_blocks: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
@@ -196,6 +234,15 @@ async def build_paper_readiness_scorecard(
         warnings.append(_issue("low_ev_coverage", f"EV coverage {ev_coverage_pct}% below {settings.engine_readiness_min_ev_coverage_pct}%.", severity="warning"))
     if allocation_rate_pct < settings.engine_readiness_min_allocation_rate_pct or allocation_rate_pct > settings.engine_readiness_max_allocation_rate_pct:
         warnings.append(_issue("allocation_rate_out_of_bounds", f"Allocation rate {allocation_rate_pct}% outside {settings.engine_readiness_min_allocation_rate_pct}-{settings.engine_readiness_max_allocation_rate_pct}%.", severity="warning"))
+    metadata_complete = [_candidate_metadata_complete(item) for item in candidates]
+    candidate_strategy_metadata_coverage_pct = _pct(sum(1 for item in metadata_complete if item), len(metadata_complete))
+    if candidate_strategy_metadata_coverage_pct < settings.engine_readiness_min_candidate_strategy_metadata_coverage_pct:
+        hard_blocks.append(_issue("candidate_strategy_metadata_missing", f"Candidate strategy metadata coverage {candidate_strategy_metadata_coverage_pct}% below {settings.engine_readiness_min_candidate_strategy_metadata_coverage_pct}%."))
+    allocated_candidate_ids = {str(item.get("candidate_id")) for item in allocations if item.get("status") in {"allocate", "reduce", "require_debate"} and item.get("candidate_id")}
+    council_candidate_ids = {str(item.get("candidate_id")) for item in council_reviews if item.get("candidate_id")}
+    council_review_coverage_pct = _pct(len(allocated_candidate_ids & council_candidate_ids), len(allocated_candidate_ids))
+    if council_review_coverage_pct < settings.engine_readiness_min_council_review_coverage_pct:
+        hard_blocks.append(_issue("council_review_coverage_low", f"Council review coverage {council_review_coverage_pct}% below {settings.engine_readiness_min_council_review_coverage_pct}%."))
     checks["decision_quality"] = {
         "candidate_count": len(candidates),
         "ev_estimate_count": len(ev_estimates),
@@ -203,6 +250,8 @@ async def build_paper_readiness_scorecard(
         "allocation_count": len(allocations),
         "allocated_count": allocated_count,
         "allocation_rate_pct": allocation_rate_pct,
+        "candidate_strategy_metadata_coverage_pct": candidate_strategy_metadata_coverage_pct,
+        "council_review_coverage_pct": council_review_coverage_pct,
     }
 
     stale_or_invalid_rejects = 0
@@ -216,10 +265,16 @@ async def build_paper_readiness_scorecard(
         warnings.append(_issue("risk_reject_rate_high", f"Risk reject rate {risk_reject_rate_pct}% exceeds {settings.engine_readiness_max_risk_reject_rate_pct}%.", severity="warning"))
     if len(risk_rejects) >= settings.engine_validation_risk_reject_spike_count and stale_or_invalid_rejects >= max(1, len(risk_rejects) // 2):
         hard_blocks.append(_issue("risk_reject_spike_critical", f"{len(risk_rejects)} rejects in window; stale_or_invalid={stale_or_invalid_rejects}."))
+    intent_ids = {str(item.get("intent_id")) for item in intents if item.get("intent_id")}
+    risk_intent_ids = {str(item.get("intent_id")) for item in risk_decisions if item.get("intent_id")}
+    risk_gateway_coverage_pct = _pct(len(intent_ids & risk_intent_ids), len(intent_ids))
+    if risk_gateway_coverage_pct < settings.engine_readiness_min_risk_gateway_coverage_pct:
+        hard_blocks.append(_issue("risk_gateway_coverage_low", f"RiskGateway coverage {risk_gateway_coverage_pct}% below {settings.engine_readiness_min_risk_gateway_coverage_pct}%."))
     checks["risk_gateway"] = {
         "risk_reject_count": len(risk_rejects),
         "risk_reject_rate_pct": risk_reject_rate_pct,
         "stale_or_invalid_reject_count": stale_or_invalid_rejects,
+        "risk_gateway_coverage_pct": risk_gateway_coverage_pct,
     }
 
     # Execution simulation health.
@@ -240,31 +295,89 @@ async def build_paper_readiness_scorecard(
 
     # Strategy diversity and dominance.
     candidate_strategy_counts = Counter(str(item.get("strategy_id") or "unknown") for item in candidates)
-    candidate_by_id = {str(item.get("candidate_id")): item for item in candidates if item.get("candidate_id")}
+    active_alpha_strategies: set[str] = set()
+    active_alpha_families: set[str] = set()
+    for candidate in candidates:
+        metadata = _metadata(candidate)
+        family = str(metadata.get("strategy_family") or candidate.get("strategy_family") or "unknown")
+        counts_for_breadth = bool(metadata.get("counts_for_breadth", candidate.get("counts_for_breadth", True)))
+        if counts_for_breadth and family not in {"legacy_bridge", "risk_off_defensive"} and candidate.get("side") != "flat":
+            active_alpha_strategies.add(str(candidate.get("strategy_id") or "unknown"))
+            active_alpha_families.add(family)
+    if len(active_alpha_strategies) < settings.engine_readiness_min_active_strategy_count_24h:
+        hard_blocks.append(_issue("insufficient_active_strategy_count", f"Need >={settings.engine_readiness_min_active_strategy_count_24h} active alpha strategies; observed {len(active_alpha_strategies)}."))
+    if len(active_alpha_families) < settings.engine_readiness_min_active_strategy_family_count_24h:
+        hard_blocks.append(_issue("insufficient_active_strategy_family_count", f"Need >={settings.engine_readiness_min_active_strategy_family_count_24h} active alpha families; observed {len(active_alpha_families)}."))
+
     allocation_strategy_counts: Counter[str] = Counter()
     allocation_notional_by_strategy: dict[str, float] = defaultdict(float)
+    allocation_notional_by_family: dict[str, float] = defaultdict(float)
+    allocation_notional_by_symbol_strategy: dict[str, float] = defaultdict(float)
+    total_allocated_notional = 0.0
     for allocation in allocations:
         if allocation.get("status") not in {"allocate", "reduce", "require_debate"}:
             continue
-        candidate = candidate_by_id.get(str(allocation.get("candidate_id") or ""), {})
-        strategy = str(candidate.get("strategy_id") or "unknown")
+        metadata = _metadata(allocation)
+        strategy = str(metadata.get("strategy_id") or allocation.get("strategy_id") or "unknown")
+        family = str(metadata.get("strategy_family") or allocation.get("strategy_family") or "unknown")
+        asset = str(metadata.get("asset") or allocation.get("asset") or "UNKNOWN").upper()
+        notional = _f(allocation.get("allocated_notional_usd"))
         allocation_strategy_counts[strategy] += 1
-        allocation_notional_by_strategy[strategy] += _f(allocation.get("allocated_notional_usd"))
-    dominant_strategy = None
-    dominant_share_pct = 0.0
-    if allocated_count:
-        dominant_strategy, dominant_count = allocation_strategy_counts.most_common(1)[0] if allocation_strategy_counts else (None, 0)
-        dominant_share_pct = _pct(dominant_count, allocated_count)
+        allocation_notional_by_strategy[strategy] += notional
+        allocation_notional_by_family[family] += notional
+        allocation_notional_by_symbol_strategy[f"{asset}:{strategy}"] += notional
+        total_allocated_notional += notional
+    dominant_strategy = max(allocation_notional_by_strategy, key=allocation_notional_by_strategy.get) if allocation_notional_by_strategy else None
+    dominant_share_pct = _pct(allocation_notional_by_strategy.get(dominant_strategy or "", 0.0), total_allocated_notional)
+    dominant_family = max(allocation_notional_by_family, key=allocation_notional_by_family.get) if allocation_notional_by_family else None
+    dominant_family_share_pct = _pct(allocation_notional_by_family.get(dominant_family or "", 0.0), total_allocated_notional)
+    dominant_symbol_strategy = max(allocation_notional_by_symbol_strategy, key=allocation_notional_by_symbol_strategy.get) if allocation_notional_by_symbol_strategy else None
+    dominant_symbol_strategy_share_pct = _pct(allocation_notional_by_symbol_strategy.get(dominant_symbol_strategy or "", 0.0), total_allocated_notional)
     if dominant_share_pct > 45:
-        warnings.append(_issue("strategy_dominance", f"{dominant_strategy} produced {dominant_share_pct}% of allocations.", severity="warning"))
+        warnings.append(_issue("strategy_dominance", f"{dominant_strategy} produced {dominant_share_pct}% of allocation notional.", severity="warning"))
     if dominant_share_pct > settings.engine_readiness_max_strategy_allocation_share_pct:
         hard_blocks.append(_issue("strategy_allocation_dominance", f"{dominant_strategy} allocation share {dominant_share_pct}% exceeds {settings.engine_readiness_max_strategy_allocation_share_pct}%."))
+    if dominant_family_share_pct > settings.engine_readiness_max_strategy_family_allocation_share_pct:
+        hard_blocks.append(_issue("strategy_family_allocation_dominance", f"{dominant_family} family allocation share {dominant_family_share_pct}% exceeds {settings.engine_readiness_max_strategy_family_allocation_share_pct}%."))
+    if dominant_symbol_strategy_share_pct > settings.engine_readiness_max_symbol_strategy_allocation_share_pct:
+        hard_blocks.append(_issue("symbol_strategy_allocation_dominance", f"{dominant_symbol_strategy} share {dominant_symbol_strategy_share_pct}% exceeds {settings.engine_readiness_max_symbol_strategy_allocation_share_pct}%."))
     checks["strategy_diversity"] = {
         "candidate_counts": dict(candidate_strategy_counts),
+        "active_alpha_strategy_count": len(active_alpha_strategies),
+        "active_alpha_family_count": len(active_alpha_families),
+        "active_alpha_strategies": sorted(active_alpha_strategies),
+        "active_alpha_families": sorted(active_alpha_families),
         "allocation_counts": dict(allocation_strategy_counts),
         "allocation_notional_usd": {key: round(value, 4) for key, value in allocation_notional_by_strategy.items()},
+        "allocation_notional_by_family": {key: round(value, 4) for key, value in allocation_notional_by_family.items()},
+        "allocation_notional_by_symbol_strategy": {key: round(value, 4) for key, value in allocation_notional_by_symbol_strategy.items()},
         "dominant_strategy": dominant_strategy,
         "dominant_allocation_share_pct": dominant_share_pct,
+        "dominant_family": dominant_family,
+        "dominant_family_share_pct": dominant_family_share_pct,
+        "dominant_symbol_strategy": dominant_symbol_strategy,
+        "dominant_symbol_strategy_share_pct": dominant_symbol_strategy_share_pct,
+    }
+
+    # Strategy-regime evidence.
+    strategy_regime_rows_ok = [
+        row
+        for row in strategy_regime_performance
+        if _i(row.get("candidate_count"), 0) >= settings.engine_readiness_min_strategy_regime_sample_count and _f(row.get("score")) >= settings.engine_readiness_min_strategy_regime_score
+    ]
+    evidence_strategy_ids = {str(row.get("strategy_id") or "unknown") for row in strategy_regime_rows_ok}
+    strategy_regime_evidence_coverage_pct = _pct(len(active_alpha_strategies & evidence_strategy_ids), len(active_alpha_strategies))
+    if strategy_regime_evidence_coverage_pct < settings.engine_readiness_min_strategy_regime_evidence_coverage_pct:
+        hard_blocks.append(_issue("strategy_regime_evidence_coverage_low", f"Strategy-regime evidence coverage {strategy_regime_evidence_coverage_pct}% below {settings.engine_readiness_min_strategy_regime_evidence_coverage_pct}%."))
+    low_score_rows = [row for row in strategy_regime_performance if _i(row.get("candidate_count"), 0) >= settings.engine_readiness_min_strategy_regime_sample_count and _f(row.get("score")) < settings.engine_readiness_min_strategy_regime_score]
+    if low_score_rows:
+        hard_blocks.append(_issue("strategy_regime_score_low", f"{len(low_score_rows)} strategy-regime rows below minimum score {settings.engine_readiness_min_strategy_regime_score}."))
+    checks["strategy_regime_evidence"] = {
+        "row_count": len(strategy_regime_performance),
+        "qualifying_row_count": len(strategy_regime_rows_ok),
+        "coverage_pct": strategy_regime_evidence_coverage_pct,
+        "required_sample_count": settings.engine_readiness_min_strategy_regime_sample_count,
+        "required_score": settings.engine_readiness_min_strategy_regime_score,
     }
 
     # PnL attribution and EV calibration.
@@ -292,21 +405,36 @@ async def build_paper_readiness_scorecard(
         "bucket_summary": report.get("ev_calibration", {}).get("bucket_summary") or {},
     }
 
-    # Replay comparison placeholder/compat check. Step 2 will populate these artifacts.
-    latest_replay = None
-    if callable(getattr(repository, "list_replay_results", None)):
-        replay_items = await repository.list_replay_results(limit=20)
-        engine_replays = [
-            item
-            for item in replay_items
-            if str(item.get("proposal_id") or "").startswith("engine:") or (item.get("metadata") or {}).get("artifact_type") == "engine_shadow_comparison"
-        ]
-        latest_replay = engine_replays[0] if engine_replays else None
-        if latest_replay and (latest_replay.get("status") == "failed" or (latest_replay.get("metadata") or {}).get("verdict") == "candidate_worse"):
-            hard_blocks.append(_issue("replay_comparison_failed", f"latest engine replay {latest_replay.get('replay_id')} status/verdict failed."))
-        elif latest_replay is None:
-            warnings.append(_issue("replay_comparison_missing", "No engine shadow replay comparison artifact exists yet.", severity="warning"))
-    checks["shadow_replay"] = {"latest_replay": latest_replay, "required": False}
+    # Replay comparison gate.
+    latest_replay = latest_replay_comparison
+    replay_required = bool(settings.engine_readiness_require_latest_replay)
+    replay_ok = False
+    replay_status = None
+    replay_window_hours = 0.0
+    replay_sample_size = 0
+    if latest_replay:
+        replay_status = str(latest_replay.get("status") or "unknown")
+        metadata = latest_replay.get("metadata") if isinstance(latest_replay.get("metadata"), dict) else {}
+        data_window = metadata.get("data_window") if isinstance(metadata.get("data_window"), dict) else {}
+        window_start = _i(data_window.get("start_ms"), 0)
+        window_end = _i(data_window.get("end_ms"), 0)
+        if window_start and window_end and window_end > window_start:
+            replay_window_hours = round((window_end - window_start) / 3_600_000, 4)
+        candidate_metrics = latest_replay.get("candidate_metrics") if isinstance(latest_replay.get("candidate_metrics"), dict) else {}
+        replay_sample_size = _i(candidate_metrics.get("candidate_count"), 0)
+        if replay_status in {"passed", "advisory_pass"}:
+            replay_ok = True
+        if replay_status not in {"passed", "advisory_pass"}:
+            hard_blocks.append(_issue("replay_comparison_failed", f"latest engine replay {latest_replay.get('replay_id')} status={replay_status}."))
+        if replay_window_hours and replay_window_hours < settings.engine_readiness_min_replay_window_hours:
+            hard_blocks.append(_issue("replay_comparison_stale", f"Replay window {replay_window_hours}h below required {settings.engine_readiness_min_replay_window_hours}h."))
+        if replay_sample_size and replay_sample_size < settings.engine_readiness_min_replay_sample_size:
+            hard_blocks.append(_issue("replay_comparison_stale", f"Replay sample size {replay_sample_size} below required {settings.engine_readiness_min_replay_sample_size}."))
+    elif replay_required:
+        hard_blocks.append(_issue("replay_comparison_missing", "No engine shadow replay comparison artifact exists."))
+    else:
+        warnings.append(_issue("replay_comparison_missing", "No engine shadow replay comparison artifact exists yet.", severity="warning"))
+    checks["shadow_replay"] = {"latest_replay": latest_replay, "required": replay_required, "ok": replay_ok, "status": replay_status, "window_hours": replay_window_hours, "sample_size": replay_sample_size}
 
     # Numeric score.
     score = 100
@@ -321,6 +449,14 @@ async def build_paper_readiness_scorecard(
     if allocation_rate_pct < settings.engine_readiness_min_allocation_rate_pct or allocation_rate_pct > settings.engine_readiness_max_allocation_rate_pct:
         score -= 8
     if dominant_share_pct > settings.engine_readiness_max_strategy_allocation_share_pct:
+        score -= 10
+    if dominant_family_share_pct > settings.engine_readiness_max_strategy_family_allocation_share_pct:
+        score -= 10
+    if dominant_symbol_strategy_share_pct > settings.engine_readiness_max_symbol_strategy_allocation_share_pct:
+        score -= 10
+    if council_review_coverage_pct < settings.engine_readiness_min_council_review_coverage_pct:
+        score -= 10
+    if strategy_regime_evidence_coverage_pct < settings.engine_readiness_min_strategy_regime_evidence_coverage_pct:
         score -= 10
     if avg_slippage_bps > settings.engine_readiness_max_avg_slippage_bps:
         score -= 8
@@ -357,6 +493,16 @@ async def build_paper_readiness_scorecard(
         "allocation_rate_pct": allocation_rate_pct,
         "dominant_strategy": dominant_strategy,
         "dominant_allocation_share_pct": dominant_share_pct,
+        "dominant_family": dominant_family,
+        "dominant_family_share_pct": dominant_family_share_pct,
+        "dominant_symbol_strategy": dominant_symbol_strategy,
+        "dominant_symbol_strategy_share_pct": dominant_symbol_strategy_share_pct,
+        "active_alpha_strategy_count": len(active_alpha_strategies),
+        "active_alpha_family_count": len(active_alpha_families),
+        "candidate_strategy_metadata_coverage_pct": candidate_strategy_metadata_coverage_pct,
+        "council_review_coverage_pct": council_review_coverage_pct,
+        "risk_gateway_coverage_pct": risk_gateway_coverage_pct,
+        "strategy_regime_evidence_coverage_pct": strategy_regime_evidence_coverage_pct,
         "avg_slippage_bps": avg_slippage_bps,
         "fill_failure_rate_pct": fill_failure_rate_pct,
         "open_position_count": len(open_positions),
@@ -387,11 +533,11 @@ def _recommendation(hard_blocks: list[dict[str, str]], warnings: list[dict[str, 
         return "rollback_to_shadow"
     if "missing_core_data" in codes or "engine_loop_stale" in codes:
         return "fix_data_quality"
-    if "strategy_dominance" in codes or "strategy_allocation_dominance" in codes:
+    if "strategy_dominance" in codes or "strategy_allocation_dominance" in codes or "strategy_family_allocation_dominance" in codes or "symbol_strategy_allocation_dominance" in codes:
         return "tighten_strategy_throttles"
     if "risk_reject_spike_critical" in codes or "risk_reject_rate_high" in codes:
         return "review_risk_rejects"
-    if "replay_comparison_missing" in codes or "replay_comparison_failed" in codes:
+    if "replay_comparison_missing" in codes or "replay_comparison_failed" in codes or "replay_comparison_stale" in codes:
         return "run_replay_comparison"
     return "continue_shadow"
 
@@ -407,12 +553,14 @@ def _next_actions(hard_blocks: list[dict[str, str]], warnings: list[dict[str, st
         actions.append("Keep ENGINE_PAPER_ENABLED=false, ENGINE_EXECUTION_MODES=shadow, and ENGINE_LIVE_ENABLED=false before further review.")
     if "risk_reject_spike_critical" in codes or "risk_reject_rate_high" in codes:
         actions.append("Review latest risk rejects and stale/invalid data violations before promotion.")
-    if "strategy_dominance" in codes or "strategy_allocation_dominance" in codes:
-        actions.append("Tighten or enable strategy-level throttles and continue shadow observation.")
-    if "replay_comparison_missing" in codes:
+    if "strategy_dominance" in codes or "strategy_allocation_dominance" in codes or "strategy_family_allocation_dominance" in codes or "symbol_strategy_allocation_dominance" in codes:
+        actions.append("Tighten or enable strategy/family/symbol diversity controls and continue shadow observation.")
+    if "replay_comparison_missing" in codes or "replay_comparison_stale" in codes or "replay_comparison_failed" in codes:
         actions.append("Run an engine shadow replay comparison artifact for the readiness window.")
     if "position_marking_unhealthy" in codes or "pnl_attribution_stale" in codes:
         actions.append("Complete the simulated PnL attribution loop before enabling paper fills.")
+    if "insufficient_active_strategy_count" in codes or "insufficient_active_strategy_family_count" in codes or "strategy_regime_evidence_coverage_low" in codes:
+        actions.append("Continue shadow collection until diversified strategy-regime evidence is populated.")
     if not actions and recommendation == "ready_for_paper":
         actions.append("Proceed to human review of the paper-mode promotion runbook; do not enable live execution.")
     return actions

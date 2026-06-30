@@ -29,31 +29,46 @@ class FakeReadinessRepository:
         anchor = now_ms - 2 * 60 * 60 * 1000
         old = now_ms - 30 * 60 * 1000
         self.candidates = [
-            {"candidate_id": "cand_1", "strategy_id": "directional_momentum", "asset": "BTC", "status": "new", "side": "long", "created_at_ms": old},
-            {"candidate_id": "cand_2", "strategy_id": "microstructure_ofi", "asset": "BTC", "status": "new", "side": "short", "created_at_ms": now_ms - 1000},
+            {"candidate_id": "cand_1", "strategy_id": "directional_momentum_v2", "asset": "BTC", "status": "new", "side": "long", "regime_snapshot_id": "reg_1", "created_at_ms": old, "metadata": {"strategy_version": "2.0.0", "strategy_family": "trend_following", "feature_coverage_pct": 100.0, "counts_for_breadth": True, "regime_label": "trend=bull"}},
+            {"candidate_id": "cand_2", "strategy_id": "microstructure_ofi_v2", "asset": "ETH", "status": "new", "side": "short", "regime_snapshot_id": "reg_2", "created_at_ms": now_ms - 1000, "metadata": {"strategy_version": "2.0.0", "strategy_family": "microstructure_orderflow", "feature_coverage_pct": 100.0, "counts_for_breadth": True, "regime_label": "orderflow=sell_pressure"}},
         ]
         self.evs = [
             {"estimate_id": "ev_1", "candidate_id": "cand_1", "net_ev_bps": 12, "risk_adjusted_utility": 0.4, "uncertainty": 0.1, "calibration_bucket": "medium", "created_at_ms": old},
             {"estimate_id": "ev_2", "candidate_id": "cand_2", "net_ev_bps": 9, "risk_adjusted_utility": 0.3, "uncertainty": 0.2, "calibration_bucket": "medium", "created_at_ms": now_ms - 1000},
         ]
         self.allocations = [
-            {"allocation_id": "alloc_1", "candidate_id": "cand_1", "status": "allocate", "allocated_notional_usd": 1000, "created_at_ms": old},
-            {"allocation_id": "alloc_2", "candidate_id": "cand_2", "status": "allocate", "allocated_notional_usd": 900, "created_at_ms": now_ms - 1000},
+            {"allocation_id": "alloc_1", "candidate_id": "cand_1", "status": "allocate", "allocated_notional_usd": 1000, "created_at_ms": old, "metadata": {"strategy_id": "directional_momentum_v2", "strategy_family": "trend_following", "asset": "BTC"}},
+            {"allocation_id": "alloc_2", "candidate_id": "cand_2", "status": "allocate", "allocated_notional_usd": 900, "created_at_ms": now_ms - 1000, "metadata": {"strategy_id": "microstructure_ofi_v2", "strategy_family": "microstructure_orderflow", "asset": "ETH"}},
             {"allocation_id": "alloc_3", "candidate_id": "cand_1", "status": "skip", "allocated_notional_usd": 0, "created_at_ms": old},
             {"allocation_id": "alloc_4", "candidate_id": "cand_2", "status": "skip", "allocated_notional_usd": 0, "created_at_ms": now_ms - 1000},
         ]
         self.intents = [
-            {"intent_id": "intent_0", "parent_candidate_id": "cand_0", "strategy_id": "directional_momentum", "execution_mode": "shadow", "created_at_ms": anchor},
-            {"intent_id": "intent_1", "parent_candidate_id": "cand_1", "strategy_id": "directional_momentum", "execution_mode": "shadow", "created_at_ms": old},
+            {"intent_id": "intent_0", "parent_candidate_id": "cand_0", "strategy_id": "directional_momentum_v2", "execution_mode": "shadow", "created_at_ms": anchor},
+            {"intent_id": "intent_1", "parent_candidate_id": "cand_1", "strategy_id": "directional_momentum_v2", "execution_mode": "shadow", "created_at_ms": old},
         ]
         if paper_leak:
             self.intents.append({"intent_id": "intent_paper", "parent_candidate_id": "cand_2", "strategy_id": "microstructure_ofi", "execution_mode": "paper", "created_at_ms": now_ms - 1000})
         self.reports = [{"report_id": "er_1", "intent_id": "intent_1", "execution_mode": "shadow", "status": "accepted", "slippage_bps": 0, "fees_usd": 0, "created_at_ms": old}]
         self.positions: list[dict[str, Any]] = []
         self.pnl: list[dict[str, Any]] = []
-        self.risk_rejects = [
-            {"decision_id": f"risk_{idx}", "decision": "reject", "violations": ["stale_market_data"], "created_at_ms": now_ms - 1000}
+        self.risk_decisions = [
+            {"decision_id": "risk_allow_0", "intent_id": "intent_0", "decision": "allow", "violations": [], "created_at_ms": anchor},
+            {"decision_id": "risk_allow_1", "intent_id": "intent_1", "decision": "allow", "violations": [], "created_at_ms": old},
+        ]
+        self.risk_decisions.extend(
+            {"decision_id": f"risk_{idx}", "intent_id": f"intent_reject_{idx}", "decision": "reject", "violations": ["stale_market_data"], "created_at_ms": now_ms - 1000}
             for idx in range(risk_rejects)
+        )
+        self.council_reviews = [
+            {"review_id": "council_1", "candidate_id": "cand_1", "strategy_id": "directional_momentum_v2", "decision": "allow_shadow", "created_at_ms": old},
+            {"review_id": "council_2", "candidate_id": "cand_2", "strategy_id": "microstructure_ofi_v2", "decision": "allow_shadow", "created_at_ms": now_ms - 1000},
+        ]
+        self.strategy_regime_performance = [
+            {"performance_id": "perf_1", "strategy_id": "directional_momentum_v2", "strategy_family": "trend_following", "regime_label": "trend=bull", "candidate_count": 2, "score": 60, "created_at_ms": old, "window_end_ms": old},
+            {"performance_id": "perf_2", "strategy_id": "microstructure_ofi_v2", "strategy_family": "microstructure_orderflow", "regime_label": "orderflow=sell_pressure", "candidate_count": 2, "score": 60, "created_at_ms": old, "window_end_ms": old},
+        ]
+        self.replay_results = [
+            {"replay_id": "ereplay_1", "proposal_id": "engine:test", "status": "passed", "candidate_metrics": {"candidate_count": 2}, "created_at_ms": now_ms - 1000, "metadata": {"artifact_type": "engine_shadow_comparison", "data_window": {"start_ms": now_ms - 60 * 60 * 1000, "end_ms": now_ms}, "verdict": "candidate_better"}}
         ]
         self.missing_data = missing_data
 
@@ -79,7 +94,10 @@ class FakeReadinessRepository:
         return self.positions[: kwargs.get("limit", 100)]
 
     async def list_risk_gateway_decisions(self, **kwargs):
-        return self.risk_rejects[: kwargs.get("limit", 100)]
+        items = self.risk_decisions
+        if kwargs.get("decision"):
+            items = [item for item in items if item.get("decision") == kwargs["decision"]]
+        return items[: kwargs.get("limit", 100)]
 
     async def list_pnl_attribution(self, **kwargs):
         return self.pnl[: kwargs.get("limit", 100)]
@@ -94,8 +112,14 @@ class FakeReadinessRepository:
             return None
         return {"regime_snapshot_id": "reg_1", "primary_asset": kwargs.get("primary_asset"), "as_of_ms": self.now_ms - 1000}
 
+    async def list_council_reviews(self, **kwargs):
+        return self.council_reviews[: kwargs.get("limit", 100)]
+
+    async def list_strategy_regime_performance(self, **kwargs):
+        return self.strategy_regime_performance[: kwargs.get("limit", 100)]
+
     async def list_replay_results(self, **kwargs):
-        return []
+        return self.replay_results[: kwargs.get("limit", 100)]
 
 
 def test_engine_settings_defaults_are_shadow_only():
@@ -124,6 +148,18 @@ def readiness_settings(**overrides) -> Settings:
         engine_validation_alert_stale_loop_seconds=300,
         engine_validation_missing_data_seconds=300,
         engine_validation_risk_reject_spike_count=5,
+        engine_readiness_min_active_strategy_count_24h=2,
+        engine_readiness_min_active_strategy_family_count_24h=2,
+        engine_readiness_max_symbol_strategy_allocation_share_pct=60,
+        engine_readiness_min_candidate_strategy_metadata_coverage_pct=100,
+        engine_readiness_min_council_review_coverage_pct=100,
+        engine_readiness_min_risk_gateway_coverage_pct=100,
+        engine_readiness_min_strategy_regime_evidence_coverage_pct=100,
+        engine_readiness_min_strategy_regime_sample_count=1,
+        engine_readiness_min_strategy_regime_score=45,
+        engine_readiness_require_latest_replay=True,
+        engine_readiness_min_replay_window_hours=1,
+        engine_readiness_min_replay_sample_size=2,
     )
     defaults.update(overrides)
     return Settings(**defaults)
@@ -164,6 +200,25 @@ def test_paper_readiness_blocks_paper_leak_missing_data_and_risk_spike():
     assert "paper_intents_in_shadow_only" in codes
     assert "missing_core_data" in codes
     assert "risk_reject_spike_critical" in codes
+
+
+def test_paper_readiness_blocks_missing_replay_and_council_coverage():
+    now_ms = int(time.time() * 1000)
+    repo = FakeReadinessRepository(now_ms=now_ms)
+    repo.replay_results = []
+    repo.council_reviews = []
+    service = FakeReadinessService(now_ms=now_ms)
+    settings = readiness_settings()
+
+    async def run():
+        return await build_paper_readiness_scorecard(repo, settings, service, window_hours=1, limit=100)
+
+    scorecard = anyio.run(run)
+    codes = {item["code"] for item in scorecard["hard_blocks"]}
+
+    assert "replay_comparison_missing" in codes
+    assert "council_review_coverage_low" in codes
+    assert scorecard["checks"]["shadow_replay"]["required"] is True
 
 
 def test_engine_readiness_route_is_registered():

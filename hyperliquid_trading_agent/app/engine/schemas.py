@@ -48,7 +48,7 @@ PositionThesisState = Literal[
 ]
 ModelVersionStatus = Literal["candidate", "shadow", "approved", "deprecated"]
 ReplayMode = Literal["signal", "decision", "execution"]
-ReplayStatus = Literal["passed", "failed", "insufficient_data", "audit_only"]
+ReplayStatus = Literal["passed", "advisory_pass", "failed", "insufficient_data", "audit_only"]
 KillSwitchScope = Literal["strategy", "asset", "venue", "account", "global", "human_emergency", "deadman"]
 KillSwitchAction = Literal["armed", "triggered", "released", "expired"]
 

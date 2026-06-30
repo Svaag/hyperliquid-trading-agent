@@ -75,14 +75,15 @@ class EngineReplayComparisonService:
         candidate_metrics = self._metrics_for_config(candidates, ev_by_candidate, reports, risk_rejects, pnl, candidate_config)
         diffs = _diff_metrics(baseline_metrics, candidate_metrics)
         verdict = _verdict(baseline_metrics, candidate_metrics, diffs, self.settings.engine_readiness_max_strategy_allocation_share_pct)
-        promotion_decision = "eligible_for_review" if verdict == "candidate_better" else "do_not_promote"
+        status = "passed" if verdict == "candidate_better" else "failed" if verdict == "candidate_worse" else "advisory_pass"
+        promotion_decision = "eligible_for_review" if status in {"passed", "advisory_pass"} else "do_not_promote"
         ts = _now_ms()
         replay_id = "ereplay_" + stable_hash({"variant_id": variant_id, "dataset_id": dataset_id, "ts": ts})
         artifact = {
             "replay_id": replay_id,
             "proposal_id": f"engine:{variant_id}",
             "decision_id": None,
-            "status": "passed" if verdict == "candidate_better" else "failed" if verdict == "candidate_worse" else "audit_only",
+            "status": status,
             "baseline_metrics": baseline_metrics,
             "candidate_metrics": candidate_metrics,
             "diffs": diffs,
@@ -135,6 +136,8 @@ class EngineReplayComparisonService:
         net_evs: list[float] = []
         utilities: list[float] = []
         strategy_counts: Counter[str] = Counter()
+        active_alpha_strategies: set[str] = set()
+        active_alpha_families: set[str] = set()
         min_ev = float(config.get("engine_min_net_ev_bps", 0))
         min_utility = float(config.get("engine_min_risk_adjusted_utility", 0))
         for candidate in candidates:
@@ -147,7 +150,14 @@ class EngineReplayComparisonService:
                 eligible.append(candidate)
                 net_evs.append(net_ev)
                 utilities.append(utility)
-                strategy_counts[str(candidate.get("strategy_id") or "unknown")] += 1
+                strategy_id = str(candidate.get("strategy_id") or "unknown")
+                strategy_counts[strategy_id] += 1
+                metadata = candidate.get("metadata") if isinstance(candidate.get("metadata"), dict) else {}
+                family = str(metadata.get("strategy_family") or candidate.get("strategy_family") or "unknown")
+                counts_for_breadth = bool(metadata.get("counts_for_breadth", candidate.get("counts_for_breadth", True)))
+                if counts_for_breadth and family not in {"legacy_bridge", "risk_off_defensive"} and candidate.get("side") != "flat":
+                    active_alpha_strategies.add(strategy_id)
+                    active_alpha_families.add(family)
         allocated_count = len(eligible)
         risk_denominator = allocated_count + len(risk_rejects)
         strategy_share = {strategy: round(count / allocated_count * 100, 4) for strategy, count in strategy_counts.items()} if allocated_count else {}
@@ -166,6 +176,10 @@ class EngineReplayComparisonService:
             "total_pnl_usd": round(sum(float(item.get("total_pnl_usd") or 0) for item in pnl), 4),
             "strategy_allocation_share": strategy_share,
             "dominant_strategy_share_pct": max(strategy_share.values()) if strategy_share else 0.0,
+            "active_alpha_strategy_count": len(active_alpha_strategies),
+            "active_alpha_family_count": len(active_alpha_families),
+            "active_alpha_strategies": sorted(active_alpha_strategies),
+            "active_alpha_families": sorted(active_alpha_families),
         }
 
 
