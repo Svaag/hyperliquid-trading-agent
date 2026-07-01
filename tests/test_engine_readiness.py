@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.engine.paper_signoff import build_paper_signoff_preflight
 from hyperliquid_trading_agent.app.engine.readiness import build_paper_readiness_scorecard
 from hyperliquid_trading_agent.app.main import create_app
 
@@ -286,6 +287,30 @@ def test_paper_readiness_blocks_missing_replay_and_council_coverage():
     assert scorecard["checks"]["shadow_replay"]["required"] is True
 
 
+def test_paper_signoff_preflight_requires_symbol_evidence_and_no_live_mode():
+    now_ms = int(time.time() * 1000)
+    repo = FakeReadinessRepository(now_ms=now_ms)
+    service = FakeReadinessService(now_ms=now_ms)
+    settings = readiness_settings()
+
+    async def run():
+        return await build_paper_signoff_preflight(repo, settings, service, symbols=["BTC", "ETH"], window_hours=1, limit=100)
+
+    preflight = anyio.run(run)
+    assert preflight["ready_for_paper_signoff"] is True
+    assert preflight["paper_only"] is True
+    assert preflight["live_execution_allowed"] is False
+    assert preflight["evidence_quality"]["passes_minimums"] is True
+
+    async def run_missing_symbol():
+        return await build_paper_signoff_preflight(repo, settings, service, symbols=["BTC", "HYPE"], window_hours=1, limit=100)
+
+    missing_symbol = anyio.run(run_missing_symbol)
+    assert missing_symbol["ready_for_paper_signoff"] is False
+    assert missing_symbol["symbol_evidence"][1]["symbol"] == "HYPE"
+    assert missing_symbol["symbol_evidence"][1]["has_shadow_evidence"] is False
+
+
 def test_engine_readiness_route_is_registered():
     now_ms = int(time.time() * 1000)
     settings = readiness_settings()
@@ -300,3 +325,7 @@ def test_engine_readiness_route_is_registered():
     payload = response.json()
     assert payload["ready_for_paper"] is True
     assert payload["checks"]["shadow_integrity"]["paper_intent_count"] == 0
+
+    preflight = client.get("/engine/paper-signoff/preflight", params={"symbols": "BTC,ETH", "window_hours": 1, "limit": 100})
+    assert preflight.status_code == 200
+    assert preflight.json()["ready_for_paper_signoff"] is True

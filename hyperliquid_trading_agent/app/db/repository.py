@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, Callable, cast
 from uuid import uuid4
 
 from sqlalchemy import and_, func, or_, select, update
@@ -128,6 +129,7 @@ from hyperliquid_trading_agent.app.db.models import (
     WorldModelSnapshotRecord,
 )
 from hyperliquid_trading_agent.app.logging import get_logger
+from hyperliquid_trading_agent.app.runtime_commands import COMMAND_REGISTRY
 from hyperliquid_trading_agent.app.security import redact_secrets
 from hyperliquid_trading_agent.app.tracking.schemas import PositionTrackingPlan
 
@@ -143,6 +145,33 @@ class Repository:
     @property
     def enabled(self) -> bool:
         return self.sessionmaker is not None
+
+    async def _upsert_record_by_pk(
+        self,
+        model_cls: type[Any],
+        pk: Any,
+        create_kwargs: dict[str, Any],
+        apply_fn: Callable[[Any], None],
+        result_attr: str,
+    ) -> Any | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(model_cls, pk)
+            if item is None:
+                item = model_cls(**create_kwargs)
+                session.add(item)
+            apply_fn(item)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                item = await session.get(model_cls, pk)
+                if item is None:
+                    raise
+                apply_fn(item)
+                await session.commit()
+            return getattr(item, result_attr)
 
     async def upsert_service_heartbeat(
         self,
@@ -208,6 +237,13 @@ class Repository:
                 return {"consumer_name": consumer_name, "source_table": source_table, "last_event_id": None, "last_event_ts_ms": 0, "updated_at_ms": 0, "metadata": {}}
             return _consumer_offset_to_dict(item)
 
+    async def list_consumer_offsets(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            result = await session.execute(select(ConsumerOffsetRecord).order_by(ConsumerOffsetRecord.updated_at_ms.desc()).limit(limit))
+            return [_consumer_offset_to_dict(item) for item in result.scalars().all()]
+
     async def update_consumer_offset(
         self,
         consumer_name: str,
@@ -259,21 +295,25 @@ class Repository:
     ) -> dict[str, Any]:
         command_id = "cmd_" + uuid4().hex
         now_ms = requested_at_ms or _runtime_now_ms()
+        clean_payload = redact_secrets(payload or {})
+        derived_idempotency_key = idempotency_key or _default_worker_command_idempotency_key(str(target_role), str(command_type), clean_payload)
+        clean_metadata = _append_command_history(redact_secrets(metadata or {}), "enqueued", at_ms=now_ms, actor=requested_by)
         if self.sessionmaker is None:
             return {
                 "command_id": command_id,
                 "target_role": str(target_role),
                 "command_type": str(command_type),
                 "status": "accepted_unpersisted",
-                "idempotency_key": idempotency_key,
+                "idempotency_key": derived_idempotency_key,
                 "requested_by": requested_by,
                 "requested_at_ms": now_ms,
-                "payload": redact_secrets(payload or {}),
-                "metadata": redact_secrets(metadata or {}),
+                "payload": clean_payload,
+                "metadata": clean_metadata,
             }
+        created = False
         async with self.sessionmaker() as session:
-            if idempotency_key:
-                existing_result = await session.execute(select(WorkerCommandRecord).where(WorkerCommandRecord.idempotency_key == str(idempotency_key)).limit(1))
+            if derived_idempotency_key:
+                existing_result = await session.execute(select(WorkerCommandRecord).where(WorkerCommandRecord.idempotency_key == str(derived_idempotency_key)).limit(1))
                 existing = existing_result.scalars().first()
                 if existing is not None:
                     return _worker_command_to_dict(existing)
@@ -282,24 +322,28 @@ class Repository:
                 target_role=str(target_role),
                 command_type=str(command_type),
                 status="pending",
-                idempotency_key=idempotency_key,
+                idempotency_key=derived_idempotency_key,
                 requested_by=requested_by,
                 requested_at_ms=now_ms,
-                payload_json=redact_secrets(payload or {}),
-                metadata_json=redact_secrets(metadata or {}),
+                payload_json=clean_payload,
+                metadata_json=clean_metadata,
             )
             session.add(item)
             try:
                 await session.commit()
+                created = True
             except IntegrityError:
                 await session.rollback()
-                if idempotency_key:
-                    existing_result = await session.execute(select(WorkerCommandRecord).where(WorkerCommandRecord.idempotency_key == str(idempotency_key)).limit(1))
+                if derived_idempotency_key:
+                    existing_result = await session.execute(select(WorkerCommandRecord).where(WorkerCommandRecord.idempotency_key == str(derived_idempotency_key)).limit(1))
                     existing = existing_result.scalars().first()
                     if existing is not None:
                         return _worker_command_to_dict(existing)
                 raise
-            return _worker_command_to_dict(item)
+            command = _worker_command_to_dict(item)
+        if created:
+            await self.record_audit_event("worker_command_enqueued", actor=requested_by or "", payload=_worker_command_audit_payload(command))
+        return command
 
     async def get_worker_command(self, command_id: str) -> dict[str, Any] | None:
         if self.sessionmaker is None:
@@ -308,7 +352,7 @@ class Repository:
             item = await session.get(WorkerCommandRecord, str(command_id))
             return _worker_command_to_dict(item) if item is not None else None
 
-    async def list_worker_commands(self, *, target_role: str | None = None, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_worker_commands(self, *, target_role: str | None = None, status: str | None = None, command_type: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
@@ -317,8 +361,55 @@ class Repository:
                 stmt = stmt.where(WorkerCommandRecord.target_role == str(target_role))
             if status:
                 stmt = stmt.where(WorkerCommandRecord.status == str(status))
+            if command_type:
+                stmt = stmt.where(WorkerCommandRecord.command_type == str(command_type))
             result = await session.execute(stmt)
             return [_worker_command_to_dict(item) for item in result.scalars().all()]
+
+    async def cancel_worker_command(self, command_id: str, *, cancelled_by: str = "api", completed_at_ms: int | None = None) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        command: dict[str, Any]
+        audit = False
+        async with self.sessionmaker() as session:
+            item = await session.get(WorkerCommandRecord, str(command_id))
+            if item is None:
+                return None
+            if item.status in {"completed", "failed", "cancelled"}:
+                return _worker_command_to_dict(item)
+            now_ms = completed_at_ms or _runtime_now_ms()
+            if item.status == "pending":
+                item.status = "cancelled"
+                item.completed_at_ms = now_ms
+                event = "cancelled"
+            else:
+                item.status = "cancelling"
+                event = "cancellation_requested"
+            item.metadata_json = _append_command_history({**(item.metadata_json or {}), "cancelled_by": cancelled_by}, event, at_ms=now_ms, actor=cancelled_by)
+            await session.commit()
+            command = _worker_command_to_dict(item)
+            audit = True
+        if audit:
+            await self.record_audit_event("worker_command_cancelled", actor=cancelled_by, payload=_worker_command_audit_payload(command))
+        return command
+
+    async def retry_worker_command(self, command_id: str, *, requested_by: str = "api") -> dict[str, Any] | None:
+        original = await self.get_worker_command(command_id)
+        if original is None:
+            return None
+        if str(original.get("status") or "") in {"pending", "claimed", "cancelling"}:
+            return original
+        retry_attempt = int((original.get("metadata") or {}).get("retry_attempt") or 0) + 1
+        retried = await self.enqueue_worker_command(
+            target_role=str(original.get("target_role")),
+            command_type=str(original.get("command_type")),
+            payload=original.get("payload") if isinstance(original.get("payload"), dict) else {},
+            requested_by=requested_by,
+            idempotency_key=f"retry:{command_id}:{retry_attempt}",
+            metadata={"retry_of": command_id, "retry_attempt": retry_attempt},
+        )
+        await self.record_audit_event("worker_command_retry_requested", actor=requested_by, payload={"original_command_id": command_id, **_worker_command_audit_payload(retried)})
+        return retried
 
     async def claim_next_worker_command(self, *, target_role: str, instance_id: str, stale_after_ms: int) -> dict[str, Any] | None:
         if self.sessionmaker is None:
@@ -345,8 +436,11 @@ class Repository:
             item.claimed_at_ms = now_ms
             item.attempt_count = int(item.attempt_count or 0) + 1
             item.last_error = None
+            item.metadata_json = _append_command_history(item.metadata_json or {}, "claimed", at_ms=now_ms, actor=instance_id, extra={"attempt_count": item.attempt_count})
             await session.commit()
-            return _worker_command_to_dict(item)
+            command = _worker_command_to_dict(item)
+        await self.record_audit_event("worker_command_claimed", actor=instance_id, payload=_worker_command_audit_payload(command))
+        return command
 
     async def complete_worker_command(self, command_id: str, *, result: dict[str, Any] | None = None, completed_at_ms: int | None = None) -> None:
         if self.sessionmaker is None:
@@ -355,11 +449,18 @@ class Repository:
             item = await session.get(WorkerCommandRecord, str(command_id))
             if item is None:
                 return
-            item.status = "completed"
-            item.completed_at_ms = completed_at_ms or _runtime_now_ms()
+            now_ms = completed_at_ms or _runtime_now_ms()
+            if item.status == "cancelling":
+                item.status = "cancelled"
+            else:
+                item.status = "completed"
+            item.completed_at_ms = now_ms
             item.result_json = redact_secrets(result or {})
             item.last_error = None
+            item.metadata_json = _append_command_history(item.metadata_json or {}, item.status, at_ms=now_ms, actor=item.claimed_by, extra={"attempt_count": item.attempt_count})
             await session.commit()
+            command = _worker_command_to_dict(item)
+        await self.record_audit_event(f"worker_command_{command['status']}", actor=str(command.get("claimed_by") or ""), payload=_worker_command_audit_payload(command))
 
     async def fail_worker_command(self, command_id: str, *, error: str, result: dict[str, Any] | None = None, completed_at_ms: int | None = None) -> None:
         if self.sessionmaker is None:
@@ -368,11 +469,15 @@ class Repository:
             item = await session.get(WorkerCommandRecord, str(command_id))
             if item is None:
                 return
-            item.status = "failed"
-            item.completed_at_ms = completed_at_ms or _runtime_now_ms()
+            now_ms = completed_at_ms or _runtime_now_ms()
+            item.status = "cancelled" if item.status == "cancelling" else "failed"
+            item.completed_at_ms = now_ms
             item.result_json = redact_secrets(result or {}) if result is not None else item.result_json
             item.last_error = str(error)[:1000]
+            item.metadata_json = _append_command_history(item.metadata_json or {}, item.status, at_ms=now_ms, actor=item.claimed_by, extra={"error": item.last_error, "attempt_count": item.attempt_count})
             await session.commit()
+            command = _worker_command_to_dict(item)
+        await self.record_audit_event(f"worker_command_{command['status']}", actor=str(command.get("claimed_by") or ""), payload=_worker_command_audit_payload(command))
 
     async def record_audit_event(self, event_type: str, actor: str = "", payload: dict[str, Any] | None = None) -> None:
         if self.sessionmaker is None:
@@ -2422,24 +2527,18 @@ class Repository:
             return [_news_event_to_dict(item) for item in result.scalars().all()]
 
     async def record_newswire_event(self, event: dict[str, Any]) -> str | None:
-        if self.sessionmaker is None:
-            return None
+        event_id = str(event["event_id"])
+        fields = _newswire_kwargs(event)
         try:
-            async with self.sessionmaker() as session:
-                event_id = str(event["event_id"])
-                existing = await session.get(NewswireEventRow, event_id)
-                fields = _newswire_kwargs(event)
-                if existing is None:
-                    session.add(NewswireEventRow(event_id=event_id, **fields))
-                elif event.get("action") in {"updated", "removed"}:
-                    for key, value in fields.items():
-                        setattr(existing, key, value)
-                else:
-                    return existing.event_id
-                await session.commit()
-                return event_id
+            return await self._upsert_record_by_pk(
+                NewswireEventRow,
+                event_id,
+                {"event_id": event_id, **fields},
+                lambda item: _apply_newswire_event_row(item, fields),
+                "event_id",
+            )
         except Exception as exc:  # pragma: no cover - duplicate/unavailable persistence should not break ingestion
-            log.warning("newswire_event_record_failed", error=type(exc).__name__)
+            log.warning("newswire_event_record_failed", event_id=event_id, error=type(exc).__name__)
             return None
 
     async def list_newswire_events(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -2592,20 +2691,17 @@ class Repository:
             return {"enabled": True, "error": type(exc).__name__, "counts": {}}
 
     async def upsert_world_event(self, event: dict[str, Any]) -> str | None:
-        if self.sessionmaker is None:
-            return None
-        async with self.sessionmaker() as session:
-            item = await session.get(WorldEventRecord, str(event["event_id"]))
-            if item is None:
-                item = WorldEventRecord(
-                    event_id=str(event["event_id"]),
-                    received_ts_ms=int(event.get("received_ts_ms") or 0),
-                    computed_ts_ms=int(event.get("computed_ts_ms") or 0),
-                )
-                session.add(item)
-            _apply_world_event(item, event)
-            await session.commit()
-            return item.event_id
+        return await self._upsert_record_by_pk(
+            WorldEventRecord,
+            str(event["event_id"]),
+            {
+                "event_id": str(event["event_id"]),
+                "received_ts_ms": int(event.get("received_ts_ms") or 0),
+                "computed_ts_ms": int(event.get("computed_ts_ms") or 0),
+            },
+            lambda item: _apply_world_event(item, event),
+            "event_id",
+        )
 
     async def list_world_events(self, limit: int = 100, source_type: str | None = None, symbol: str | None = None) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
@@ -2622,23 +2718,20 @@ class Repository:
             return items[:limit]
 
     async def upsert_market_belief(self, belief: dict[str, Any]) -> str | None:
-        if self.sessionmaker is None:
-            return None
-        async with self.sessionmaker() as session:
-            item = await session.get(MarketBeliefRecord, str(belief["belief_id"]))
-            if item is None:
-                item = MarketBeliefRecord(
-                    belief_id=str(belief["belief_id"]),
-                    kind=str(belief.get("kind") or "fact"),
-                    subject=str(belief.get("subject") or ""),
-                    statement=str(belief.get("statement") or ""),
-                    created_at_ms=int(belief.get("created_at_ms") or 0),
-                    updated_at_ms=int(belief.get("updated_at_ms") or 0),
-                )
-                session.add(item)
-            _apply_market_belief(item, belief)
-            await session.commit()
-            return item.belief_id
+        return await self._upsert_record_by_pk(
+            MarketBeliefRecord,
+            str(belief["belief_id"]),
+            {
+                "belief_id": str(belief["belief_id"]),
+                "kind": str(belief.get("kind") or "fact"),
+                "subject": str(belief.get("subject") or ""),
+                "statement": str(belief.get("statement") or ""),
+                "created_at_ms": int(belief.get("created_at_ms") or 0),
+                "updated_at_ms": int(belief.get("updated_at_ms") or 0),
+            },
+            lambda item: _apply_market_belief(item, belief),
+            "belief_id",
+        )
 
     async def list_market_beliefs(self, limit: int = 100, symbol: str | None = None, kind: str | None = None, status: str | None = "active") -> list[dict[str, Any]]:
         if self.sessionmaker is None:
@@ -2657,21 +2750,18 @@ class Repository:
             return items[:limit]
 
     async def upsert_narrative_cluster(self, cluster: dict[str, Any]) -> str | None:
-        if self.sessionmaker is None:
-            return None
-        async with self.sessionmaker() as session:
-            item = await session.get(NarrativeClusterRecord, str(cluster["cluster_id"]))
-            if item is None:
-                item = NarrativeClusterRecord(
-                    cluster_id=str(cluster["cluster_id"]),
-                    title=str(cluster.get("title") or ""),
-                    created_at_ms=int(cluster.get("created_at_ms") or 0),
-                    updated_at_ms=int(cluster.get("updated_at_ms") or 0),
-                )
-                session.add(item)
-            _apply_narrative_cluster(item, cluster)
-            await session.commit()
-            return item.cluster_id
+        return await self._upsert_record_by_pk(
+            NarrativeClusterRecord,
+            str(cluster["cluster_id"]),
+            {
+                "cluster_id": str(cluster["cluster_id"]),
+                "title": str(cluster.get("title") or ""),
+                "created_at_ms": int(cluster.get("created_at_ms") or 0),
+                "updated_at_ms": int(cluster.get("updated_at_ms") or 0),
+            },
+            lambda item: _apply_narrative_cluster(item, cluster),
+            "cluster_id",
+        )
 
     async def list_narrative_clusters(self, limit: int = 100, symbol: str | None = None) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
@@ -2685,22 +2775,19 @@ class Repository:
             return items[:limit]
 
     async def upsert_prediction_market_signal(self, signal: dict[str, Any]) -> str | None:
-        if self.sessionmaker is None:
-            return None
-        async with self.sessionmaker() as session:
-            item = await session.get(PredictionMarketSignalRecord, str(signal["signal_id"]))
-            if item is None:
-                item = PredictionMarketSignalRecord(
-                    signal_id=str(signal["signal_id"]),
-                    venue=str(signal.get("venue") or "unknown"),
-                    market_id=str(signal.get("market_id") or ""),
-                    question=str(signal.get("question") or ""),
-                    as_of_ms=int(signal.get("as_of_ms") or 0),
-                )
-                session.add(item)
-            _apply_prediction_market_signal(item, signal)
-            await session.commit()
-            return item.signal_id
+        return await self._upsert_record_by_pk(
+            PredictionMarketSignalRecord,
+            str(signal["signal_id"]),
+            {
+                "signal_id": str(signal["signal_id"]),
+                "venue": str(signal.get("venue") or "unknown"),
+                "market_id": str(signal.get("market_id") or ""),
+                "question": str(signal.get("question") or ""),
+                "as_of_ms": int(signal.get("as_of_ms") or 0),
+            },
+            lambda item: _apply_prediction_market_signal(item, signal),
+            "signal_id",
+        )
 
     async def list_prediction_market_signals(self, limit: int = 100, venue: str | None = None, symbol: str | None = None) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
@@ -2717,38 +2804,32 @@ class Repository:
             return items[:limit]
 
     async def upsert_source_credibility(self, source: dict[str, Any]) -> str | None:
-        if self.sessionmaker is None:
-            return None
-        async with self.sessionmaker() as session:
-            item = await session.get(SourceCredibilityRecord, str(source["source_key"]))
-            if item is None:
-                item = SourceCredibilityRecord(
-                    source_key=str(source["source_key"]),
-                    source=str(source.get("source") or "unknown"),
-                    last_updated_at_ms=int(source.get("last_updated_at_ms") or 0),
-                )
-                session.add(item)
-            _apply_source_credibility(item, source)
-            await session.commit()
-            return item.source_key
+        return await self._upsert_record_by_pk(
+            SourceCredibilityRecord,
+            str(source["source_key"]),
+            {
+                "source_key": str(source["source_key"]),
+                "source": str(source.get("source") or "unknown"),
+                "last_updated_at_ms": int(source.get("last_updated_at_ms") or 0),
+            },
+            lambda item: _apply_source_credibility(item, source),
+            "source_key",
+        )
 
     async def upsert_world_memory_atom(self, memory: dict[str, Any]) -> str | None:
-        if self.sessionmaker is None:
-            return None
-        async with self.sessionmaker() as session:
-            item = await session.get(WorldMemoryAtomRecord, str(memory["memory_id"]))
-            if item is None:
-                item = WorldMemoryAtomRecord(
-                    memory_id=str(memory["memory_id"]),
-                    memory_type=str(memory.get("memory_type") or "working"),
-                    subject=str(memory.get("subject") or ""),
-                    content=str(memory.get("content") or ""),
-                    created_at_ms=int(memory.get("created_at_ms") or 0),
-                )
-                session.add(item)
-            _apply_world_memory_atom(item, memory)
-            await session.commit()
-            return item.memory_id
+        return await self._upsert_record_by_pk(
+            WorldMemoryAtomRecord,
+            str(memory["memory_id"]),
+            {
+                "memory_id": str(memory["memory_id"]),
+                "memory_type": str(memory.get("memory_type") or "working"),
+                "subject": str(memory.get("subject") or ""),
+                "content": str(memory.get("content") or ""),
+                "created_at_ms": int(memory.get("created_at_ms") or 0),
+            },
+            lambda item: _apply_world_memory_atom(item, memory),
+            "memory_id",
+        )
 
     async def list_world_memory_atoms(self, limit: int = 100, symbol: str | None = None, memory_type: str | None = None) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
@@ -2765,16 +2846,13 @@ class Repository:
             return items[:limit]
 
     async def upsert_world_model_snapshot(self, snapshot: dict[str, Any]) -> str | None:
-        if self.sessionmaker is None:
-            return None
-        async with self.sessionmaker() as session:
-            item = await session.get(WorldModelSnapshotRecord, str(snapshot["snapshot_id"]))
-            if item is None:
-                item = WorldModelSnapshotRecord(snapshot_id=str(snapshot["snapshot_id"]), as_of_ms=int(snapshot.get("as_of_ms") or 0))
-                session.add(item)
-            _apply_world_model_snapshot(item, snapshot)
-            await session.commit()
-            return item.snapshot_id
+        return await self._upsert_record_by_pk(
+            WorldModelSnapshotRecord,
+            str(snapshot["snapshot_id"]),
+            {"snapshot_id": str(snapshot["snapshot_id"]), "as_of_ms": int(snapshot.get("as_of_ms") or 0)},
+            lambda item: _apply_world_model_snapshot(item, snapshot),
+            "snapshot_id",
+        )
 
     async def latest_world_model_snapshot(self) -> dict[str, Any] | None:
         if self.sessionmaker is None:
@@ -2898,22 +2976,19 @@ class Repository:
             return [_world_model_outcome_to_dict(item) for item in result.scalars().all()]
 
     async def upsert_prediction_market_calibration(self, calibration: dict[str, Any]) -> str | None:
-        if self.sessionmaker is None:
-            return None
-        async with self.sessionmaker() as session:
-            item = await session.get(PredictionMarketCalibrationRecord, str(calibration["calibration_id"]))
-            if item is None:
-                item = PredictionMarketCalibrationRecord(
-                    calibration_id=str(calibration["calibration_id"]),
-                    signal_id=str(calibration.get("signal_id") or ""),
-                    venue=str(calibration.get("venue") or "unknown"),
-                    market_id=str(calibration.get("market_id") or ""),
-                    created_at_ms=int(calibration.get("created_at_ms") or 0),
-                )
-                session.add(item)
-            _apply_prediction_market_calibration(item, calibration)
-            await session.commit()
-            return item.calibration_id
+        return await self._upsert_record_by_pk(
+            PredictionMarketCalibrationRecord,
+            str(calibration["calibration_id"]),
+            {
+                "calibration_id": str(calibration["calibration_id"]),
+                "signal_id": str(calibration.get("signal_id") or ""),
+                "venue": str(calibration.get("venue") or "unknown"),
+                "market_id": str(calibration.get("market_id") or ""),
+                "created_at_ms": int(calibration.get("created_at_ms") or 0),
+            },
+            lambda item: _apply_prediction_market_calibration(item, calibration),
+            "calibration_id",
+        )
 
     async def list_prediction_market_calibrations(
         self,
@@ -4374,6 +4449,54 @@ def _newswire_kwargs(event: dict[str, Any]) -> dict[str, Any]:
         "enrichment_json": event.get("enrichment"),
         "metadata_json": redact_secrets(dict(event.get("metadata") or {})),
     }
+
+
+def _apply_newswire_event_row(item: NewswireEventRow, fields: dict[str, Any]) -> None:
+    for key, value in fields.items():
+        setattr(item, key, value)
+
+
+def _default_worker_command_idempotency_key(target_role: str, command_type: str, payload: dict[str, Any]) -> str | None:
+    spec = COMMAND_REGISTRY.get(command_type)
+    if spec is None or not spec.idempotency_key_fields:
+        return None
+    values: dict[str, Any] = {}
+    for field in spec.idempotency_key_fields:
+        value = payload.get(field)
+        if value is None or value == "":
+            return None
+        values[field] = value
+    digest = hashlib.sha256(json.dumps(values, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()[:24]
+    return f"{target_role}:{command_type}:{digest}"
+
+
+def _append_command_history(metadata: dict[str, Any], event: str, *, at_ms: int, actor: str | None = None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    clean = dict(metadata)
+    history = list(clean.get("history") or [])
+    item: dict[str, Any] = {"event": event, "at_ms": int(at_ms)}
+    if actor:
+        item["actor"] = actor
+    if extra:
+        item.update(redact_secrets(extra))
+    history.append(item)
+    clean["history"] = history[-50:]
+    clean["last_history_event"] = event
+    clean["last_history_at_ms"] = int(at_ms)
+    return redact_secrets(clean)
+
+
+def _worker_command_audit_payload(command: dict[str, Any]) -> dict[str, Any]:
+    return redact_secrets(
+        {
+            "command_id": command.get("command_id"),
+            "target_role": command.get("target_role"),
+            "command_type": command.get("command_type"),
+            "status": command.get("status"),
+            "idempotency_key": command.get("idempotency_key"),
+            "attempt_count": command.get("attempt_count"),
+            "last_error": command.get("last_error"),
+        }
+    )
 
 
 def _runtime_now_ms() -> int:

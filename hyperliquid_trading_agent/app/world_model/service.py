@@ -33,7 +33,9 @@ class WorldModelService:
         self.last_error: str | None = None
         self.error_count = 0
         self.repository_last_error: str | None = None
+        self.repository_last_error_operation: str | None = None
         self.repository_error_count = 0
+        self.repository_errors_by_operation: dict[str, int] = {}
         self.repository_unavailable_until_ms: int | None = None
         self.repository_cooldown_ms = 30_000
         self.snapshot_coalesce_ms = 30_000
@@ -48,7 +50,9 @@ class WorldModelService:
             "repository_enabled": self._repo_enabled(),
             "repository_available": self._repo_available(),
             "repository_last_error": self.repository_last_error,
+            "repository_last_error_operation": self.repository_last_error_operation,
             "repository_error_count": self.repository_error_count,
+            "repository_errors_by_operation": dict(self.repository_errors_by_operation),
             "repository_cooldown_until_ms": self.repository_unavailable_until_ms if self._repo_in_cooldown() else None,
             "last_error": self.last_error,
             "error_count": self.error_count,
@@ -165,6 +169,7 @@ class WorldModelService:
             try:
                 await record(snapshot.model_dump(mode="json"))
                 self._last_snapshot_persist_at_ms[self._snapshot_scope_key(snapshot)] = now_ms()
+                self._record_repository_success(operation="upsert_world_model_snapshot")
             except Exception as exc:  # pragma: no cover - read-side dashboard must keep working
                 self._record_repository_error(exc, operation="upsert_world_model_snapshot")
 
@@ -428,6 +433,7 @@ class WorldModelService:
             return
         try:
             await self.repository.upsert_world_event(event.model_dump(mode="json"))
+            self._record_repository_success(operation="upsert_world_event")
         except Exception as exc:  # pragma: no cover - persistence must not break the reducer
             self._record_repository_error(exc, operation="upsert_world_event")
 
@@ -436,6 +442,7 @@ class WorldModelService:
             return
         try:
             await self.repository.upsert_prediction_market_signal(signal.model_dump(mode="json"))
+            self._record_repository_success(operation="upsert_prediction_market_signal")
         except Exception as exc:  # pragma: no cover
             self._record_repository_error(exc, operation="upsert_prediction_market_signal")
 
@@ -449,16 +456,17 @@ class WorldModelService:
                     await record_belief(belief.model_dump(mode="json"))
             record_cluster = getattr(self.repository, "upsert_narrative_cluster", None)
             if callable(record_cluster):
-                for cluster in self.reducer.narratives.values():
+                for cluster in list(self.reducer.narratives.values()):
                     await record_cluster(cluster.model_dump(mode="json"))
             record_source = getattr(self.repository, "upsert_source_credibility", None)
             if callable(record_source):
-                for source in self.reducer.source_credibility.values():
+                for source in list(self.reducer.source_credibility.values()):
                     await record_source(source.model_dump(mode="json"))
             record_memory = getattr(self.repository, "upsert_world_memory_atom", None)
             if callable(record_memory):
-                for memory in self.reducer.memories.values():
+                for memory in list(self.reducer.memories.values()):
                     await record_memory(memory.model_dump(mode="json"))
+            self._record_repository_success(operation="persist_world_model_state")
         except Exception as exc:  # pragma: no cover
             self._record_repository_error(exc, operation="persist_world_model_state")
 
@@ -486,12 +494,21 @@ class WorldModelService:
         self.last_error = type(exc).__name__
         log.warning("world_model_error", error=type(exc).__name__)
 
+    def _record_repository_success(self, *, operation: str) -> None:
+        if self.repository_unavailable_until_ms is not None:
+            log.info("world_model_repository_recovered", operation=operation)
+        self.repository_last_error = None
+        self.repository_last_error_operation = None
+        self.repository_unavailable_until_ms = None
+
     def _record_repository_error(self, exc: Exception, *, operation: str) -> None:
         ts = now_ms()
+        self.repository_errors_by_operation[operation] = self.repository_errors_by_operation.get(operation, 0) + 1
         if not self._repo_in_cooldown():
             self.repository_error_count += 1
             log.warning("world_model_repository_unavailable", operation=operation, error=type(exc).__name__)
         self.repository_last_error = type(exc).__name__
+        self.repository_last_error_operation = operation
         self.repository_unavailable_until_ms = ts + self.repository_cooldown_ms
 
     async def _calibrate_prediction_signal(self, outcome: WorldModelOutcome) -> PredictionMarketCalibration | None:
@@ -517,6 +534,7 @@ class WorldModelService:
         if self._repo_available() and callable(record):
             try:
                 await record(calibration.model_dump(mode="json"))
+                self._record_repository_success(operation="upsert_prediction_market_calibration")
             except Exception as exc:  # pragma: no cover
                 self._record_repository_error(exc, operation="upsert_prediction_market_calibration")
         return calibration

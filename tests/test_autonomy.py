@@ -289,7 +289,7 @@ def test_format_signal_alert_renders_funding_as_percentage():
 
 
 def test_autonomy_api_requires_auth_outside_dev_and_no_execution_guardrail():
-    app = create_app(Settings(environment="prod", position_tracking_enabled=False, autonomy_enabled=False, agent_api_bearer_token="token"))
+    app = create_app(Settings(environment="prod", position_tracking_enabled=False, autonomy_enabled=False, engine_enabled=False, hip4_enabled=False, orchestration_wave_supervisor_enabled=False, tradfi_enabled=False, agent_api_bearer_token="token", _env_file=None))
     with TestClient(app) as client:
         assert client.get("/autonomy/status").status_code == 401
         response = client.get("/autonomy/status", headers={"Authorization": "Bearer token"})

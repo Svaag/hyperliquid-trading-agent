@@ -150,6 +150,35 @@ def test_halt_gate_marks_and_clears_symbols():
 # --- service -----------------------------------------------------------------
 
 
+def test_service_ingest_persistence_diagnostics_and_dropped_counts():
+    class Repo:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.events: dict[str, dict] = {}
+
+        async def record_newswire_event(self, event: dict) -> str:
+            self.events[event["event_id"]] = event
+            return event["event_id"]
+
+    async def run():
+        repo = Repo()
+        service = NewswireService(settings=Settings(newswire_enabled=True), repository=repo)
+        raw = _raw(source="alpaca", external_id="100", headline="BTC breaks out", symbols=["BTC"])
+        first = await service._ingest(raw)
+        second = await service._ingest(raw)
+        return service, repo, first, second
+
+    service, repo, first, second = anyio.run(run)
+    assert first is not None
+    assert second is None
+    assert len(repo.events) == 1
+    status = service.status()
+    assert status["persisted_event_count"] == 1
+    assert status["persistence_errors"] == 0
+    assert status["dropped_events_by_reason"] == {"duplicate": 1}
+
+
 def test_service_ingest_dedupes_and_publishes():
     async def run():
         service = NewswireService(settings=Settings(newswire_enabled=True))

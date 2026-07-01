@@ -38,6 +38,13 @@ class NewswireService:
         self.last_event_at_ms: int | None = None
         self.last_event_per_source: dict[str, int] = {}
         self.adapter_errors = 0
+        self.adapter_errors_by_name: dict[str, int] = {}
+        self.adapter_reconnects_by_name: dict[str, int] = {}
+        self.adapter_last_error: dict[str, dict[str, Any]] = {}
+        self.dropped_events_by_reason: dict[str, int] = {}
+        self.persisted_event_count = 0
+        self.persistence_errors = 0
+        self.last_persistence_error: dict[str, Any] | None = None
 
     def build_adapters(self) -> list[NewswireAdapter]:
         adapters: list[NewswireAdapter] = []
@@ -100,9 +107,12 @@ class NewswireService:
                 raise
             except Exception as exc:  # pragma: no cover - external source behavior
                 self.adapter_errors += 1
+                self.adapter_errors_by_name[adapter.name] = self.adapter_errors_by_name.get(adapter.name, 0) + 1
+                self.adapter_reconnects_by_name[adapter.name] = self.adapter_reconnects_by_name.get(adapter.name, 0) + 1
+                self.adapter_last_error[adapter.name] = {"error": type(exc).__name__, "detail": str(exc)[:500], "at_ms": now_ms(), "next_backoff_seconds": backoff}
                 NEWSWIRE_ADAPTER_UP.labels(adapter=adapter.name).set(0)
                 NEWSWIRE_ADAPTER_RECONNECTS.labels(adapter=adapter.name).inc()
-                log.warning("newswire_adapter_restart", adapter=adapter.name, error=type(exc).__name__, detail=str(exc)[:200])
+                log.warning("newswire_adapter_restart", adapter=adapter.name, error=type(exc).__name__, detail=str(exc)[:200], backoff_seconds=backoff)
                 try:
                     await asyncio.sleep(backoff)
                 except asyncio.CancelledError:
@@ -117,15 +127,35 @@ class NewswireService:
         if event is None:
             return None
         if event.action == "created" and event.event_id in self._by_id:
+            self._record_drop("duplicate")
             NEWSWIRE_BUS_DROPPED.labels(reason="duplicate").inc()
             return None
         event = self.halt_gate.apply(event)
         self._index(event)
         NEWSWIRE_EVENTS.labels(provider=event.provider).inc()
         if self.repository is not None and getattr(self.repository, "enabled", False):
-            await self.repository.record_newswire_event(event.model_dump(mode="json"))
+            await self._persist_event(event)
         await self.bus.publish(event)
         return event
+
+    async def _persist_event(self, event: NewswireEvent) -> None:
+        try:
+            result = await self.repository.record_newswire_event(event.model_dump(mode="json"))
+        except Exception as exc:  # pragma: no cover - persistence must not break ingestion
+            self.persistence_errors += 1
+            self.last_persistence_error = {"event_id": event.event_id, "error": type(exc).__name__, "detail": str(exc)[:500], "at_ms": now_ms()}
+            log.warning("newswire_event_persist_failed", event_id=event.event_id, error=type(exc).__name__, detail=str(exc)[:200])
+            return
+        if result is None:
+            self.persistence_errors += 1
+            self.last_persistence_error = {"event_id": event.event_id, "error": "record_returned_none", "detail": "repository did not acknowledge event", "at_ms": now_ms()}
+            log.warning("newswire_event_persist_unacknowledged", event_id=event.event_id)
+            return
+        self.persisted_event_count += 1
+        self.last_persistence_error = None
+
+    def _record_drop(self, reason: str) -> None:
+        self.dropped_events_by_reason[reason] = self.dropped_events_by_reason.get(reason, 0) + 1
 
     def _index(self, event: NewswireEvent) -> None:
         self._by_id.pop(event.event_id, None)  # move-to-end on update
@@ -152,11 +182,28 @@ class NewswireService:
         return {
             "enabled": self.settings.newswire_enabled,
             "running": self.running,
-            "adapters": [adapter.status() for adapter in self.adapters],
+            "adapters": [self._adapter_status(adapter) for adapter in self.adapters],
+            "configured_adapter_names": [adapter.name for adapter in self.adapters],
             "adapter_errors": self.adapter_errors,
+            "adapter_errors_by_name": dict(self.adapter_errors_by_name),
+            "adapter_reconnects_by_name": dict(self.adapter_reconnects_by_name),
+            "adapter_last_error": dict(self.adapter_last_error),
+            "dropped_events_by_reason": dict(self.dropped_events_by_reason),
+            "repository_enabled": bool(self.repository is not None and getattr(self.repository, "enabled", False)),
+            "persisted_event_count": self.persisted_event_count,
+            "persistence_errors": self.persistence_errors,
+            "last_persistence_error": self.last_persistence_error,
             "buffered_events": len(self._by_id),
             "last_event_at_ms": self.last_event_at_ms,
             "last_event_per_source": self.last_event_per_source,
             "halted_symbols": self.halt_gate.halted_symbols(),
             "bus": self.bus.status(),
         }
+
+    def _adapter_status(self, adapter: NewswireAdapter) -> dict[str, Any]:
+        status = dict(adapter.status())
+        status.setdefault("name", adapter.name)
+        status["errors"] = self.adapter_errors_by_name.get(adapter.name, 0)
+        status["reconnects"] = self.adapter_reconnects_by_name.get(adapter.name, 0)
+        status["last_error"] = self.adapter_last_error.get(adapter.name)
+        return status

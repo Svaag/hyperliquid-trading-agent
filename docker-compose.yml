@@ -189,11 +189,24 @@ services:
     command: hyperliquid-trading-agent-runtime liquidations
 
   scheduler:
-    profiles: ["scheduler"]
     <<: *app-common
     environment:
       SERVICE_ROLE: scheduler
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-hlagent}:${POSTGRES_PASSWORD:-hlagent}@postgres:5432/${POSTGRES_DB:-hlagent}
+      NEWSWIRE_ENABLED: "false"
+      WORLD_MODEL_STREAMS_ENABLED: "false"
+      WORLD_MODEL_ADAPTERS_ENABLED: "false"
+      ENGINE_ENABLED: "false"
+      ENGINE_PNL_ATTRIBUTION_ENABLED: "false"
+      POSITION_TRACKING_ENABLED: "false"
+      AUTONOMY_ENABLED: "false"
+      HIP4_ENABLED: "false"
+      ORCHESTRATION_WAVE_SUPERVISOR_ENABLED: "false"
+      LIQUIDATIONS_ENABLED: "false"
+      TRADFI_ENABLED: "false"
+      HYPERLIQUID_WS_ENABLED: "false"
+      DISCORD_BOT_ENABLED: "false"
+      DISCORD_PUBLISHER_ENABLED: "false"
     command: hyperliquid-trading-agent-runtime scheduler
 
   bot:

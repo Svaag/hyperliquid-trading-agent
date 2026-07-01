@@ -163,7 +163,7 @@ def test_engine_readonly_routes_are_registered_and_auth_protected_in_dev():
 
 
 def test_engine_routes_require_token_outside_dev():
-    app = create_app(Settings(environment="prod", agent_api_bearer_token="secret"))
+    app = create_app(Settings(environment="prod", agent_api_bearer_token="secret", engine_enabled=False, autonomy_enabled=False, hip4_enabled=False, orchestration_wave_supervisor_enabled=False, tradfi_enabled=False, _env_file=None))
     app.state.repository = FakeEngineRepository()
     client = TestClient(app)
 

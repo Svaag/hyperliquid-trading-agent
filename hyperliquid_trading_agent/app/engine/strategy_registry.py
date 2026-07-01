@@ -20,10 +20,18 @@ from hyperliquid_trading_agent.app.engine.alpha.wave1c import (
     wave_1c_strategy_instances,
 )
 from hyperliquid_trading_agent.app.engine.alpha.wave2 import (
-    WAVE_2A_IDS as _WAVE_2A_IDS,
-    WAVE_2B_IDS as _WAVE_2B_IDS,
-    WAVE_2C_IDS as _WAVE_2C_IDS,
     WAVE_2_DEFERRED_IDS as _WAVE_2_DEFERRED_IDS,
+)
+from hyperliquid_trading_agent.app.engine.alpha.wave2 import (
+    WAVE_2A_IDS as _WAVE_2A_IDS,
+)
+from hyperliquid_trading_agent.app.engine.alpha.wave2 import (
+    WAVE_2B_IDS as _WAVE_2B_IDS,
+)
+from hyperliquid_trading_agent.app.engine.alpha.wave2 import (
+    WAVE_2C_IDS as _WAVE_2C_IDS,
+)
+from hyperliquid_trading_agent.app.engine.alpha.wave2 import (
     wave_2_specs,
     wave_2_strategy_instances,
 )

@@ -62,7 +62,7 @@ async def test_proactive_cycle_paper_executes_and_tracks_pnl_inventory_and_learn
 
 @pytest.mark.asyncio
 async def test_proactive_loop_is_disabled_by_default() -> None:
-    service = Hip4Service(settings=Settings(environment="test", hip4_enabled=True, hip4_scan_enabled=True))
+    service = Hip4Service(settings=Settings(environment="test", hip4_enabled=True, hip4_scan_enabled=True, hip4_proactive_loop_enabled=False, _env_file=None))
 
     await service.start_proactive_loop()
 

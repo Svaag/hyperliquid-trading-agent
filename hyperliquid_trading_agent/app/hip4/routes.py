@@ -176,11 +176,6 @@ def register_hip4_routes(app: FastAPI, settings: Settings, require_auth: Require
         async def hip4_manual_ticket(candidate_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
             _auth(authorization)
             _require_manual_ticket_mode()
-            service = _enabled()
-            _require_manual_ticket_capability(service)
-            try:
-                return await service.manual_ticket(candidate_id)
-            except KeyError:
-                raise HTTPException(status_code=404, detail="HIP-4 candidate not found") from None
-            except PermissionError as exc:
-                raise HTTPException(status_code=403, detail=str(exc)) from None
+            _require_manual_ticket_capability(_enabled())
+            command = await _enqueue_command("hip4_manual_ticket", {"candidate_id": candidate_id})
+            return _accepted_command(command)

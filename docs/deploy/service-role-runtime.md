@@ -25,7 +25,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Default Compose services start `api`, `newswire`, `world-model`, `trader`, and `agent` after migrations. Only `api` publishes a host port:
+Default Compose services start `api`, `newswire`, `world-model`, `trader`, `agent`, and `scheduler` after migrations. Only `api` publishes a host port:
 
 ```bash
 curl http://127.0.0.1:${HOST_PORT:-8081}/health
@@ -39,7 +39,6 @@ Optional workers are profile-gated:
 docker compose --profile discord-publisher up -d discord-publisher
 docker compose --profile discord-bot up -d discord-bot
 docker compose --profile liquidations up -d liquidations
-docker compose --profile scheduler up -d scheduler
 ```
 
 ## Command intents
@@ -50,15 +49,33 @@ Examples include:
 
 - `POST /ask` and `POST /trade/proposals` -> `agent`
 - engine run/refresh endpoints -> `trader`
-- HIP4 run/scan/paper/reconcile endpoints -> `trader`
+- HIP4 run/scan/paper/reconcile/manual-ticket endpoints -> `trader`
 - autonomy pause/resume/evaluation/report/approval endpoints -> `trader`
+- tracking pause/resume/stop endpoints -> `trader`
 - `POST /newswire/discord/test` -> `discord_publisher`
 - World Model adapter poll/dev seed -> `world_model`
 
-Poll command completion through the API:
+Poll, retry, or cancel command completion through the API:
 
 ```bash
 curl http://127.0.0.1:${HOST_PORT:-8081}/commands/<command_id>
+curl -X POST http://127.0.0.1:${HOST_PORT:-8081}/commands/<command_id>/retry
+curl -X POST http://127.0.0.1:${HOST_PORT:-8081}/commands/<command_id>/cancel
+```
+
+Operator surfaces:
+
+```bash
+curl http://127.0.0.1:${HOST_PORT:-8081}/runtime/command-registry
+curl http://127.0.0.1:${HOST_PORT:-8081}/runtime/command-health
+curl http://127.0.0.1:${HOST_PORT:-8081}/runtime/offsets
+open http://127.0.0.1:${HOST_PORT:-8081}/runtime/dashboard
+```
+
+Paper-signoff preflight remains read-only and never allows live execution:
+
+```bash
+curl 'http://127.0.0.1:${HOST_PORT:-8081}/engine/paper-signoff/preflight?symbols=BTC,ETH,HYPE&window_hours=24&limit=1000'
 ```
 
 ## Compatibility aliases
@@ -69,6 +86,14 @@ Legacy Compose profiles are fail-safe aliases only:
 - `world-model-live` under `--profile legacy-world-model-live` runs the `world_model` worker and publishes no host port.
 
 Do not expose workers directly. `8091` is retired; `WORLD_MODEL_LIVE_HOST_PORT` is ignored.
+
+Remove the compatibility aliases after a clean post-soak window with all of the following true:
+
+1. At least one full local soak has no stale required workers, failed commands, or duplicate host app ports.
+2. `/runtime/command-health` reports no missing default roles.
+3. Newswire -> World Model offsets advance and resume after restarts without skipped events.
+4. Operators have switched to service-role names (`api`, `world-model`, `trader`, etc.) in runbooks and automation.
+5. No deployment scripts reference `bot`, `world-model-live`, `8091`, or `WORLD_MODEL_LIVE_HOST_PORT`.
 
 ## Verification
 

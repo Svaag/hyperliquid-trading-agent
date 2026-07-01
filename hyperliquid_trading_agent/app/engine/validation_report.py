@@ -156,6 +156,7 @@ async def build_engine_validation_report(repository: Any, *, limit: int = 500) -
     total_allocated = sum(1 for item in allocations if item.get("status") in {"allocate", "reduce", "require_debate"})
     total_shadow_intents = sum(1 for item in intents if item.get("execution_mode") == "shadow")
     total_paper_intents = sum(1 for item in intents if item.get("execution_mode") == "paper")
+    total_live_intents = sum(1 for item in intents if item.get("execution_mode") == "live")
 
     return {
         "generated_at_ms": _now_ms(),
@@ -168,6 +169,7 @@ async def build_engine_validation_report(repository: Any, *, limit: int = 500) -
             "allocation_rate_pct": _pct(total_allocated, len(allocations)),
             "shadow_intent_count": total_shadow_intents,
             "paper_intent_count": total_paper_intents,
+            "live_intent_count": total_live_intents,
             "execution_report_count": len(reports),
             "open_position_count": sum(1 for item in positions if item.get("position_state") == "open"),
             "risk_reject_count": len(risk_rejects),
@@ -193,6 +195,7 @@ async def build_engine_validation_report(repository: Any, *, limit: int = 500) -
             "report_count": len(reports),
             "shadow_intent_count": total_shadow_intents,
             "paper_intent_count": total_paper_intents,
+            "live_intent_count": total_live_intents,
             "status_counts": dict(Counter(str(item.get("status") or "unknown") for item in reports)),
             "avg_slippage_bps": round(_avg([_f(item.get("slippage_bps")) for item in reports]), 4),
             "fees_usd": round(sum(_f(item.get("fees_usd")) for item in reports), 4),

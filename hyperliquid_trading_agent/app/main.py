@@ -65,6 +65,7 @@ from hyperliquid_trading_agent.app.newswire.gateway import register_newswire_rou
 from hyperliquid_trading_agent.app.newswire.service import NewswireService
 from hyperliquid_trading_agent.app.orchestration.routes import register_orchestration_routes
 from hyperliquid_trading_agent.app.orchestration.wave_supervisor import WaveSupervisor
+from hyperliquid_trading_agent.app.runtime_commands import COMMAND_REGISTRY, command_registry_json
 from hyperliquid_trading_agent.app.tracking.alerts import DiscordAlertSink
 from hyperliquid_trading_agent.app.tracking.service import PositionTrackingService
 from hyperliquid_trading_agent.app.tradfi.alpaca_provider import AlpacaTradFiProvider
@@ -552,6 +553,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         }
 
+    @app.get("/runtime/dashboard", response_class=HTMLResponse)
+    async def runtime_dashboard() -> HTMLResponse:
+        return HTMLResponse(_runtime_dashboard_html())
+
+    @app.get("/runtime/dashboard/data")
+    async def runtime_dashboard_data(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        heartbeats = _annotate_heartbeats(settings, await app.state.repository.list_service_heartbeats(limit=100))
+        commands = _annotate_commands(settings, await app.state.repository.list_worker_commands(limit=500))
+        offsets = _annotate_offsets(await app.state.repository.list_consumer_offsets(limit=100))
+        return {
+            "runtime": {"service_role": str(settings.service_role), "runtime_profile": settings.runtime_profile, "environment": settings.environment},
+            "heartbeats": {"items": heartbeats, "count": len(heartbeats), "stale_count": len([item for item in heartbeats if item.get("stale") is True])},
+            "commands": {"items": commands[:100], "count": len(commands), "counts": _command_counts(commands)},
+            "offsets": {"items": offsets, "count": len(offsets)},
+            "registry": command_registry_json(),
+            "command_health": _command_health(heartbeats),
+        }
+
     @app.get("/runtime/heartbeats")
     async def runtime_heartbeats(service_role: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
@@ -571,11 +591,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "heartbeat_stale_seconds": settings.service_heartbeat_stale_seconds,
         }
 
-    @app.get("/commands")
-    async def list_commands(target_role: str | None = None, status: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    @app.get("/runtime/command-registry")
+    async def runtime_command_registry(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        items = await app.state.repository.list_worker_commands(target_role=target_role, status=status, limit=100)
+        items = command_registry_json()
         return {"items": items, "count": len(items)}
+
+    @app.get("/runtime/command-health")
+    async def runtime_command_health(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        heartbeats = _annotate_heartbeats(settings, await app.state.repository.list_service_heartbeats(limit=100))
+        return _command_health(heartbeats)
+
+    @app.get("/runtime/offsets")
+    async def runtime_offsets(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = _annotate_offsets(await app.state.repository.list_consumer_offsets(limit=100))
+        return {"items": items, "count": len(items)}
+
+    @app.get("/runtime/offsets/{consumer_name}")
+    async def runtime_offset(consumer_name: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        return _annotate_offsets([await app.state.repository.get_consumer_offset(consumer_name)])[0]
+
+    @app.get("/commands")
+    async def list_commands(target_role: str | None = None, status: str | None = None, command_type: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = _annotate_commands(settings, await app.state.repository.list_worker_commands(target_role=target_role, status=status, command_type=command_type, limit=100))
+        return {"items": items, "count": len(items), "counts": _command_counts(items)}
 
     @app.get("/commands/{command_id}")
     async def get_command(command_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -583,7 +626,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         command = await app.state.repository.get_worker_command(command_id)
         if command is None:
             raise HTTPException(status_code=404, detail="command not found")
-        return command
+        return _annotate_commands(settings, [command])[0]
+
+    @app.post("/commands/{command_id}/retry", status_code=202)
+    async def retry_command(command_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        command = await app.state.repository.retry_worker_command(command_id, requested_by="api")
+        if command is None:
+            raise HTTPException(status_code=404, detail="command not found")
+        return _accepted_command(command)
+
+    @app.post("/commands/{command_id}/cancel")
+    async def cancel_command(command_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        command = await app.state.repository.cancel_worker_command(command_id, cancelled_by="api")
+        if command is None:
+            raise HTTPException(status_code=404, detail="command not found")
+        return _annotate_commands(settings, [command])[0]
 
     @app.post("/ask", status_code=202)
     async def ask(request: AskRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -651,17 +710,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         events = await repository.list_tracking_events(tracker_id)
         return {"items": events, "count": len(events)}
 
-    @app.post("/tracking/positions/{tracker_id}/pause")
+    @app.post("/tracking/positions/{tracker_id}/pause", status_code=202)
     async def pause_tracking_position(tracker_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        return await _set_tracker_status(app, settings, tracker_id, "paused", authorization)
+        _require_agent_api(settings, authorization)
+        command = await app.state.repository.enqueue_worker_command(target_role="trader", command_type="tracking_pause", payload={"tracker_id": tracker_id}, requested_by="api")
+        return _accepted_command(command)
 
-    @app.post("/tracking/positions/{tracker_id}/resume")
+    @app.post("/tracking/positions/{tracker_id}/resume", status_code=202)
     async def resume_tracking_position(tracker_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        return await _set_tracker_status(app, settings, tracker_id, "active", authorization)
+        _require_agent_api(settings, authorization)
+        command = await app.state.repository.enqueue_worker_command(target_role="trader", command_type="tracking_resume", payload={"tracker_id": tracker_id}, requested_by="api")
+        return _accepted_command(command)
 
-    @app.post("/tracking/positions/{tracker_id}/stop")
+    @app.post("/tracking/positions/{tracker_id}/stop", status_code=202)
     async def stop_tracking_position(tracker_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        return await _set_tracker_status(app, settings, tracker_id, "stopped", authorization)
+        _require_agent_api(settings, authorization)
+        command = await app.state.repository.enqueue_worker_command(target_role="trader", command_type="tracking_stop", payload={"tracker_id": tracker_id}, requested_by="api")
+        return _accepted_command(command)
 
     @app.get("/autonomy/status")
     async def autonomy_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -1202,6 +1267,85 @@ def _annotate_heartbeats(settings: Settings, heartbeats: list[dict[str, Any]]) -
         item["stale"] = stale
         annotated.append(item)
     return annotated
+
+
+def _annotate_commands(settings: Settings, commands: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    now_ms = int(time.time() * 1000)
+    stale_after_ms = max(1, int(settings.worker_command_claim_stale_seconds)) * 1000
+    annotated: list[dict[str, Any]] = []
+    for command in commands:
+        item = dict(command)
+        requested_at_ms = item.get("requested_at_ms")
+        claimed_at_ms = item.get("claimed_at_ms")
+        item["age_ms"] = max(0, now_ms - requested_at_ms) if isinstance(requested_at_ms, int) else None
+        item["claimed_age_ms"] = max(0, now_ms - claimed_at_ms) if isinstance(claimed_at_ms, int) else None
+        item["claim_stale"] = bool(item.get("status") == "claimed" and isinstance(claimed_at_ms, int) and now_ms - claimed_at_ms > stale_after_ms)
+        spec = COMMAND_REGISTRY.get(str(item.get("command_type") or ""))
+        if spec is not None:
+            item["registry"] = {"target_role": spec.target_role.value, "handler_name": spec.handler_name, "paper_state_mutation": spec.paper_state_mutation, "external_side_effect": spec.external_side_effect}
+        else:
+            item["registry"] = None
+        annotated.append(item)
+    return annotated
+
+
+def _annotate_offsets(offsets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    now_ms = int(time.time() * 1000)
+    annotated: list[dict[str, Any]] = []
+    for offset in offsets:
+        item = dict(offset)
+        updated_at_ms = item.get("updated_at_ms")
+        item["offset_age_ms"] = max(0, now_ms - updated_at_ms) if isinstance(updated_at_ms, int) and updated_at_ms > 0 else None
+        annotated.append(item)
+    return annotated
+
+
+def _command_counts(commands: list[dict[str, Any]]) -> dict[str, Any]:
+    by_status: dict[str, int] = {}
+    by_role: dict[str, int] = {}
+    by_type: dict[str, int] = {}
+    stale_claims = 0
+    for command in commands:
+        status = str(command.get("status") or "unknown")
+        role = str(command.get("target_role") or "unknown")
+        command_type = str(command.get("command_type") or "unknown")
+        by_status[status] = by_status.get(status, 0) + 1
+        by_role[role] = by_role.get(role, 0) + 1
+        by_type[command_type] = by_type.get(command_type, 0) + 1
+        if command.get("claim_stale") is True:
+            stale_claims += 1
+    return {"by_status": by_status, "by_role": by_role, "by_type": by_type, "stale_claims": stale_claims}
+
+
+def _command_health(heartbeats: list[dict[str, Any]]) -> dict[str, Any]:
+    live_roles = {str(item.get("service_role")): item for item in heartbeats if item.get("stale") is not True and str(item.get("status") or "") == "running"}
+    optional_roles = {ServiceRole.DISCORD_PUBLISHER.value, ServiceRole.DISCORD_BOT.value, ServiceRole.LIQUIDATIONS.value}
+    roles: dict[str, dict[str, Any]] = {}
+    for spec in COMMAND_REGISTRY.values():
+        role = spec.target_role.value
+        if role in live_roles:
+            worker_state = "running"
+        elif role in optional_roles:
+            worker_state = "optional_missing"
+        else:
+            worker_state = "missing"
+        role_state = roles.setdefault(role, {"target_role": role, "worker_state": worker_state, "required_default": role not in optional_roles, "commands": []})
+        role_state["commands"].append({"command_type": spec.command_type, "handler_name": spec.handler_name, "handler_status": spec.handler_status})
+    missing_roles = sorted(role for role, data in roles.items() if data["worker_state"] == "missing")
+    optional_missing_roles = sorted(role for role, data in roles.items() if data["worker_state"] == "optional_missing")
+    return {"roles": sorted(roles.values(), key=lambda item: str(item["target_role"])), "missing_roles": missing_roles, "optional_missing_roles": optional_missing_roles, "registered_command_count": len(COMMAND_REGISTRY)}
+
+
+def _runtime_dashboard_html() -> str:
+    return r"""
+<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Runtime Dashboard</title>
+<style>:root{color-scheme:dark;--bg:#0b1020;--panel:#121a2f;--muted:#94a3b8;--text:#e2e8f0;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444;--accent:#38bdf8}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui}header{padding:18px 22px;border-bottom:1px solid #1f2a44;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}main{padding:22px;display:grid;gap:14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}.panel{background:var(--panel);border:1px solid #1f2a44;border-radius:14px;padding:14px;overflow:auto}.metric{font-size:28px;font-weight:800}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}input,button,select{background:#0f172a;color:var(--text);border:1px solid #334155;border-radius:8px;padding:8px}button{cursor:pointer}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #243149;padding:7px;text-align:left;vertical-align:top}pre{white-space:pre-wrap;background:#0f172a;border-radius:10px;padding:10px}.pill{border-radius:999px;background:#1e293b;padding:2px 8px}.tabs button{margin-right:6px;margin-bottom:6px}.tab{display:none}.tab.active{display:block}</style></head>
+<body><header><div><h1>Runtime Dashboard</h1><div class="muted">Workers, commands, offsets, and command registry.</div></div><div><input id="token" type="password" placeholder="Bearer token"/><button onclick="saveToken()">Save</button><button onclick="load()">Refresh</button></div></header>
+<main><section class="grid" id="summary"></section><div class="tabs"><button onclick="show('workers')">Workers</button><button onclick="show('commands')">Commands</button><button onclick="show('offsets')">Offsets</button><button onclick="show('registry')">Registry</button><button onclick="show('raw')">Raw</button></div><section id="workers" class="tab active panel"></section><section id="commands" class="tab panel"></section><section id="offsets" class="tab panel"></section><section id="registry" class="tab panel"></section><section id="raw" class="tab panel"><pre id="rawpre"></pre></section></main>
+<script>
+const $=id=>document.getElementById(id);function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}function headers(){const t=localStorage.getItem('agentToken')||'';return t?{'Authorization':'Bearer '+t}:{}}function saveToken(){localStorage.setItem('agentToken',$('token').value.trim());load()}function show(id){document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));$(id).classList.add('active')}function metric(k,v,cls=''){return `<div class="panel"><div class="muted">${esc(k)}</div><div class="metric ${cls}">${esc(v)}</div></div>`}function table(items,cols){if(!items||!items.length)return '<div class="muted">No rows.</div>';return '<table><thead><tr>'+cols.map(c=>`<th>${esc(c[0])}</th>`).join('')+'</tr></thead><tbody>'+items.map(r=>'<tr>'+cols.map(c=>`<td>${c[2]?c[2](r):esc(r[c[1]])}</td>`).join('')+'</tr>').join('')+'</tbody></table>'}function fmtMs(ms){return ms==null?'':(ms/1000).toFixed(0)+'s'}async function api(p){const r=await fetch(p,{headers:headers()});if(!r.ok)throw new Error(r.status+' '+await r.text());return await r.json()}async function retry(id){await fetch('/commands/'+id+'/retry',{method:'POST',headers:headers()});load()}async function cancelCmd(id){await fetch('/commands/'+id+'/cancel',{method:'POST',headers:headers()});load()}async function load(){try{$('token').value=localStorage.getItem('agentToken')||'';const d=await api('/runtime/dashboard/data');const cc=d.commands.counts||{};$('summary').innerHTML=[metric('Workers',d.heartbeats.count,(d.heartbeats.stale_count?'bad':'ok')),metric('Stale',d.heartbeats.stale_count,d.heartbeats.stale_count?'bad':'ok'),metric('Commands',d.commands.count),metric('Failed',(cc.by_status||{}).failed||0,((cc.by_status||{}).failed?'bad':'ok')),metric('Offsets',d.offsets.count),metric('Missing roles',(d.command_health.missing_roles||[]).length,(d.command_health.missing_roles||[]).length?'warn':'ok')].join('');$('workers').innerHTML=table(d.heartbeats.items,[['Role','service_role'],['Status','status'],['Stale','stale',r=>r.stale?'<span class="bad">true</span>':'<span class="ok">false</span>'],['Age','heartbeat_age_ms',r=>fmtMs(r.heartbeat_age_ms)],['Errors','metadata',r=>esc(JSON.stringify((r.metadata||{}).world_model?.repository_last_error||(r.metadata||{}).newswire?.adapter_errors||''))]]);$('commands').innerHTML='<h2>Counts</h2><pre>'+esc(JSON.stringify(cc,null,2))+'</pre>'+table(d.commands.items,[['ID','command_id'],['Role','target_role'],['Type','command_type'],['Status','status'],['Age','age_ms',r=>fmtMs(r.age_ms)],['Error','last_error'],['Actions','command_id',r=>`<button onclick="retry('${esc(r.command_id)}')">Retry</button> <button onclick="cancelCmd('${esc(r.command_id)}')">Cancel</button>`]]);$('offsets').innerHTML=table(d.offsets.items,[['Consumer','consumer_name'],['Source','source_table'],['Last event','last_event_id'],['Event ts','last_event_ts_ms'],['Offset age','offset_age_ms',r=>fmtMs(r.offset_age_ms)]]);$('registry').innerHTML='<h2>Missing roles</h2><pre>'+esc(JSON.stringify(d.command_health.missing_roles,null,2))+'</pre>'+table(d.registry,[['Command','command_type'],['Role','target_role'],['Handler','handler_name'],['Side effect','external_side_effect'],['Paper mutation','paper_state_mutation']]);$('rawpre').textContent=JSON.stringify(d,null,2)}catch(e){$('summary').innerHTML=`<div class="panel bad"><b>Load failed</b><pre>${esc(e.message)}</pre></div>`}}load();
+</script></body></html>
+""".strip()
 
 
 def _accepted_command(command: dict[str, Any]) -> dict[str, Any]:

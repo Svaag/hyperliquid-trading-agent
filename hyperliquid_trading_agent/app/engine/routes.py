@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.engine.alpha_graph import build_strategy_regime_alpha_graph
+from hyperliquid_trading_agent.app.engine.paper_signoff import build_paper_signoff_preflight
 from hyperliquid_trading_agent.app.engine.readiness import build_paper_readiness_scorecard
 from hyperliquid_trading_agent.app.engine.replay_compare import (
     latest_engine_replay_comparison,
@@ -381,6 +382,13 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
         _auth(authorization)
         service = getattr(app.state, "engine_service", None)
         return await build_paper_readiness_scorecard(_repo(), settings, service, window_hours=window_hours, limit=limit)
+
+    @app.get("/engine/paper-signoff/preflight")
+    async def engine_paper_signoff_preflight(symbols: str | None = None, window_hours: int | None = None, limit: int = 1000, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _auth(authorization)
+        service = getattr(app.state, "engine_service", None)
+        symbol_list = [item.strip().upper() for item in (symbols or "").split(",") if item.strip()]
+        return await build_paper_signoff_preflight(_repo(), settings, service, symbols=symbol_list, window_hours=window_hours, limit=limit)
 
     @app.get("/engine/replay-comparisons")
     async def engine_replay_comparisons(limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:

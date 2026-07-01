@@ -6,7 +6,10 @@ from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.engine.alpha.wave2 import WAVE_2_DEFERRED_IDS, wave_2_strategy_instances
 from hyperliquid_trading_agent.app.engine.bandit import WAVE2_FORBIDDEN_ACTIONS, WAVE2_POLICY_ACTION_SPACE
 from hyperliquid_trading_agent.app.engine.schemas import FeatureSnapshot, RegimeVector
-from hyperliquid_trading_agent.app.engine.strategy_registry import create_default_strategy_registry, planned_wave_2_specs
+from hyperliquid_trading_agent.app.engine.strategy_registry import (
+    create_default_strategy_registry,
+    planned_wave_2_specs,
+)
 
 
 def test_wave2_flag_remains_rejected_until_wave1d_real_evidence():

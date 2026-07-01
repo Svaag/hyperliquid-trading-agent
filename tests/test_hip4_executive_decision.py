@@ -11,7 +11,7 @@ HIP4_ROOT = Path("hyperliquid_trading_agent/app/hip4")
 
 
 def test_hip4_defaults_are_disabled_and_paper_shadow_only() -> None:
-    settings = Settings(environment="test")
+    settings = Settings(environment="test", hip4_enabled=False, hip4_scan_enabled=False, hip4_paper_execution_enabled=False, hip4_manual_ticket_export_enabled=False, _env_file=None)
 
     assert settings.hip4_enabled is False
     assert settings.hip4_mode == "paper_shadow"
@@ -21,7 +21,7 @@ def test_hip4_defaults_are_disabled_and_paper_shadow_only() -> None:
 
 
 def test_hip4_status_route_exposes_disabled_safe_posture() -> None:
-    app = create_app(Settings(environment="test", position_tracking_enabled=False, autonomy_enabled=False))
+    app = create_app(Settings(environment="test", position_tracking_enabled=False, autonomy_enabled=False, hip4_enabled=False, _env_file=None))
     client = TestClient(app)
 
     response = client.get("/hip4/status")
@@ -40,7 +40,7 @@ def test_hip4_status_route_exposes_disabled_safe_posture() -> None:
 
 
 def test_hip4_enabled_without_capability_probe_stays_degraded() -> None:
-    app = create_app(Settings(environment="test", position_tracking_enabled=False, autonomy_enabled=False, hip4_enabled=True))
+    app = create_app(Settings(environment="test", position_tracking_enabled=False, autonomy_enabled=False, hip4_enabled=True, _env_file=None))
     client = TestClient(app)
 
     response = client.get("/hip4/status")
