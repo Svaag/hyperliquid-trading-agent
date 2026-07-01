@@ -40,7 +40,7 @@ class FakeEngineRepository:
         return [{"allocation_id": "alloc_1"}]
 
     async def list_strategy_specs(self, **kwargs):
-        return [{"strategy_id": "microstructure_ofi_v2", "family": kwargs.get("family") or "microstructure_orderflow"}]
+        return [{"strategy_id": "microstructure_ofi_v2", "family": kwargs.get("family") or "microstructure_orderflow", "enabled": True, "counts_for_breadth": True, "metadata": {}}]
 
     async def get_strategy_spec(self, strategy_id):
         return {"strategy_id": strategy_id, "family": "microstructure_orderflow"} if strategy_id == "microstructure_ofi_v2" else None
@@ -126,6 +126,10 @@ def test_engine_readonly_routes_are_registered_and_auth_protected_in_dev():
     assert client.get("/engine/ev-estimates").json()[0]["estimate_id"] == "ev_1"
     assert client.get("/engine/allocations").json()[0]["allocation_id"] == "alloc_1"
     assert client.get("/engine/strategies").json()[0]["strategy_id"] == "microstructure_ofi_v2"
+    catalog = client.get("/engine/strategy-catalog").json()
+    assert catalog["total_specs"] == 1
+    assert catalog["runtime_enabled"] == 1
+    assert catalog["families"][0]["family"] == "microstructure_orderflow"
     assert client.get("/engine/strategies/microstructure_ofi_v2").json()["strategy_id"] == "microstructure_ofi_v2"
     assert client.get("/engine/strategy-regime-performance").json()[0]["performance_id"] == "perf_1"
     assert client.get("/engine/strategy-regime-performance/microstructure_ofi_v2").json()[0]["strategy_id"] == "microstructure_ofi_v2"
@@ -138,6 +142,7 @@ def test_engine_readonly_routes_are_registered_and_auth_protected_in_dev():
     assert client.get("/engine/portfolio-concentration-events").json()[0]["event_id"] == "pce_1"
     assert client.get("/engine/replay-result-links").json()[0]["link_id"] == "rrl_1"
     assert client.get("/engine/bandit-recommendations").json()[0]["recommendation_id"] == "bandit_1"
+    assert client.get("/engine/alpha-graph").json()["graph_id"] == "strategy_regime_alpha_graph_v1"
     assert client.post("/engine/bandit-recommendations/run", json={"window_hours": 24}).json()["auto_apply_allowed"] is False
     assert client.get("/engine/evidence-packs/ep_1").json()["evidence_pack_id"] == "ep_1"
     assert client.get("/engine/debate-decisions").json()[0]["debate_decision_id"] == "dd_1"

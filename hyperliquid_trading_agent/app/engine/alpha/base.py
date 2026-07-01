@@ -29,6 +29,8 @@ def feature_coverage_pct(snapshot: FeatureSnapshot, required_features: list[str]
 def candidate_contract_fields(spec: StrategySpec, snapshot: FeatureSnapshot, *, expected_edge_bps: float = 0.0) -> dict:
     """Return common AlphaCandidate metadata derived from a strategy spec."""
 
+    activation_scope = str(spec.metadata.get("activation_scope") or "paper_shadow")
+    paper_eligible = bool(spec.metadata.get("paper_eligible", True)) and activation_scope != "shadow_only"
     return {
         "strategy_version": spec.version,
         "strategy_family": spec.family,
@@ -38,5 +40,11 @@ def candidate_contract_fields(spec: StrategySpec, snapshot: FeatureSnapshot, *, 
         "expected_edge_bps": expected_edge_bps,
         "risk_tags": spec.risk_tags,
         "counts_for_breadth": spec.counts_for_breadth,
-        "source_integrity": {"spec_version": spec.version, "registry_contract": "strategy_spec_v1"},
+        "source_integrity": {
+            "spec_version": spec.version,
+            "registry_contract": "strategy_spec_v1",
+            "activation_scope": activation_scope,
+            "paper_eligible": paper_eligible,
+            "operator_promotion_required": bool(spec.metadata.get("operator_promotion_required", False)),
+        },
     }

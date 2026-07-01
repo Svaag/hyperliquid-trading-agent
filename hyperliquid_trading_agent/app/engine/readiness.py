@@ -47,6 +47,29 @@ def _metadata(item: dict[str, Any]) -> dict[str, Any]:
     return item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
 
 
+def _source_integrity(item: dict[str, Any]) -> dict[str, Any]:
+    return item.get("source_integrity") if isinstance(item.get("source_integrity"), dict) else {}
+
+
+def _activation_scope(item: dict[str, Any]) -> str:
+    metadata = _metadata(item)
+    source = _source_integrity(item)
+    return str(metadata.get("activation_scope") or source.get("activation_scope") or "paper_shadow")
+
+
+def _paper_eligible(item: dict[str, Any]) -> bool:
+    metadata = _metadata(item)
+    source = _source_integrity(item)
+    value = metadata.get("paper_eligible", source.get("paper_eligible", True))
+    return bool(value) and _activation_scope(item) != "shadow_only"
+
+
+def _shadow_research(item: dict[str, Any]) -> bool:
+    metadata = _metadata(item)
+    source = _source_integrity(item)
+    return _activation_scope(item) == "shadow_only" or bool(metadata.get("operator_promotion_required") or source.get("operator_promotion_required"))
+
+
 def _candidate_metadata_complete(item: dict[str, Any]) -> bool:
     metadata = _metadata(item)
     strategy_version = metadata.get("strategy_version") or item.get("strategy_version")
@@ -246,7 +269,7 @@ async def build_paper_readiness_scorecard(
         hard_blocks.append(_issue("candidate_strategy_metadata_missing", f"Candidate strategy metadata coverage {candidate_strategy_metadata_coverage_pct}% below {settings.engine_readiness_min_candidate_strategy_metadata_coverage_pct}%."))
     allocated_candidate_ids = {str(item.get("candidate_id")) for item in allocations if item.get("status") in {"allocate", "reduce", "require_debate"} and item.get("candidate_id")}
     council_candidate_ids = {str(item.get("candidate_id")) for item in council_reviews if item.get("candidate_id")}
-    council_review_coverage_pct = _pct(len(allocated_candidate_ids & council_candidate_ids), len(allocated_candidate_ids))
+    council_review_coverage_pct = 100.0 if not allocated_candidate_ids else _pct(len(allocated_candidate_ids & council_candidate_ids), len(allocated_candidate_ids))
     if council_review_coverage_pct < settings.engine_readiness_min_council_review_coverage_pct:
         hard_blocks.append(_issue("council_review_coverage_low", f"Council review coverage {council_review_coverage_pct}% below {settings.engine_readiness_min_council_review_coverage_pct}%."))
     checks["decision_quality"] = {
@@ -262,21 +285,25 @@ async def build_paper_readiness_scorecard(
 
     # Wave 1B evidence spine coverage.
     evidence_candidate_ids = {str(item.get("candidate_id")) for item in candidate_evidence_links if item.get("candidate_id")}
-    candidate_evidence_link_coverage_pct = _pct(len(candidate_ids & evidence_candidate_ids), len(candidate_ids))
+    candidate_evidence_link_coverage_pct = 100.0 if not candidate_ids else _pct(len(candidate_ids & evidence_candidate_ids), len(candidate_ids))
     if candidate_evidence_link_coverage_pct < settings.engine_readiness_min_candidate_evidence_link_coverage_pct:
         hard_blocks.append(_issue("candidate_evidence_link_coverage_low", f"Candidate evidence link coverage {candidate_evidence_link_coverage_pct}% below {settings.engine_readiness_min_candidate_evidence_link_coverage_pct}%."))
     council_packet_candidate_ids = {str(item.get("candidate_id")) for item in candidate_evidence_links if item.get("candidate_id") and (item.get("council_review_id") or (_metadata(item).get("council_decision") in {"reject", "allow_shadow", "allow_paper", "needs_more_evidence"}))}
-    council_packet_coverage_pct = _pct(len(candidate_ids & council_packet_candidate_ids), len(candidate_ids))
+    council_packet_coverage_pct = 100.0 if not candidate_ids else _pct(len(candidate_ids & council_packet_candidate_ids), len(candidate_ids))
     if council_packet_coverage_pct < settings.engine_readiness_min_council_packet_coverage_pct:
         hard_blocks.append(_issue("council_packet_coverage_low", f"Council packet coverage {council_packet_coverage_pct}% below {settings.engine_readiness_min_council_packet_coverage_pct}%."))
     non_flat_candidate_ids = {str(item.get("candidate_id")) for item in candidates if item.get("candidate_id") and item.get("side") != "flat"}
+    flat_candidate_ids = {str(item.get("candidate_id")) for item in candidates if item.get("candidate_id") and item.get("side") == "flat"}
     candidate_risk_ids = {str(item.get("candidate_id")) for item in candidate_evidence_links if item.get("candidate_id") and item.get("risk_decision_id")}
-    candidate_risk_gateway_coverage_pct = _pct(len(non_flat_candidate_ids & candidate_risk_ids), len(non_flat_candidate_ids))
+    candidate_risk_gateway_coverage_pct = 100.0 if not non_flat_candidate_ids else _pct(len(non_flat_candidate_ids & candidate_risk_ids), len(non_flat_candidate_ids))
     if candidate_risk_gateway_coverage_pct < settings.engine_readiness_min_candidate_risk_gateway_coverage_pct:
         hard_blocks.append(_issue("candidate_risk_gateway_coverage_low", f"Candidate-level RiskGateway coverage {candidate_risk_gateway_coverage_pct}% below {settings.engine_readiness_min_candidate_risk_gateway_coverage_pct}%."))
+    flat_no_trade_risk_coverage_pct = _pct(len(flat_candidate_ids & candidate_risk_ids), len(flat_candidate_ids))
+    if flat_candidate_ids and flat_no_trade_risk_coverage_pct < 100.0:
+        hard_blocks.append(_issue("flat_no_trade_risk_evidence_coverage_low", f"Flat/no-trade RiskGateway evidence coverage {flat_no_trade_risk_coverage_pct}% below 100%."))
     outcome_candidate_ids = {str(item.get("candidate_id")) for item in candidate_outcomes if item.get("candidate_id") and str(item.get("terminal_state") or "") in {"matured", "missing_mark"}}
     matured_candidate_ids = {str(item.get("candidate_id")) for item in candidates if item.get("candidate_id") and generated_at_ms - _ts(item, "created_at_ms") >= 5 * 60 * 1000}
-    matured_outcome_attribution_coverage_pct = _pct(len(matured_candidate_ids & outcome_candidate_ids), len(matured_candidate_ids))
+    matured_outcome_attribution_coverage_pct = 100.0 if not matured_candidate_ids else _pct(len(matured_candidate_ids & outcome_candidate_ids), len(matured_candidate_ids))
     if matured_outcome_attribution_coverage_pct < settings.engine_readiness_min_matured_outcome_attribution_coverage_pct:
         hard_blocks.append(_issue("matured_outcome_attribution_coverage_low", f"Matured outcome attribution coverage {matured_outcome_attribution_coverage_pct}% below {settings.engine_readiness_min_matured_outcome_attribution_coverage_pct}%."))
     checks["wave1b_evidence_spine"] = {
@@ -284,6 +311,7 @@ async def build_paper_readiness_scorecard(
         "candidate_evidence_link_coverage_pct": candidate_evidence_link_coverage_pct,
         "council_packet_coverage_pct": council_packet_coverage_pct,
         "candidate_risk_gateway_coverage_pct": candidate_risk_gateway_coverage_pct,
+        "flat_no_trade_risk_coverage_pct": flat_no_trade_risk_coverage_pct,
         "candidate_outcome_attribution_count": len(candidate_outcomes),
         "matured_candidate_count": len(matured_candidate_ids),
         "matured_outcome_attribution_coverage_pct": matured_outcome_attribution_coverage_pct,
@@ -302,7 +330,7 @@ async def build_paper_readiness_scorecard(
         hard_blocks.append(_issue("risk_reject_spike_critical", f"{len(risk_rejects)} rejects in window; stale_or_invalid={stale_or_invalid_rejects}."))
     intent_ids = {str(item.get("intent_id")) for item in intents if item.get("intent_id")}
     risk_intent_ids = {str(item.get("intent_id")) for item in risk_decisions if item.get("intent_id")}
-    risk_gateway_coverage_pct = _pct(len(intent_ids & risk_intent_ids), len(intent_ids))
+    risk_gateway_coverage_pct = 100.0 if not intent_ids else _pct(len(intent_ids & risk_intent_ids), len(intent_ids))
     if risk_gateway_coverage_pct < settings.engine_readiness_min_risk_gateway_coverage_pct:
         hard_blocks.append(_issue("risk_gateway_coverage_low", f"RiskGateway coverage {risk_gateway_coverage_pct}% below {settings.engine_readiness_min_risk_gateway_coverage_pct}%."))
     checks["risk_gateway"] = {
@@ -332,17 +360,28 @@ async def build_paper_readiness_scorecard(
     candidate_strategy_counts = Counter(str(item.get("strategy_id") or "unknown") for item in candidates)
     active_alpha_strategies: set[str] = set()
     active_alpha_families: set[str] = set()
+    paper_eligible_active_strategies: set[str] = set()
+    paper_eligible_active_families: set[str] = set()
+    shadow_research_strategies: set[str] = set()
+    shadow_research_families: set[str] = set()
     for candidate in candidates:
         metadata = _metadata(candidate)
         family = str(metadata.get("strategy_family") or candidate.get("strategy_family") or "unknown")
         counts_for_breadth = bool(metadata.get("counts_for_breadth", candidate.get("counts_for_breadth", True)))
         if counts_for_breadth and family not in {"legacy_bridge", "risk_off_defensive"} and candidate.get("side") != "flat":
-            active_alpha_strategies.add(str(candidate.get("strategy_id") or "unknown"))
+            strategy_id = str(candidate.get("strategy_id") or "unknown")
+            active_alpha_strategies.add(strategy_id)
             active_alpha_families.add(family)
-    if len(active_alpha_strategies) < settings.engine_readiness_min_active_strategy_count_24h:
-        hard_blocks.append(_issue("insufficient_active_strategy_count", f"Need >={settings.engine_readiness_min_active_strategy_count_24h} active alpha strategies; observed {len(active_alpha_strategies)}."))
-    if len(active_alpha_families) < settings.engine_readiness_min_active_strategy_family_count_24h:
-        hard_blocks.append(_issue("insufficient_active_strategy_family_count", f"Need >={settings.engine_readiness_min_active_strategy_family_count_24h} active alpha families; observed {len(active_alpha_families)}."))
+            if _paper_eligible(candidate):
+                paper_eligible_active_strategies.add(strategy_id)
+                paper_eligible_active_families.add(family)
+            if _shadow_research(candidate):
+                shadow_research_strategies.add(strategy_id)
+                shadow_research_families.add(family)
+    if len(paper_eligible_active_strategies) < settings.engine_readiness_min_active_strategy_count_24h:
+        hard_blocks.append(_issue("insufficient_active_strategy_count", f"Need >={settings.engine_readiness_min_active_strategy_count_24h} paper-eligible active alpha strategies; observed {len(paper_eligible_active_strategies)}. Shadow-active strategies observed={len(active_alpha_strategies)}."))
+    if len(paper_eligible_active_families) < settings.engine_readiness_min_active_strategy_family_count_24h:
+        hard_blocks.append(_issue("insufficient_active_strategy_family_count", f"Need >={settings.engine_readiness_min_active_strategy_family_count_24h} paper-eligible active alpha families; observed {len(paper_eligible_active_families)}. Shadow-active families observed={len(active_alpha_families)}."))
 
     allocation_strategy_counts: Counter[str] = Counter()
     allocation_notional_by_strategy: dict[str, float] = defaultdict(float)
@@ -382,6 +421,16 @@ async def build_paper_readiness_scorecard(
         "active_alpha_family_count": len(active_alpha_families),
         "active_alpha_strategies": sorted(active_alpha_strategies),
         "active_alpha_families": sorted(active_alpha_families),
+        "active_shadow_strategy_count": len(active_alpha_strategies),
+        "active_shadow_family_count": len(active_alpha_families),
+        "paper_eligible_active_strategy_count": len(paper_eligible_active_strategies),
+        "paper_eligible_active_family_count": len(paper_eligible_active_families),
+        "paper_eligible_active_strategies": sorted(paper_eligible_active_strategies),
+        "paper_eligible_active_families": sorted(paper_eligible_active_families),
+        "shadow_research_strategy_count": len(shadow_research_strategies),
+        "shadow_research_family_count": len(shadow_research_families),
+        "shadow_research_strategies": sorted(shadow_research_strategies),
+        "shadow_research_families": sorted(shadow_research_families),
         "allocation_counts": dict(allocation_strategy_counts),
         "allocation_notional_usd": {key: round(value, 4) for key, value in allocation_notional_by_strategy.items()},
         "allocation_notional_by_family": {key: round(value, 4) for key, value in allocation_notional_by_family.items()},
@@ -401,9 +450,10 @@ async def build_paper_readiness_scorecard(
         if _i(row.get("candidate_count"), 0) >= settings.engine_readiness_min_strategy_regime_sample_count and _f(row.get("score")) >= settings.engine_readiness_min_strategy_regime_score
     ]
     evidence_strategy_ids = {str(row.get("strategy_id") or "unknown") for row in strategy_regime_rows_ok}
-    strategy_regime_evidence_coverage_pct = _pct(len(active_alpha_strategies & evidence_strategy_ids), len(active_alpha_strategies))
+    shadow_strategy_regime_evidence_coverage_pct = _pct(len(active_alpha_strategies & evidence_strategy_ids), len(active_alpha_strategies))
+    strategy_regime_evidence_coverage_pct = _pct(len(paper_eligible_active_strategies & evidence_strategy_ids), len(paper_eligible_active_strategies))
     if strategy_regime_evidence_coverage_pct < settings.engine_readiness_min_strategy_regime_evidence_coverage_pct:
-        hard_blocks.append(_issue("strategy_regime_evidence_coverage_low", f"Strategy-regime evidence coverage {strategy_regime_evidence_coverage_pct}% below {settings.engine_readiness_min_strategy_regime_evidence_coverage_pct}%."))
+        hard_blocks.append(_issue("strategy_regime_evidence_coverage_low", f"Paper-eligible strategy-regime evidence coverage {strategy_regime_evidence_coverage_pct}% below {settings.engine_readiness_min_strategy_regime_evidence_coverage_pct}%. Shadow strategy-regime evidence coverage={shadow_strategy_regime_evidence_coverage_pct}%."))
     low_score_rows = [row for row in strategy_regime_performance if _i(row.get("candidate_count"), 0) >= settings.engine_readiness_min_strategy_regime_sample_count and _f(row.get("score")) < settings.engine_readiness_min_strategy_regime_score]
     if low_score_rows:
         hard_blocks.append(_issue("strategy_regime_score_low", f"{len(low_score_rows)} strategy-regime rows below minimum score {settings.engine_readiness_min_strategy_regime_score}."))
@@ -411,6 +461,8 @@ async def build_paper_readiness_scorecard(
         "row_count": len(strategy_regime_performance),
         "qualifying_row_count": len(strategy_regime_rows_ok),
         "coverage_pct": strategy_regime_evidence_coverage_pct,
+        "paper_eligible_coverage_pct": strategy_regime_evidence_coverage_pct,
+        "shadow_coverage_pct": shadow_strategy_regime_evidence_coverage_pct,
         "required_sample_count": settings.engine_readiness_min_strategy_regime_sample_count,
         "required_score": settings.engine_readiness_min_strategy_regime_score,
     }
@@ -497,6 +549,8 @@ async def build_paper_readiness_scorecard(
         score -= 8
     if candidate_risk_gateway_coverage_pct < settings.engine_readiness_min_candidate_risk_gateway_coverage_pct:
         score -= 10
+    if flat_candidate_ids and flat_no_trade_risk_coverage_pct < 100.0:
+        score -= 10
     if matured_outcome_attribution_coverage_pct < settings.engine_readiness_min_matured_outcome_attribution_coverage_pct:
         score -= 10
     if strategy_regime_evidence_coverage_pct < settings.engine_readiness_min_strategy_regime_evidence_coverage_pct:
@@ -556,6 +610,7 @@ async def build_paper_readiness_scorecard(
         "candidate_evidence_link_coverage_pct": candidate_evidence_link_coverage_pct,
         "council_packet_coverage_pct": council_packet_coverage_pct,
         "candidate_risk_gateway_coverage_pct": candidate_risk_gateway_coverage_pct,
+        "flat_no_trade_risk_coverage_pct": flat_no_trade_risk_coverage_pct,
         "matured_outcome_attribution_coverage_pct": matured_outcome_attribution_coverage_pct,
         "council_review_coverage_pct": council_review_coverage_pct,
         "risk_gateway_coverage_pct": risk_gateway_coverage_pct,
@@ -671,6 +726,8 @@ def _next_actions(hard_blocks: list[dict[str, str]], warnings: list[dict[str, st
         actions.append("Keep ENGINE_PAPER_ENABLED=false, ENGINE_EXECUTION_MODES=shadow, and ENGINE_LIVE_ENABLED=false before further review.")
     if "risk_reject_spike_critical" in codes or "risk_reject_rate_high" in codes:
         actions.append("Review latest risk rejects and stale/invalid data violations before promotion.")
+    if "candidate_risk_gateway_coverage_low" in codes or "flat_no_trade_risk_evidence_coverage_low" in codes:
+        actions.append("Verify every trade and no-trade candidate has candidate-level RiskGateway evidence before promotion.")
     if "strategy_dominance" in codes or "strategy_allocation_dominance" in codes or "strategy_family_allocation_dominance" in codes or "symbol_strategy_allocation_dominance" in codes:
         actions.append("Tighten or enable strategy/family/symbol diversity controls and continue shadow observation.")
     if "replay_comparison_missing" in codes or "replay_comparison_stale" in codes or "replay_comparison_failed" in codes:

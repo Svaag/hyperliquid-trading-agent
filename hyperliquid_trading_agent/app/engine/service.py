@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from hyperliquid_trading_agent.app.engine.attribution import CandidateOutcomeAttributionService
@@ -28,6 +29,7 @@ from hyperliquid_trading_agent.app.engine.strategy_registry import create_defaul
 from hyperliquid_trading_agent.app.engine.strategy_selector import ConservativeStrategySelector
 from hyperliquid_trading_agent.app.engine.throttles import StrategyThrottleController
 from hyperliquid_trading_agent.app.governance.risk_gateway import RiskGateway
+from hyperliquid_trading_agent.app.governance.schemas import RiskGatewayDecision
 
 
 class InstitutionalEngineService:
@@ -56,7 +58,10 @@ class InstitutionalEngineService:
         self.world_model_service = world_model_service
         self.liquidation_bridge = liquidation_bridge
         self.ledger = EventLedger(repository)
-        self.feature_store = FeatureStore(repository)
+        self.feature_store = FeatureStore(
+            repository,
+            cross_venue_dexes=getattr(settings, "engine_cross_venue_dex_list", []),
+        )
         self.regime_engine = RegimeEngine(
             news_catalyst_threshold=getattr(settings, "engine_news_catalyst_threshold", 0.35),
             news_catalyst_ttl_ms=int(getattr(settings, "engine_news_catalyst_ttl_seconds", 3600)) * 1000,
@@ -79,7 +84,10 @@ class InstitutionalEngineService:
         self.diversity = PortfolioDiversityController(settings)
         self.throttles = StrategyThrottleController(settings)
         self.strategy_selector = ConservativeStrategySelector()
-        self.strategy_registry = create_default_strategy_registry(enable_wave_1c=bool(getattr(settings, "engine_wave1c_enabled", False)))
+        self.strategy_registry = create_default_strategy_registry(
+            catalog_mode=getattr(settings, "engine_alpha_catalog_mode", "wave1a_locked"),
+            enable_wave_1c=bool(getattr(settings, "engine_wave1c_enabled", False)),
+        )
         self.strategies = self.strategy_registry.strategies(enabled_only=True)
         self.last_run_at_ms: int | None = None
         self.last_error: str | None = None
@@ -92,6 +100,8 @@ class InstitutionalEngineService:
         self.last_throttle_summary: dict[str, Any] = {}
         self.last_diversity_summary: dict[str, Any] = {}
         self.last_strategy_selection_summary: dict[str, Any] = {}
+        self.strategy_specs_persisted = False
+        self.strategy_specs_persisted_count = 0
 
     def status(self) -> dict[str, Any]:
         return {
@@ -110,6 +120,9 @@ class InstitutionalEngineService:
             "throttles": self.throttles.status(),
             "diversity": {**self.diversity.status(), "last_summary": self.last_diversity_summary},
             "strategy_registry": self.strategy_registry.metadata(),
+            "strategy_catalog": self.strategy_registry.catalog_summary(),
+            "strategy_specs_persisted": self.strategy_specs_persisted,
+            "strategy_specs_persisted_count": self.strategy_specs_persisted_count,
             "wave_policy": {
                 "wave1c_enabled": bool(getattr(self.settings, "engine_wave1c_enabled", False)),
                 "wave2_enabled": bool(getattr(self.settings, "engine_wave2_enabled", False)),
@@ -121,6 +134,7 @@ class InstitutionalEngineService:
         ts = now_ms()
         symbols = [symbol.upper() for symbol in (symbols or self.settings.autonomy_core_symbols or ["BTC", "ETH", "HYPE"])]
         try:
+            await self.persist_strategy_specs()
             mids = await self._safe_all_mids()
             selected_mids = {symbol: mids[symbol] for symbol in symbols if symbol in mids}
             if selected_mids:
@@ -373,9 +387,49 @@ class InstitutionalEngineService:
         if callable(refresh):
             await refresh(self.repository, now_ms=timestamp_ms)
 
+    async def persist_strategy_specs(self) -> int:
+        """Persist all registry specs once so reports see unobserved/gated strategies."""
+
+        if self.strategy_specs_persisted:
+            return self.strategy_specs_persisted_count
+        if self.repository is None or not getattr(self.repository, "enabled", False):
+            return 0
+        record = getattr(self.repository, "upsert_strategy_spec", None)
+        if not callable(record):
+            return 0
+        count = 0
+        for spec in self.strategy_registry.specs(enabled_only=False):
+            await record(spec.model_dump(mode="json"))
+            count += 1
+        self.strategy_specs_persisted = True
+        self.strategy_specs_persisted_count = count
+        return count
+
     async def _candidate_risk_precheck(self, candidate: AlphaCandidate, ev: Any, *, snapshot_features: dict[str, Any], timestamp_ms: int) -> Any | None:
         if candidate.side == "flat":
-            return None
+            decision = RiskGatewayDecision(
+                decision_id="rgd_no_trade_" + hashlib.sha1(candidate.candidate_id.encode()).hexdigest()[:24],
+                intent_id=_no_trade_intent_id(candidate.candidate_id),
+                mode="shadow" if self.settings.engine_shadow_enabled and not self.settings.engine_paper_enabled else "paper",
+                decision="allow",
+                violations=[],
+                limits_snapshot={"asset_class": candidate.asset_class, "no_trade": True},
+                market_snapshot={"last_price_at_ms": timestamp_ms, "spread_bps": snapshot_features.get("spread_bps")},
+                portfolio_snapshot=self._portfolio_snapshot(),
+                config_version_id=None,
+                created_at_ms=timestamp_ms,
+                metadata={
+                    "candidate_id": candidate.candidate_id,
+                    "strategy_id": candidate.strategy_id,
+                    "asset": candidate.asset,
+                    "venue": candidate.venue,
+                    "candidate_level_no_trade": True,
+                    "execution_authority": "none",
+                    "exchange_actions": [],
+                },
+            )
+            await self.risk_gateway.record(decision)
+            return decision
         notional = max(1.0, min(10.0, float(candidate.proposed_entry) * 0.001))
         size = notional / max(float(candidate.proposed_entry), 1e-9)
         intent = self._order_intent(candidate, ev.model_version_id, f"precheck_{candidate.candidate_id}", size, notional, timestamp_ms)
@@ -519,6 +573,13 @@ class InstitutionalEngineService:
             record = getattr(self.repository, "record_allocation_decision", None)
             if callable(record):
                 await record(allocation.model_dump(mode="json"))
+
+
+def _no_trade_intent_id(candidate_id: str) -> str:
+    value = f"no_trade_{candidate_id}"
+    if len(value) <= 96:
+        return value
+    return "no_trade_" + hashlib.sha1(candidate_id.encode()).hexdigest()[:24]
 
 
 def _meta_and_asset_payload(raw: Any) -> dict[str, Any]:

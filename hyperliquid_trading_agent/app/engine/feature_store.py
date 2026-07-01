@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import statistics
 from itertools import pairwise
 from typing import Any
@@ -14,8 +15,9 @@ FEATURE_VERSION = "engine_features_v1"
 class FeatureStore:
     """Point-in-time feature store with repository-backed persistence."""
 
-    def __init__(self, repository: Any | None = None):
+    def __init__(self, repository: Any | None = None, *, cross_venue_dexes: list[str] | None = None):
         self.repository = repository
+        self.cross_venue_dexes = [dex.lower().strip() for dex in (cross_venue_dexes or []) if dex and dex.strip()]
         self._features: dict[str, FeatureValue] = {}
 
     async def record(self, feature: FeatureValue) -> FeatureValue:
@@ -27,7 +29,7 @@ class FeatureStore:
         return feature
 
     async def features_for_event(self, event: NormalizedEvent) -> list[FeatureValue]:
-        features = derive_features(event)
+        features = derive_features(event, cross_venue_dexes=self.cross_venue_dexes)
         for feature in features:
             await self.record(feature)
         rollups: list[FeatureValue] = []
@@ -75,7 +77,7 @@ class FeatureStore:
         )
 
 
-def derive_features(event: NormalizedEvent) -> list[FeatureValue]:
+def derive_features(event: NormalizedEvent, *, cross_venue_dexes: list[str] | None = None) -> list[FeatureValue]:
     if event.event_type in {"all_mids", "mid", "price"}:
         return _price_features(event)
     if event.event_type in {"l2_book", "l2Book", "orderbook"}:
@@ -86,6 +88,8 @@ def derive_features(event: NormalizedEvent) -> list[FeatureValue]:
         return _funding_oi_features(event)
     if event.event_type in {"liquidation_signal", "liquidation_features"}:
         return _liquidation_features(event)
+    if event.event_type in {"cross_venue", "cross_venue_market", "cross_venue_features"}:
+        return _cross_venue_features(event, enabled_dexes=cross_venue_dexes or [])
     return []
 
 
@@ -277,22 +281,55 @@ def _news_features(event: NormalizedEvent) -> list[FeatureValue]:
                 metadata=news_metadata,
             )
         )
+        consensus = min(max(0.0, min(1.0, confidence)), max(0.0, min(1.0, source_score)))
+        out.append(
+            _feature(
+                event,
+                asset=symbol,
+                group="news",
+                name="source_consensus_score",
+                value={"confidence": confidence, "source_score": source_score, "consensus": consensus},
+                scalar=consensus,
+                metadata=news_metadata,
+            )
+        )
     return out
 
 
 def _funding_oi_features(event: NormalizedEvent) -> list[FeatureValue]:
     out: list[FeatureValue] = []
     for symbol, ctx in _iter_asset_contexts(event):
-        funding = _float(ctx.get("funding") or ctx.get("funding_hourly"))
-        oi = _float(ctx.get("openInterest") or ctx.get("open_interest"))
-        day_volume = _float(ctx.get("dayNtlVlm") or ctx.get("day_volume_usd") or ctx.get("day_volume"))
+        funding = _first_float(ctx, "funding", "funding_hourly")
+        oi = _first_float(ctx, "openInterest", "open_interest")
+        day_volume = _first_float(ctx, "dayNtlVlm", "day_volume_usd", "day_volume")
+        basis_bps = _perp_basis_bps(ctx)
         if funding is not None:
             out.append(_feature(event, asset=symbol, group="funding_oi", name="funding_hourly", value={"funding_hourly": funding}, scalar=funding))
         if oi is not None:
             out.append(_feature(event, asset=symbol, group="funding_oi", name="open_interest", value={"open_interest": oi}, scalar=oi))
         if day_volume is not None:
             out.append(_feature(event, asset=symbol, group="funding_oi", name="day_volume_usd", value={"day_volume_usd": day_volume}, scalar=day_volume))
+        if basis_bps is not None:
+            out.append(_feature(event, asset=symbol, group="funding_oi", name="perp_basis_bps", value={"perp_basis_bps": basis_bps}, scalar=basis_bps))
     return out
+
+
+def _perp_basis_bps(ctx: dict[str, Any]) -> float | None:
+    direct = _first_float(ctx, "perp_basis_bps", "perpBasisBps", "basis_bps", "basisBps")
+    if direct is not None:
+        return direct
+    mark = _first_float(ctx, "markPx", "mark_price", "markPrice", "mid")
+    index = _first_float(ctx, "oraclePx", "oracle_price", "indexPx", "index_price", "oraclePrice")
+    if mark is None or index is None or mark <= 0 or index <= 0:
+        return None
+    return (mark / index - 1.0) * 10_000.0
+
+
+def _first_float(ctx: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        if key in ctx and ctx.get(key) is not None:
+            return _float(ctx.get(key))
+    return None
 
 
 def _iter_asset_contexts(event: NormalizedEvent) -> list[tuple[str, dict[str, Any]]]:
@@ -350,11 +387,57 @@ def _liquidation_features(event: NormalizedEvent) -> list[FeatureValue]:
     return out
 
 
+def _cross_venue_features(event: NormalizedEvent, *, enabled_dexes: list[str]) -> list[FeatureValue]:
+    if not enabled_dexes:
+        return []
+    symbol = (event.symbols[0] if event.symbols else str(event.payload.get("symbol") or event.payload.get("coin") or "")).upper()
+    if not symbol:
+        return []
+    payload = event.payload or {}
+    venues = payload.get("venues") if isinstance(payload.get("venues"), dict) else {}
+    enabled = {dex.lower() for dex in enabled_dexes}
+    home_mid = _first_float(payload, "hyperliquid_mid", "hl_mid", "mid") or _venue_float(venues, "hyperliquid", "mid", "mark", "mark_px")
+    external_mids = [_venue_float(venues, venue, "mid", "mark", "mark_px") for venue in enabled]
+    external_mids.extend(_first_float(payload, f"{venue}_mid", f"{venue}_mark") for venue in enabled)
+    external_mids = [value for value in external_mids if value is not None and value > 0]
+    out: list[FeatureValue] = []
+    metadata = {"enabled_cross_venue_dexes": sorted(enabled), "read_only": True, "advisory_only": True}
+    if home_mid is not None and home_mid > 0 and external_mids:
+        external_mid = sum(external_mids) / len(external_mids)
+        delta_bps = (external_mid / home_mid - 1.0) * 10_000.0
+        out.append(_feature(event, asset=symbol, group="cross_venue", name="cross_venue_mid_delta_bps", value={"hyperliquid_mid": home_mid, "external_mid": external_mid, "delta_bps": delta_bps}, scalar=delta_bps, metadata=metadata))
+    home_volume = _first_float(payload, "hyperliquid_volume_usd", "hl_volume_usd", "day_volume_usd") or _venue_float(venues, "hyperliquid", "volume_usd", "day_volume_usd")
+    external_volumes = [_venue_float(venues, venue, "volume_usd", "day_volume_usd") for venue in enabled]
+    external_volumes.extend(_first_float(payload, f"{venue}_volume_usd") for venue in enabled)
+    external_volumes = [value for value in external_volumes if value is not None and value >= 0]
+    if home_volume is not None and external_volumes:
+        external_volume = sum(external_volumes)
+        denom = max(home_volume + external_volume, 1e-9)
+        imbalance = (external_volume - home_volume) / denom
+        out.append(_feature(event, asset=symbol, group="cross_venue", name="cross_venue_volume_imbalance", value={"hyperliquid_volume_usd": home_volume, "external_volume_usd": external_volume, "imbalance": imbalance}, scalar=imbalance, metadata=metadata))
+    direct_liq = _first_float(payload, "cross_venue_liq_imbalance")
+    if direct_liq is None:
+        home_liq = _first_float(payload, "hyperliquid_liq_imbalance", "hl_liq_imbalance") or _venue_float(venues, "hyperliquid", "liq_imbalance", "long_vs_short_liq_imbalance") or 0.0
+        external_liqs = [_venue_float(venues, venue, "liq_imbalance", "long_vs_short_liq_imbalance") for venue in enabled]
+        external_liqs.extend(_first_float(payload, f"{venue}_liq_imbalance") for venue in enabled)
+        external_liqs = [value for value in external_liqs if value is not None]
+        if external_liqs:
+            direct_liq = sum(external_liqs) - home_liq
+    if direct_liq is not None:
+        out.append(_feature(event, asset=symbol, group="cross_venue", name="cross_venue_liq_imbalance", value={"cross_venue_liq_imbalance": direct_liq}, scalar=direct_liq, metadata=metadata))
+    return out
+
+
 def derive_rolling_features(*, asset: str, features: list[FeatureValue], as_of_ms: int | None = None) -> list[FeatureValue]:
     asset = asset.upper()
     cutoff = as_of_ms or max((item.computed_ts_ms for item in features if item.asset == asset), default=now_ms())
     mids = _series(features, asset=asset, feature_name="mid", as_of_ms=cutoff)
     oi = _series(features, asset=asset, feature_name="open_interest", as_of_ms=cutoff)
+    depth = _series(features, asset=asset, feature_name="top_depth_usd", as_of_ms=cutoff)
+    spread = _series(features, asset=asset, feature_name="spread_bps", as_of_ms=cutoff)
+    basis = _series(features, asset=asset, feature_name="perp_basis_bps", as_of_ms=cutoff)
+    funding = _series(features, asset=asset, feature_name="funding_hourly", as_of_ms=cutoff)
+    volume = _series(features, asset=asset, feature_name="day_volume_usd", as_of_ms=cutoff)
     out: list[FeatureValue] = []
     if len(mids) >= 2:
         latest_ts, latest_mid = mids[-1]
@@ -368,6 +451,15 @@ def derive_rolling_features(*, asset: str, features: list[FeatureValue], as_of_m
             returns = [(cur - prev) / prev * 10_000 for prev, cur in pairwise(values) if prev > 0]
             if len(returns) >= 2:
                 out.append(_rollup_feature(asset=asset, name=name, value=statistics.pstdev(returns), computed_ts_ms=cutoff))
+        range_values = [mid for ts, mid in mids if ts >= latest_ts - 3_600_000]
+        if len(range_values) >= 3:
+            low = min(range_values)
+            high = max(range_values)
+            if high > low:
+                range_position = (latest_mid - low) / (high - low)
+                out.append(_rollup_feature(asset=asset, name="range_position", value=max(0.0, min(1.0, range_position)), computed_ts_ms=cutoff))
+                distance = min(abs(latest_mid - low), abs(high - latest_mid)) / latest_mid * 10_000
+                out.append(_rollup_feature(asset=asset, name="stop_cluster_distance_bps", value=distance, computed_ts_ms=cutoff))
     if len(oi) >= 2:
         latest_ts, latest_oi = oi[-1]
         baseline = _baseline(oi, latest_ts - 300_000)
@@ -377,6 +469,35 @@ def derive_rolling_features(*, asset: str, features: list[FeatureValue], as_of_m
         velocity = zscore(changes)
         if velocity is not None:
             out.append(_rollup_feature(asset=asset, name="oi_velocity_z", value=velocity, computed_ts_ms=cutoff))
+    if len(depth) >= 2:
+        latest_ts, latest_depth = depth[-1]
+        baseline = _baseline(depth, latest_ts - 300_000)
+        if baseline is not None and baseline > 0:
+            thinning = max(0.0, (baseline - latest_depth) / baseline * 100.0)
+            out.append(_rollup_feature(asset=asset, name="depth_thinning_5m_pct", value=thinning, computed_ts_ms=cutoff))
+    if len(spread) >= 2:
+        latest_ts, latest_spread = spread[-1]
+        baseline = _baseline(spread, latest_ts - 300_000)
+        if baseline is not None:
+            out.append(_rollup_feature(asset=asset, name="spread_velocity_5m_bps", value=latest_spread - baseline, computed_ts_ms=cutoff))
+    if len(basis) >= 2:
+        latest_ts, latest_basis = basis[-1]
+        baseline = _baseline(basis, latest_ts - 900_000)
+        if baseline is not None:
+            out.append(_rollup_feature(asset=asset, name="basis_delta_15m_bps", value=latest_basis - baseline, computed_ts_ms=cutoff))
+        z = zscore([value for _, value in basis[-24:]])
+        if z is not None:
+            out.append(_rollup_feature(asset=asset, name="basis_zscore", value=z, computed_ts_ms=cutoff))
+    if len(funding) >= 2:
+        latest_ts, latest_funding = funding[-1]
+        baseline = _baseline(funding, latest_ts - 900_000)
+        if baseline is not None:
+            change = latest_funding - baseline
+            out.append(_rollup_feature(asset=asset, name="funding_change_15m", value=change, computed_ts_ms=cutoff))
+            out.append(_rollup_feature(asset=asset, name="funding_curve_slope", value=change, computed_ts_ms=cutoff))
+    if volume and depth and spread:
+        liquidity_score = _volume_liquidity_score(volume[-1][1], depth[-1][1], spread[-1][1])
+        out.append(_rollup_feature(asset=asset, name="volume_liquidity_score", value=liquidity_score, computed_ts_ms=cutoff))
     return out
 
 
@@ -426,6 +547,20 @@ def zscore(values: list[float]) -> float | None:
     if sigma <= 0:
         return 0.0
     return (values[-1] - statistics.mean(values)) / sigma
+
+
+def _volume_liquidity_score(day_volume_usd: float, top_depth_usd: float, spread_bps: float) -> float:
+    volume_component = min(1.0, math.log10(max(day_volume_usd, 0.0) + 1.0) / 9.0)
+    depth_component = min(1.0, math.log10(max(top_depth_usd, 0.0) + 1.0) / 7.0)
+    spread_component = max(0.0, min(1.0, 1.0 - max(spread_bps, 0.0) / 25.0))
+    return round(volume_component * 0.45 + depth_component * 0.4 + spread_component * 0.15, 4)
+
+
+def _venue_float(venues: dict[str, Any], venue: str, *keys: str) -> float | None:
+    raw = venues.get(venue) or venues.get(venue.lower()) or venues.get(venue.upper())
+    if not isinstance(raw, dict):
+        return None
+    return _first_float(raw, *keys)
 
 
 def _float(value: Any) -> float | None:

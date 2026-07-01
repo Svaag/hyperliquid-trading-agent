@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.engine.alpha_graph import build_strategy_regime_alpha_graph
 from hyperliquid_trading_agent.app.engine.bandit import OfflineContextualBanditReporter
 from hyperliquid_trading_agent.app.engine.event_ledger import now_ms
 from hyperliquid_trading_agent.app.engine.readiness import build_paper_readiness_scorecard
@@ -38,6 +39,53 @@ class EngineReplayComparisonRequest(BaseModel):
     baseline_config: dict[str, Any] = Field(default_factory=dict)
     candidate_config: dict[str, Any] = Field(default_factory=dict)
     variant_id: str | None = None
+
+
+def _strategy_catalog_from_specs(specs: list[dict[str, Any]], *, mode: str) -> dict[str, Any]:
+    runtime_ids = {str(spec.get("strategy_id")) for spec in specs if spec.get("enabled")}
+    paper_ids = {str(spec.get("strategy_id")) for spec in specs if spec.get("enabled") and _spec_paper_eligible(spec)}
+    shadow_ids = {str(spec.get("strategy_id")) for spec in specs if spec.get("enabled") and _spec_shadow_only(spec)}
+    families: list[dict[str, Any]] = []
+    for family in sorted({str(spec.get("family") or "unknown") for spec in specs}):
+        family_specs = [spec for spec in specs if str(spec.get("family") or "unknown") == family]
+        families.append(
+            {
+                "family": family,
+                "total_specs": len(family_specs),
+                "runtime_enabled": len([spec for spec in family_specs if spec.get("enabled")]),
+                "paper_eligible": len([spec for spec in family_specs if spec.get("enabled") and _spec_paper_eligible(spec)]),
+                "shadow_only": len([spec for spec in family_specs if spec.get("enabled") and _spec_shadow_only(spec)]),
+                "strategy_ids": [str(spec.get("strategy_id")) for spec in family_specs],
+            }
+        )
+    return {
+        "mode": mode,
+        "total_specs": len(specs),
+        "runtime_enabled": len(runtime_ids),
+        "enabled_specs": len(runtime_ids),
+        "paper_eligible": len(paper_ids),
+        "shadow_only": len(shadow_ids),
+        "spec_only": len([spec for spec in specs if str(spec.get("strategy_id")) not in runtime_ids]),
+        "runtime_enabled_ids": sorted(runtime_ids),
+        "paper_eligible_ids": sorted(paper_ids),
+        "shadow_only_ids": sorted(shadow_ids),
+        "spec_only_ids": sorted(str(spec.get("strategy_id")) for spec in specs if str(spec.get("strategy_id")) not in runtime_ids),
+        "families": families,
+    }
+
+
+def _spec_metadata(spec: dict[str, Any]) -> dict[str, Any]:
+    return spec.get("metadata") if isinstance(spec.get("metadata"), dict) else {}
+
+
+def _spec_paper_eligible(spec: dict[str, Any]) -> bool:
+    metadata = _spec_metadata(spec)
+    return bool(metadata.get("paper_eligible", True)) and str(metadata.get("activation_scope") or "paper_shadow") != "shadow_only"
+
+
+def _spec_shadow_only(spec: dict[str, Any]) -> bool:
+    metadata = _spec_metadata(spec)
+    return str(metadata.get("activation_scope") or "paper_shadow") == "shadow_only" or bool(metadata.get("operator_promotion_required"))
 
 
 def register_engine_routes(app: FastAPI, settings: Settings, require_auth: RequireAuth) -> None:
@@ -168,6 +216,16 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
             return specs
         return await _repo().list_strategy_specs(family=family, enabled=enabled, limit=500)
 
+    @app.get("/engine/strategy-catalog")
+    async def engine_strategy_catalog(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _auth(authorization)
+        service = getattr(app.state, "engine_service", None)
+        registry = getattr(service, "strategy_registry", None)
+        if registry is not None and callable(getattr(registry, "catalog_summary", None)):
+            return registry.catalog_summary()
+        specs = await _repo().list_strategy_specs(limit=500)
+        return _strategy_catalog_from_specs(specs, mode=getattr(settings, "engine_alpha_catalog_mode", "wave1a_locked"))
+
     @app.get("/engine/strategies/{strategy_id}")
     async def engine_strategy(strategy_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _auth(authorization)
@@ -239,6 +297,11 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
     async def engine_bandit_recommendations(strategy_id: str | None = None, policy_id: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
         _auth(authorization)
         return await _repo().list_bandit_recommendations(strategy_id=strategy_id, policy_id=policy_id, limit=limit)
+
+    @app.get("/engine/alpha-graph")
+    async def engine_alpha_graph(limit: int = 1000, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _auth(authorization)
+        return await build_strategy_regime_alpha_graph(_repo(), limit=limit)
 
     @app.post("/engine/bandit-recommendations/run")
     async def engine_bandit_recommendations_run(request: EngineBanditRecommendationRunRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:

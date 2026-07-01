@@ -41,7 +41,7 @@ def test_meta_and_liquidation_feature_derivation():
         "meta_and_asset_ctxs",
         {
             "meta": {"universe": [{"name": "BTC"}]},
-            "asset_ctxs": [{"funding": "0.0003", "openInterest": "12345", "dayNtlVlm": "987654"}],
+            "asset_ctxs": [{"funding": "0.0003", "openInterest": "12345", "dayNtlVlm": "987654", "markPx": "101", "oraclePx": "100"}],
         },
     )
 
@@ -49,6 +49,14 @@ def test_meta_and_liquidation_feature_derivation():
     assert features["funding_hourly"] == 0.0003
     assert features["open_interest"] == 12345
     assert features["day_volume_usd"] == 987654
+    assert round(features["perp_basis_bps"], 4) == 100.0
+
+    news_event = _event(
+        "newswire",
+        {"importance_score": 80, "sentiment": "bullish", "confidence": 0.9, "source_score": 0.7},
+    )
+    news_features = {feature.feature_name: feature.scalar_value for feature in derive_features(news_event)}
+    assert news_features["source_consensus_score"] == 0.7
 
     liq_event = _event(
         "liquidation_signal",
@@ -83,6 +91,39 @@ def test_rolling_features_are_deterministic():
     assert round(rollups["mid_return_5m_bps"], 2) == 300.0
     assert round(rollups["oi_delta_5m_pct"], 2) == 50.0
     assert "oi_velocity_z" in rollups
+
+
+def test_wave_catalog_rollups_and_cross_venue_features_are_deterministic_and_gated():
+    points = []
+    for idx, mid in enumerate([100, 101, 99, 102, 98, 103]):
+        ts = idx * 60_000
+        points.extend(
+            [
+                _feature("mid", mid, ts=ts),
+                _feature("top_depth_usd", 1_000_000 - idx * 100_000, ts=ts),
+                _feature("spread_bps", 4 + idx, ts=ts),
+                _feature("perp_basis_bps", 10 + idx * 3, ts=ts),
+                _feature("funding_hourly", 0.0001 + idx * 0.00001, ts=ts),
+                _feature("day_volume_usd", 100_000_000, ts=ts),
+            ]
+        )
+    rollups = {feature.feature_name: feature.scalar_value for feature in derive_rolling_features(asset="BTC", features=points, as_of_ms=300_000)}
+
+    assert {"range_position", "depth_thinning_5m_pct", "basis_delta_15m_bps", "basis_zscore", "spread_velocity_5m_bps", "funding_change_15m", "volume_liquidity_score"} <= set(rollups)
+    assert 0.0 <= rollups["range_position"] <= 1.0
+    assert rollups["depth_thinning_5m_pct"] >= 0
+
+    event = _event(
+        "cross_venue_market",
+        {
+            "mid": 100.0,
+            "day_volume_usd": 1_000_000,
+            "venues": {"aster": {"mid": 101.0, "volume_usd": 2_000_000, "liq_imbalance": 50_000}, "hyperliquid": {"liq_imbalance": 10_000}},
+        },
+    )
+    assert derive_features(event) == []
+    cross = {feature.feature_name: feature.scalar_value for feature in derive_features(event, cross_venue_dexes=["aster"])}
+    assert {"cross_venue_mid_delta_bps", "cross_venue_volume_imbalance", "cross_venue_liq_imbalance"} <= set(cross)
 
 
 def test_regime_engine_emits_expanded_deterministic_labels():

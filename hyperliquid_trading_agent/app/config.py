@@ -4,7 +4,7 @@ from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from hyperliquid_trading_agent.app.vault import load_vault_environment
@@ -92,6 +92,7 @@ DEFAULT_AUTONOMY_EVENT_EVAL_HORIZONS = "15m,1h,4h,24h,72h"
 DEFAULT_AUTONOMY_MEMORY_PROMPT_ROLES = "analyst,quant,research,adversary,judge"
 AUTONOMY_ALLOWED_EVAL_HORIZONS = {"5m", "15m", "1h", "4h", "24h", "72h", "expiry"}
 AUTONOMY_WEEKDAYS = {"MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"}
+EngineAlphaCatalogMode = Literal["wave1a_locked", "wave1c", "shadow_full_catalog", "specs_only"]
 
 
 class Settings(BaseSettings):
@@ -314,6 +315,8 @@ class Settings(BaseSettings):
     engine_model_artifact_dir: str = "/var/lib/hyperliquid-trading-agent/models"
     engine_approved_scorer_model_id: str = ""
     engine_scorer_fallback_mode: Literal["deterministic"] = "deterministic"
+    engine_alpha_catalog_mode: EngineAlphaCatalogMode = "wave1a_locked"
+    engine_cross_venue_dexes: str = ""
     engine_wave1c_enabled: bool = False
     engine_wave2_enabled: bool = False
     engine_shadow_enabled: bool = True
@@ -578,6 +581,13 @@ class Settings(BaseSettings):
             raise ValueError("ENGINE_LIVE_ENABLED must remain false until a separate live-execution project is approved")
         return value
 
+    @field_validator("engine_alpha_catalog_mode", mode="before")
+    @classmethod
+    def normalize_engine_alpha_catalog_mode(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
     @field_validator("engine_wave2_enabled")
     @classmethod
     def engine_wave2_must_remain_deferred(cls, value: bool) -> bool:
@@ -599,6 +609,22 @@ class Settings(BaseSettings):
         # These flags only enable read/paper/manual-instruction features. They must never
         # imply signing, private keys, /exchange mutation, or live orders.
         return value
+
+    @model_validator(mode="after")
+    def shadow_full_alpha_catalog_requires_shadow_only(self) -> "Settings":
+        if self.engine_alpha_catalog_mode == "shadow_full_catalog":
+            execution_modes = [item.lower() for item in _csv(self.engine_execution_modes)]
+            if (
+                not self.engine_shadow_enabled
+                or self.engine_paper_enabled
+                or self.engine_live_enabled
+                or execution_modes != ["shadow"]
+            ):
+                raise ValueError(
+                    "ENGINE_ALPHA_CATALOG_MODE=shadow_full_catalog requires ENGINE_SHADOW_ENABLED=true, "
+                    "ENGINE_PAPER_ENABLED=false, ENGINE_LIVE_ENABLED=false, and ENGINE_EXECUTION_MODES=shadow"
+                )
+        return self
 
     @property
     def hyperliquid_base_url(self) -> str:
@@ -753,6 +779,10 @@ class Settings(BaseSettings):
     def engine_news_macro_proxy_symbol_list(self) -> list[str]:
         configured = [symbol.upper() for symbol in _csv(self.engine_news_macro_proxy_symbols)]
         return configured or self.autonomy_core_symbols
+
+    @property
+    def engine_cross_venue_dex_list(self) -> list[str]:
+        return [dex.lower() for dex in _csv(self.engine_cross_venue_dexes)]
 
     @property
     def autonomy_evaluation_effective_enabled(self) -> bool:

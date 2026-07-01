@@ -156,6 +156,18 @@ def test_engine_wave2_flag_is_deferred_until_wave1_evidence_is_reliable():
         Settings(environment="test", engine_wave2_enabled=True)
 
 
+def test_shadow_full_alpha_catalog_mode_requires_shadow_only_runtime():
+    settings = Settings(environment="test", engine_alpha_catalog_mode="SHADOW_FULL_CATALOG", _env_file=None)
+    assert settings.engine_alpha_catalog_mode == "shadow_full_catalog"
+
+    with pytest.raises(ValueError, match="ENGINE_ALPHA_CATALOG_MODE=shadow_full_catalog requires"):
+        Settings(environment="test", engine_alpha_catalog_mode="shadow_full_catalog", engine_paper_enabled=True, _env_file=None)
+    with pytest.raises(ValueError, match="ENGINE_ALPHA_CATALOG_MODE=shadow_full_catalog requires"):
+        Settings(environment="test", engine_alpha_catalog_mode="shadow_full_catalog", engine_execution_modes="paper,shadow", _env_file=None)
+    with pytest.raises(ValueError, match="ENGINE_ALPHA_CATALOG_MODE=shadow_full_catalog requires"):
+        Settings(environment="test", engine_alpha_catalog_mode="shadow_full_catalog", engine_shadow_enabled=False, _env_file=None)
+
+
 def readiness_settings(**overrides) -> Settings:
     defaults = dict(
         environment="test",
@@ -210,6 +222,30 @@ def test_paper_readiness_can_pass_with_clean_shadow_sample():
     assert scorecard["score"] >= 85
     assert scorecard["hard_blocks"] == []
     assert scorecard["recommendation"] == "ready_for_paper"
+
+
+def test_readiness_separates_shadow_research_breadth_from_paper_eligible_breadth():
+    now_ms = int(time.time() * 1000)
+    repo = FakeReadinessRepository(now_ms=now_ms)
+    for candidate in repo.candidates:
+        candidate["source_integrity"] = {"activation_scope": "shadow_only", "paper_eligible": False, "operator_promotion_required": True}
+    service = FakeReadinessService(now_ms=now_ms)
+    settings = readiness_settings(engine_alpha_catalog_mode="shadow_full_catalog")
+
+    async def run():
+        return await build_paper_readiness_scorecard(repo, settings, service, window_hours=1, limit=100)
+
+    scorecard = anyio.run(run)
+    diversity = scorecard["checks"]["strategy_diversity"]
+    codes = {item["code"] for item in scorecard["hard_blocks"]}
+
+    assert diversity["active_shadow_strategy_count"] == 2
+    assert diversity["active_shadow_family_count"] == 2
+    assert diversity["shadow_research_strategy_count"] == 2
+    assert diversity["paper_eligible_active_strategy_count"] == 0
+    assert diversity["paper_eligible_active_family_count"] == 0
+    assert "insufficient_active_strategy_count" in codes
+    assert scorecard["ready_for_paper"] is False
 
 
 def test_paper_readiness_blocks_paper_leak_missing_data_and_risk_spike():

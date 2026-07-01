@@ -8,6 +8,33 @@ from hyperliquid_trading_agent.app.engine.event_ledger import now_ms
 from hyperliquid_trading_agent.app.engine.schemas import BanditPolicySnapshot, BanditRecommendation
 
 CONTEXT_FEATURES = ["strategy_id", "strategy_family", "regime_label", "asset", "candidate_count", "allocation_count", "score"]
+WAVE2_POLICY_ACTION_SPACE = [
+    "strategy_weight_bucket",
+    "candidate_quota_bucket",
+    "min_confidence_threshold",
+    "min_ev_threshold",
+    "cooldown_bucket",
+    "no_trade",
+    "shadow_only_experiment",
+]
+WAVE2_REWARD_TERMS = [
+    "net_pnl",
+    "realized_r",
+    "slippage",
+    "fees",
+    "drawdown_penalty",
+    "risk_reject_penalty",
+    "Council_veto_penalty",
+    "concentration_penalty",
+    "replay_failure_penalty",
+]
+WAVE2_FORBIDDEN_ACTIONS = [
+    "place_orders",
+    "raise_leverage",
+    "bypass_RiskGateway",
+    "bypass_Council",
+    "auto_apply_production_config",
+]
 
 
 class OfflineContextualBanditReporter:
@@ -37,7 +64,13 @@ class OfflineContextualBanditReporter:
             arms=arms,
             policy_json=_policy_summary(rows),
             created_at_ms=ts,
-            metadata={"auto_apply_allowed": False, "row_count": len(rows)},
+            metadata={
+                "auto_apply_allowed": False,
+                "row_count": len(rows),
+                "wave2_policy_action_space": WAVE2_POLICY_ACTION_SPACE,
+                "wave2_reward_terms": WAVE2_REWARD_TERMS,
+                "forbidden_actions": WAVE2_FORBIDDEN_ACTIONS,
+            },
         )
         await self.repository.upsert_bandit_policy_snapshot(policy.model_dump(mode="json"))
         recommendations = self._recommendations(policy, rows=rows, specs=specs, created_at_ms=ts)
@@ -100,6 +133,8 @@ def _recommendation(policy_id: str, strategy_id: str, row: dict[str, Any], recom
             "source": "offline_contextual_bandit_v1",
             "config_mutation": False,
             "order_mutation": False,
+            "allowed_action_space": WAVE2_POLICY_ACTION_SPACE,
+            "forbidden_actions": WAVE2_FORBIDDEN_ACTIONS,
         },
     )
 

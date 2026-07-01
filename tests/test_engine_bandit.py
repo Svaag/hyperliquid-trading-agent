@@ -44,6 +44,9 @@ def test_offline_bandit_reporter_writes_report_only_recommendations():
     assert result["auto_apply_allowed"] is False
     assert repo.policy["status"] == "report_only"
     assert repo.policy["metadata"]["auto_apply_allowed"] is False
+    assert "strategy_weight_bucket" in repo.policy["metadata"]["wave2_policy_action_space"]
+    assert "place_orders" in repo.policy["metadata"]["forbidden_actions"]
     assert {item["strategy_id"] for item in repo.recommendations} == {"microstructure_ofi_v2", "funding_carry_v1"}
     assert all(item["auto_apply_allowed"] is False for item in repo.recommendations)
+    assert all("bypass_RiskGateway" in item["metadata"]["forbidden_actions"] for item in repo.recommendations)
     assert any(item["expected_score_delta"] < 0 for item in repo.recommendations)

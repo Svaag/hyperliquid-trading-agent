@@ -96,6 +96,19 @@ def test_wave_1c_active_strategies_emit_replayable_candidates_with_contract_meta
         assert candidate.metadata["regime_label"] == "test=wave1c"
 
 
+def test_shadow_full_catalog_enables_optional_wave_1c_generation_with_shadow_metadata():
+    registry = create_default_strategy_registry(catalog_mode="shadow_full_catalog")
+    snapshot = _snapshot({"mid": 100.0, "range_position": 0.1, "realized_vol_15m_bps": 20.0, "spread_bps": 3.0, "top_depth_usd": 1_000_000, "mid_return_5m_bps": 30.0})
+
+    range_candidates = registry.get("range_rotation_v1").generate(snapshot, _regime(), timestamp_ms=10_000)
+    breakout_candidates = registry.get("volatility_compression_breakout_v1").generate(snapshot, _regime(), timestamp_ms=10_000)
+
+    assert len(range_candidates) == 1
+    assert len(breakout_candidates) == 1
+    assert range_candidates[0].source_integrity["activation_scope"] == "shadow_only"
+    assert breakout_candidates[0].source_integrity["paper_eligible"] is False
+
+
 def test_wave_1c_optional_strategies_are_inert_until_replay_depth_exists():
     snapshot = _snapshot({"mid": 100.0, "range_position": 0.1, "realized_vol_15m_bps": 20.0, "spread_bps": 3.0, "top_depth_usd": 1_000_000, "mid_return_5m_bps": 30.0})
 

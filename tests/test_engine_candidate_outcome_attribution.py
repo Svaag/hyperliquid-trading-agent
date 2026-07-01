@@ -12,6 +12,7 @@ class FakeOutcomeRepository:
     def __init__(self):
         self.links: dict[str, dict] = {}
         self.outcomes: dict[str, dict] = {}
+        self.features: list[dict] = []
 
     async def upsert_candidate_evidence_link(self, link: dict):
         self.links[link["link_id"]] = link
@@ -26,6 +27,14 @@ class FakeOutcomeRepository:
         rows = list(self.outcomes.values())
         if terminal_state:
             rows = [row for row in rows if row.get("terminal_state") == terminal_state]
+        return rows[: kwargs.get("limit", 100)]
+
+    async def list_feature_values(self, **kwargs):
+        rows = self.features
+        if kwargs.get("asset"):
+            rows = [row for row in rows if row.get("asset") == kwargs["asset"]]
+        if kwargs.get("feature_name"):
+            rows = [row for row in rows if row.get("feature_name") == kwargs["feature_name"]]
         return rows[: kwargs.get("limit", 100)]
 
 
@@ -120,3 +129,28 @@ def test_candidate_outcomes_mature_from_mark_prices():
     assert all(item.terminal_state == "matured" for item in matured)
     assert all(item.mark_px == 101.0 for item in matured)
     assert all(item.net_return_bps > 0 for item in matured)
+    assert all("latest_mark_fallback" in item.quality_flags for item in matured)
+
+
+def test_candidate_outcomes_prefer_historical_window_marks_and_path_mfe_mae():
+    repo = FakeOutcomeRepository()
+    repo.features = [
+        {"asset": "BTC", "feature_name": "mid", "scalar_value": 101.0, "computed_ts_ms": 120_000},
+        {"asset": "BTC", "feature_name": "mid", "scalar_value": 99.0, "computed_ts_ms": 240_000},
+        {"asset": "BTC", "feature_name": "mid", "scalar_value": 105.0, "computed_ts_ms": 301_000},
+    ]
+    service = CandidateOutcomeAttributionService(repo)
+
+    async def run():
+        await service.record_candidate_evidence(candidate=_candidate(), allocation={"allocation_id": "alloc_1", "status": "allocate"}, ev=_ev(), created_at_ms=1_000)
+        return await service.refresh_matured_outcomes(marks={"BTC": 120.0}, timestamp_ms=90_000_000)
+
+    matured = anyio.run(run)
+    five_min = next(item for item in matured if item.outcome_window == "5m")
+
+    assert five_min.mark_px == 105.0
+    assert five_min.metadata["mark_source"] == "feature_store_mid"
+    assert five_min.metadata["mark_lag_ms"] == 0
+    assert five_min.mfe_bps == 500.0
+    assert five_min.mae_bps == -100.0
+    assert "latest_mark_fallback" not in five_min.quality_flags

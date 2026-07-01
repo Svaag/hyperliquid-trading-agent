@@ -8,6 +8,7 @@ from hyperliquid_trading_agent.app.engine.event_ledger import now_ms
 from hyperliquid_trading_agent.app.engine.schemas import AlphaCandidate, EVEstimate, RegimeVector
 
 DETERMINISTIC_MODEL_VERSION = "deterministic_fallback_v1"
+STRATEGY_EDGE_PRIOR_CAP_BPS = 12.0
 
 
 class DeterministicEVScorer:
@@ -27,7 +28,9 @@ class DeterministicEVScorer:
         slippage_bps = 2.0
         impact_bps = 0.5
         funding_bps = float(candidate.metadata.get("expected_funding_cost_bps") or 0.0)
-        net_ev = p_target * target_bps - p_stop * stop_bps - fee_bps - spread_bps - slippage_bps - impact_bps - funding_bps
+        base_net_ev = p_target * target_bps - p_stop * stop_bps - fee_bps - spread_bps - slippage_bps - impact_bps - funding_bps
+        edge_prior_bps = min(max(float(candidate.expected_edge_bps or 0.0), 0.0), STRATEGY_EDGE_PRIOR_CAP_BPS)
+        net_ev = base_net_ev + edge_prior_bps
         tail = max(stop_bps * 1.25, 1.0)
         stability = regime.regime_stability_score if regime is not None else 0.35
         uncertainty = max(0.65, 1.0 - candidate.confidence * 0.4 - stability * 0.2)
@@ -53,6 +56,13 @@ class DeterministicEVScorer:
             uncertainty=uncertainty,
             calibration_bucket=f"fallback:{candidate.strategy_id}:{candidate.asset_class}:{candidate.horizon}",
             created_at_ms=now_ms(),
+            metadata={
+                "base_net_ev_bps": base_net_ev,
+                "strategy_edge_prior_bps": edge_prior_bps,
+                "strategy_edge_prior_cap_bps": STRATEGY_EDGE_PRIOR_CAP_BPS,
+                "strategy_edge_prior_source": "candidate.expected_edge_bps",
+                "risk_gateway_required": True,
+            },
         )
 
 

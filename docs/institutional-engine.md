@@ -59,6 +59,8 @@ ENGINE_EXECUTION_MODES=shadow
 ENGINE_SHADOW_ENABLED=true
 ENGINE_PAPER_ENABLED=false
 ENGINE_LIVE_ENABLED=false
+ENGINE_ALPHA_CATALOG_MODE=wave1a_locked
+ENGINE_CROSS_VENUE_DEXES=
 ENGINE_VALIDATION_DIGEST_ENABLED=true
 ENGINE_VALIDATION_DIGEST_INTERVAL_SECONDS=3600
 ENGINE_VALIDATION_ALERT_STALE_LOOP_SECONDS=180
@@ -81,7 +83,7 @@ Alert conditions include stale engine loop, engine runtime errors, paper intents
 
 `GET /engine/readiness` returns a deterministic conservative promotion scorecard. Paper readiness is blocked by live flags, paper leakage during shadow-only mode, stale engine loops, runtime errors, insufficient shadow observation/sample size, missing core feature/regime data, critical risk-reject spikes, failed replay comparisons, and unhealthy PnL marking.
 
-The default gate requires 24h shadow observation, at least 100 engine runs, 250 candidates, 50 shadow intents, 95% EV/feature/regime coverage, 100% candidate strategy metadata coverage, 95%+ Council review coverage, 100% RiskGateway coverage, at least 5 non-legacy alpha strategies across 3 families, strategy/family/symbol-strategy concentration below 55%/60%/35%, a latest replay with `passed` or `advisory_pass`, strategy-regime evidence, no hard blocks, and score >=85.
+The default gate requires 24h shadow observation, at least 100 engine runs, 250 candidates, 50 shadow intents, 95% EV/feature/regime coverage, 100% candidate strategy metadata coverage, 95%+ Council review coverage, 100% RiskGateway coverage, at least 5 paper-eligible non-legacy alpha strategies across 3 paper-eligible families, strategy/family/symbol-strategy concentration below 55%/60%/35%, a latest replay with `passed` or `advisory_pass`, strategy-regime evidence, no hard blocks, and score >=85. Shadow-only research breadth is reported separately and does not satisfy paper-promotion breadth gates.
 
 ## Strategy portfolio, Council, replay, and bandit reports
 
@@ -101,13 +103,20 @@ Only the five non-legacy/non-defensive Wave 1A strategies count as active alpha 
 
 Wave 1B adds the evidence spine: every candidate receives candidate evidence links, fixed delayed outcome windows (`5m`, `15m`, `1h`, `4h`, `24h`), candidate-level RiskGateway coverage for non-flat candidates, Council packet/no-trade coverage, replay context links, and strategy-regime performance rows sourced from outcome attribution.
 
-Wave 1C deterministic strategies are implemented but gated behind `ENGINE_WAVE1C_ENABLED=false` by default until Wave 1B outcome evidence is reliable. The gated active set is `microstructure_absorption_v1`, `funding_squeeze_v1`, `basis_reversion_v1`, and `news_impulse_v1`; optional `range_rotation_v1` and `volatility_compression_breakout_v1` remain disabled pending replay depth.
+`ENGINE_ALPHA_CATALOG_MODE` controls runtime strategy breadth:
+
+- `wave1a_locked` — default Wave 1A nucleus only; pre-Wave1A, Wave1C, and Wave2 remain specs/comparison-only.
+- `wave1c` — Wave 1A plus deterministic Wave 1C strategies.
+- `specs_only` — expose planned specs while keeping runtime emissions locked to Wave 1A.
+- `shadow_full_catalog` — activates the full shadow catalog while requiring `ENGINE_SHADOW_ENABLED=true`, `ENGINE_PAPER_ENABLED=false`, `ENGINE_EXECUTION_MODES=shadow`, and `ENGINE_LIVE_ENABLED=false`.
+
+Wave 1C deterministic strategies are implemented but gated by catalog mode / `ENGINE_WAVE1C_ENABLED=false` by default until Wave 1B outcome evidence is reliable. The deterministic set is `microstructure_absorption_v1`, `funding_squeeze_v1`, `basis_reversion_v1`, and `news_impulse_v1`; optional `range_rotation_v1` and `volatility_compression_breakout_v1` emit only when the full shadow catalog enables their specs.
 
 Newswire events can be bridged into the engine with `ENGINE_NEWSFEED_ENABLED=true`. Qualifying canonical `NewswireEvent`s become engine `newswire` normalized events and derive `catalyst_pressure` plus `event_risk_pressure` features. Macro news proxies to `ENGINE_NEWS_MACRO_PROXY_SYMBOLS` or, when empty, the core autonomy universe. Regime snapshots only consider news features inside `ENGINE_NEWS_CATALYST_TTL_SECONDS` and expose `derived_labels.news_risk_tier`. The conservative strategy selector can suppress reversion/range strategies during `event_risk` and additionally suppress microstructure/funding-basis strategies during `event_shock`; it never enables disabled strategies, promotes Wave 1C, changes paper/live flags, or creates order authority.
 
 Every candidate builds a `CandidateTradePacket`, receives a deterministic role-based Council review, and must pass RiskGateway plus Council before a paper/shadow execution report can exist. The offline contextual-bandit endpoint is report-only: it writes recommendations with `auto_apply_allowed=false` and never mutates config, risk limits, or orders.
 
-Wave 2 is explicitly deferred. `ENGINE_WAVE2_ENABLED=true` is rejected until Wave 1 outcome attribution, replay grouping, and readiness gates are reliable. Wave 2 is not “more simple strategies”; it is reserved for DEX-native, cross-venue, regime-aware proprietary strategies: lead/lag, liquidity vacuum, stop-cluster, liquidation divergence, crowded long/short unwind, perp-basis momentum/reversion, carry-risk intelligence, and constrained policy recommendations.
+Wave 2 remains paper/live deferred. `ENGINE_WAVE2_ENABLED=true` is rejected until Wave 1 outcome attribution, replay grouping, and readiness gates are reliable. In `shadow_full_catalog`, the Wave 2 research strategies can emit shadow candidates with `activation_scope=shadow_only`, `paper_eligible=false`, and `operator_promotion_required=true`; they still cannot bypass RiskGateway/Council or create paper/live authority. Wave 2 is not “more simple strategies”; it is reserved for DEX-native, cross-venue, regime-aware proprietary strategies. The planned Wave 2 specs cover: 2A lead/lag, liquidity vacuum, stop-cluster, and liquidation divergence; 2B crowded long/short unwind and liquidation-cluster followthrough/exhaustion; 2C perp-basis momentum/reversion, funding-curve dislocation, and carry-risk-off. Wave 2D remains constrained report-only policy recommendation metadata and may not place orders, raise leverage, bypass RiskGateway/Council, or auto-apply production config.
 
 ## Shadow replay, throttles, and PnL marking
 
@@ -158,6 +167,7 @@ GET /engine/candidate-book/latest
 GET /engine/ev-estimates
 GET /engine/allocations
 GET /engine/strategies
+GET /engine/strategy-catalog
 GET /engine/strategies/{strategy_id}
 GET /engine/strategy-regime-performance
 GET /engine/strategy-regime-performance/{strategy_id}

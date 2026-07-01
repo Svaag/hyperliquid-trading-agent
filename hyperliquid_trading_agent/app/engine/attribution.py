@@ -177,11 +177,12 @@ class CandidateOutcomeAttributionService:
         ts = timestamp_ms or now_ms()
         pending = await list_rows(terminal_state="pending", limit=limit)
         matured: list[CandidateOutcomeAttribution] = []
+        mid_row_cache: dict[str, list[dict[str, Any]]] = {}
         for row in pending:
             if int(row.get("window_end_ms") or 0) > ts:
                 continue
-            asset = str(row.get("asset") or "").upper()
-            mark_px = _float(marks.get(asset))
+            mark = await self._mark_for_outcome(row, marks=marks, timestamp_ms=ts, mid_row_cache=mid_row_cache)
+            mark_px = _float(mark.get("mark_px"))
             if mark_px <= 0:
                 row = {
                     **row,
@@ -193,12 +194,70 @@ class CandidateOutcomeAttributionService:
                 await self._persist_outcome(outcome)
                 matured.append(outcome)
                 continue
-            outcome = self._mark_outcome(row, mark_px=mark_px, timestamp_ms=ts)
+            outcome = self._mark_outcome(
+                row,
+                mark_px=mark_px,
+                timestamp_ms=ts,
+                mark_source=str(mark.get("mark_source") or "unknown"),
+                mark_lag_ms=mark.get("mark_lag_ms"),
+                path_mids=list(mark.get("path_mids") or []),
+            )
             await self._persist_outcome(outcome)
             matured.append(outcome)
         return matured
 
-    def _mark_outcome(self, row: dict[str, Any], *, mark_px: float, timestamp_ms: int) -> CandidateOutcomeAttribution:
+    async def _mark_for_outcome(self, row: dict[str, Any], *, marks: dict[str, float], timestamp_ms: int, mid_row_cache: dict[str, list[dict[str, Any]]] | None = None) -> dict[str, Any]:
+        asset = str(row.get("asset") or "").upper()
+        target_ms = int(row.get("window_end_ms") or timestamp_ms)
+        start_ms = int(row.get("window_start_ms") or target_ms)
+        if mid_row_cache is not None and asset in mid_row_cache:
+            mid_rows = mid_row_cache[asset]
+        else:
+            mid_rows = await self._historical_mid_rows(asset)
+            if mid_row_cache is not None:
+                mid_row_cache[asset] = mid_rows
+        path_mids = _path_mids(mid_rows, start_ms=start_ms, end_ms=target_ms)
+        nearest = _nearest_mid(mid_rows, target_ms=target_ms)
+        if nearest is not None:
+            mark_ts, mark_px = nearest
+            return {
+                "mark_px": mark_px,
+                "mark_source": "feature_store_mid",
+                "mark_lag_ms": abs(target_ms - mark_ts),
+                "path_mids": path_mids,
+            }
+        latest_mark = _float(marks.get(asset))
+        return {
+            "mark_px": latest_mark,
+            "mark_source": "latest_mark_fallback",
+            "mark_lag_ms": max(0, timestamp_ms - target_ms),
+            "path_mids": path_mids,
+        }
+
+    async def _historical_mid_rows(self, asset: str) -> list[dict[str, Any]]:
+        if self.repository is None or not getattr(self.repository, "enabled", False):
+            return []
+        list_values = getattr(self.repository, "list_feature_values", None)
+        if not callable(list_values):
+            return []
+        try:
+            return await list_values(asset=asset, feature_name="mid", limit=5000)
+        except TypeError:
+            try:
+                return await list_values(asset=asset, limit=5000)
+            except TypeError:
+                return await list_values()
+
+    def _mark_outcome(
+        self,
+        row: dict[str, Any],
+        *,
+        mark_px: float,
+        timestamp_ms: int,
+        mark_source: str,
+        mark_lag_ms: Any | None,
+        path_mids: list[tuple[int, float]],
+    ) -> CandidateOutcomeAttribution:
         entry = _float(row.get("entry_px"))
         side = str(row.get("side") or "flat")
         direction = 1.0 if side == "long" else -1.0 if side == "short" else 0.0
@@ -211,6 +270,17 @@ class CandidateOutcomeAttributionService:
         stop = _float(metadata.get("stop"))
         stop_bps = abs(entry - stop) / entry * 10_000.0 if entry > 0 and stop > 0 else 0.0
         realized_r = net / stop_bps if stop_bps > 0 else 0.0
+        path_returns = [((px / entry) - 1.0) * 10_000.0 * direction for _, px in path_mids if entry > 0 and px > 0 and direction]
+        if direction:
+            path_returns.append(gross)
+        mfe = max(path_returns) if path_returns else max(gross, 0.0)
+        mae = min(path_returns) if path_returns else min(gross, 0.0)
+        quality_flags = list(row.get("quality_flags") or [])
+        lag_ms = int(mark_lag_ms or 0)
+        if mark_source == "latest_mark_fallback":
+            quality_flags.append("latest_mark_fallback")
+        if lag_ms > 60_000:
+            quality_flags.append("late_mark")
         return CandidateOutcomeAttribution(
             **{
                 **row,
@@ -218,11 +288,12 @@ class CandidateOutcomeAttributionService:
                 "gross_return_bps": round(gross, 4),
                 "net_return_bps": round(net, 4),
                 "realized_r": round(realized_r, 4),
-                "mfe_bps": round(max(gross, 0.0), 4),
-                "mae_bps": round(min(gross, 0.0), 4),
+                "mfe_bps": round(mfe, 4),
+                "mae_bps": round(mae, 4),
                 "terminal_state": "matured",
+                "quality_flags": sorted(set(quality_flags)),
                 "updated_at_ms": timestamp_ms,
-                "metadata": {**metadata, "mark_source": "all_mids", "marked_at_ms": timestamp_ms},
+                "metadata": {**metadata, "mark_source": mark_source, "marked_at_ms": timestamp_ms, "mark_lag_ms": lag_ms, "path_mark_count": len(path_mids)},
             }
         )
 
@@ -278,6 +349,32 @@ class AttributionService:
             if callable(record):
                 await record(item.model_dump(mode="json"))
         return item
+
+
+def _path_mids(rows: list[dict[str, Any]], *, start_ms: int, end_ms: int) -> list[tuple[int, float]]:
+    points = [_feature_mid_point(row) for row in rows]
+    return sorted([point for point in points if point is not None and start_ms <= point[0] <= end_ms], key=lambda item: item[0])
+
+
+def _nearest_mid(rows: list[dict[str, Any]], *, target_ms: int) -> tuple[int, float] | None:
+    points = [point for point in (_feature_mid_point(row) for row in rows) if point is not None]
+    if not points:
+        return None
+    return min(points, key=lambda item: (abs(item[0] - target_ms), 0 if item[0] <= target_ms else 1, item[0]))
+
+
+def _feature_mid_point(row: dict[str, Any]) -> tuple[int, float] | None:
+    if row.get("feature_name") not in {None, "mid"}:
+        return None
+    ts = int(row.get("computed_ts_ms") or row.get("received_ts_ms") or row.get("event_ts_ms") or 0)
+    raw = row.get("scalar_value")
+    value_payload = row.get("value") if isinstance(row.get("value"), dict) else row.get("value_json") if isinstance(row.get("value_json"), dict) else {}
+    if raw is None:
+        raw = value_payload.get("mid")
+    px = _float(raw)
+    if ts <= 0 or px <= 0:
+        return None
+    return ts, px
 
 
 def _dump(value: Any | None) -> dict[str, Any]:

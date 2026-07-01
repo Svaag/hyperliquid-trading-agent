@@ -189,7 +189,21 @@ class RangeRotationStrategy:
     strategy_id = spec.strategy_id
 
     def generate(self, snapshot: FeatureSnapshot, regime: RegimeVector, *, timestamp_ms: int) -> list[AlphaCandidate]:
-        return []
+        if not self.spec.enabled:
+            return []
+        mid = _float(snapshot.features.get("mid"))
+        range_position = _float(snapshot.features.get("range_position"))
+        vol = _float(snapshot.features.get("realized_vol_15m_bps"))
+        spread = _float(snapshot.features.get("spread_bps"))
+        if mid is None or mid <= 0 or range_position is None or vol is None or spread is None:
+            return []
+        if spread > 12 or vol > 80 or 0.2 <= range_position <= 0.8:
+            return []
+        side = "long" if range_position < 0.2 else "short"
+        edge_to_mid = abs(0.5 - range_position)
+        stop, target = _stop_target(mid, side, stop_bps=max(22.0, vol * 0.35), rr=1.55 + edge_to_mid)
+        score = min(100.0, 44.0 + edge_to_mid * 70.0 + max(0.0, 80.0 - vol) / 4.0 + max(0.0, 12.0 - spread))
+        return [_candidate(self.spec, snapshot, regime, timestamp_ms=timestamp_ms, side=side, horizon="15m", entry=mid, stop=stop, target=target, score=score, confidence=min(0.88, 0.34 + score / 180.0), thesis=f"{snapshot.asset} {side} range rotation from range percentile {range_position:.2f} in low-vol/liquid regime.", invalidation=["Range boundary breaks with volume", "Volatility expands against rotation", f"Price trades through {stop:.6g}"], metadata={"range_position": range_position, "realized_vol_15m_bps": vol, "spread_bps": spread}, expected_edge_bps=max(0.0, score - 48.0) / 2.6)]
 
 
 class VolatilityCompressionBreakoutStrategy:
@@ -215,7 +229,21 @@ class VolatilityCompressionBreakoutStrategy:
     strategy_id = spec.strategy_id
 
     def generate(self, snapshot: FeatureSnapshot, regime: RegimeVector, *, timestamp_ms: int) -> list[AlphaCandidate]:
-        return []
+        if not self.spec.enabled:
+            return []
+        mid = _float(snapshot.features.get("mid"))
+        vol = _float(snapshot.features.get("realized_vol_15m_bps"))
+        depth = _float(snapshot.features.get("top_depth_usd"))
+        ret_5m = _float(snapshot.features.get("mid_return_5m_bps"))
+        if mid is None or mid <= 0 or vol is None or depth is None or ret_5m is None:
+            return []
+        if vol > 65 or depth < 150_000 or abs(ret_5m) < 14:
+            return []
+        side = "long" if ret_5m > 0 else "short"
+        stop, target = _stop_target(mid, side, stop_bps=max(24.0, abs(ret_5m) * 0.75), rr=1.9)
+        depth_score = min(20.0, depth / 100_000.0)
+        score = min(100.0, 43.0 + max(0.0, 65.0 - vol) / 2.5 + min(25.0, abs(ret_5m) / 2.0) + depth_score)
+        return [_candidate(self.spec, snapshot, regime, timestamp_ms=timestamp_ms, side=side, horizon="15m", entry=mid, stop=stop, target=target, score=score, confidence=min(0.9, 0.34 + score / 175.0), thesis=f"{snapshot.asset} {side} volatility-compression breakout: vol {vol:.1f} bps, depth ${depth:,.0f}, 5m return {ret_5m:.1f} bps.", invalidation=["Breakout fails back into compression", "Depth collapses against signal", f"Price trades through {stop:.6g}"], metadata={"realized_vol_15m_bps": vol, "top_depth_usd": depth, "mid_return_5m_bps": ret_5m}, expected_edge_bps=max(0.0, score - 50.0) / 2.4)]
 
 
 def wave_1c_strategy_instances() -> list[Any]:
