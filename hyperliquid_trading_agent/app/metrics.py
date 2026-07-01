@@ -52,6 +52,7 @@ NEWSWIRE_BUS_DROPPED = Counter("hyperliquid_trading_agent_newswire_bus_dropped_t
 NEWSWIRE_ADAPTER_UP = Gauge("hyperliquid_trading_agent_newswire_adapter_up", "Newswire ingest adapter liveness", ["adapter"])
 NEWSWIRE_ADAPTER_RECONNECTS = Counter("hyperliquid_trading_agent_newswire_adapter_reconnects_total", "Newswire adapter reconnects", ["adapter"])
 NEWSWIRE_DISCORD_POSTS = Counter("hyperliquid_trading_agent_newswire_discord_posts_total", "Newswire Discord posts", ["mode", "result"])
+NEWSWIRE_DISCORD_SKIPS = Counter("hyperliquid_trading_agent_newswire_discord_skips_total", "Newswire Discord skipped posts", ["reason"])
 NEWSWIRE_ENRICH_CALLS = Counter("hyperliquid_trading_agent_newswire_enrich_calls_total", "Newswire LLM enrichment calls", ["result"])
 ENGINE_VALIDATION_DIGESTS = Counter("hyperliquid_trading_agent_engine_validation_digests_total", "Engine validation Discord digests", ["result"])
 ENGINE_VALIDATION_ALERTS = Counter("hyperliquid_trading_agent_engine_validation_alerts_total", "Engine validation alert conditions", ["alert_type"])

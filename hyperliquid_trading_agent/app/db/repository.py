@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from hyperliquid_trading_agent.app.db.models import (
@@ -71,6 +73,7 @@ from hyperliquid_trading_agent.app.db.models import (
     NarrativeClusterRecord,
     NewsItem,
     NewswireEventRow,
+    NewswirePublishLedgerRow,
     NormalizedEventRecord,
     OperatorFeedbackRecord,
     OperatorOutputLessonRecord,
@@ -2204,6 +2207,141 @@ class Repository:
             result = await session.execute(select(NewswireEventRow).order_by(NewswireEventRow.received_at_ms.desc()).limit(limit))
             return [_newswire_event_to_dict(item) for item in result.scalars().all()]
 
+    async def claim_newswire_publish(
+        self,
+        event_id: str,
+        channel_id: str,
+        mode: str,
+        now_ms: int,
+        *,
+        destination: str = "discord",
+        stale_after_ms: int = 10 * 60 * 1000,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Claim a Newswire event for one destination/channel.
+
+        Returns False when the event was already posted or has a fresh pending
+        claim. Failed or stale pending claims may be retried.
+        """
+        if self.sessionmaker is None:
+            return True
+        publish_id = _newswire_publish_id(destination, channel_id, event_id)
+        try:
+            async with self.sessionmaker() as session:
+                item = await session.get(NewswirePublishLedgerRow, publish_id)
+                if item is None:
+                    session.add(
+                        NewswirePublishLedgerRow(
+                            publish_id=publish_id,
+                            event_id=event_id,
+                            destination=destination,
+                            channel_id=str(channel_id),
+                            mode=mode,
+                            status="pending",
+                            attempt_count=1,
+                            first_attempt_ms=now_ms,
+                            last_attempt_ms=now_ms,
+                            metadata_json=redact_secrets(metadata or {}),
+                        )
+                    )
+                    await session.commit()
+                    return True
+                if item.status == "posted":
+                    return False
+                if item.status == "pending" and now_ms - int(item.last_attempt_ms or 0) < stale_after_ms:
+                    return False
+                item.mode = mode
+                item.status = "pending"
+                item.attempt_count = int(item.attempt_count or 0) + 1
+                item.last_attempt_ms = now_ms
+                item.last_error = None
+                if metadata:
+                    item.metadata_json = redact_secrets(metadata)
+                await session.commit()
+                return True
+        except IntegrityError:
+            return False
+        except Exception as exc:  # pragma: no cover - publishing should degrade rather than drop critical news
+            log.warning("newswire_publish_claim_failed", error=type(exc).__name__)
+            return True
+
+    async def mark_newswire_publish_posted(
+        self,
+        event_ids: list[str],
+        channel_id: str,
+        message_id: str | None,
+        now_ms: int,
+        *,
+        destination: str = "discord",
+    ) -> None:
+        if self.sessionmaker is None or not event_ids:
+            return
+        try:
+            async with self.sessionmaker() as session:
+                ids = [_newswire_publish_id(destination, channel_id, event_id) for event_id in event_ids]
+                await session.execute(
+                    update(NewswirePublishLedgerRow)
+                    .where(NewswirePublishLedgerRow.publish_id.in_(ids))
+                    .values(status="posted", discord_message_id=message_id, posted_at_ms=now_ms, last_attempt_ms=now_ms, last_error=None)
+                )
+                await session.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("newswire_publish_mark_posted_failed", error=type(exc).__name__)
+
+    async def mark_newswire_publish_failed(
+        self,
+        event_ids: list[str],
+        channel_id: str,
+        error: str,
+        now_ms: int,
+        *,
+        destination: str = "discord",
+    ) -> None:
+        if self.sessionmaker is None or not event_ids:
+            return
+        try:
+            async with self.sessionmaker() as session:
+                ids = [_newswire_publish_id(destination, channel_id, event_id) for event_id in event_ids]
+                await session.execute(
+                    update(NewswirePublishLedgerRow)
+                    .where(NewswirePublishLedgerRow.publish_id.in_(ids))
+                    .values(status="failed", last_error=error[:1000], last_attempt_ms=now_ms)
+                )
+                await session.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("newswire_publish_mark_failed_failed", error=type(exc).__name__)
+
+    async def newswire_publish_status(self, channel_id: str, *, destination: str = "discord") -> dict[str, Any]:
+        if self.sessionmaker is None:
+            return {"enabled": False, "counts": {}}
+        try:
+            async with self.sessionmaker() as session:
+                result = await session.execute(
+                    select(NewswirePublishLedgerRow.status, func.count())
+                    .where(NewswirePublishLedgerRow.destination == destination, NewswirePublishLedgerRow.channel_id == str(channel_id))
+                    .group_by(NewswirePublishLedgerRow.status)
+                )
+                counts = {str(status): int(count) for status, count in result.all()}
+                last_result = await session.execute(
+                    select(NewswirePublishLedgerRow)
+                    .where(NewswirePublishLedgerRow.destination == destination, NewswirePublishLedgerRow.channel_id == str(channel_id))
+                    .order_by(NewswirePublishLedgerRow.last_attempt_ms.desc())
+                    .limit(1)
+                )
+                last = last_result.scalars().first()
+                return {
+                    "enabled": True,
+                    "counts": counts,
+                    "last_event_id": last.event_id if last is not None else None,
+                    "last_status": last.status if last is not None else None,
+                    "last_attempt_ms": last.last_attempt_ms if last is not None else None,
+                    "last_posted_at_ms": last.posted_at_ms if last is not None else None,
+                    "last_error": last.last_error if last is not None else None,
+                }
+        except Exception as exc:  # pragma: no cover
+            log.warning("newswire_publish_status_failed", error=type(exc).__name__)
+            return {"enabled": True, "error": type(exc).__name__, "counts": {}}
+
     async def upsert_world_event(self, event: dict[str, Any]) -> str | None:
         if self.sessionmaker is None:
             return None
@@ -3953,6 +4091,11 @@ def _news_event_to_dict(item: AutonomyNewsEvent) -> dict[str, Any]:
         "freshness": str((item.metadata_json or {}).get("freshness") or "fresh"),
         "metadata": item.metadata_json,
     }
+
+
+def _newswire_publish_id(destination: str, channel_id: str, event_id: str) -> str:
+    key = f"{destination}:{channel_id}:{event_id}"
+    return "nwpub_" + hashlib.sha1(key.encode()).hexdigest()[:32]
 
 
 def _newswire_kwargs(event: dict[str, Any]) -> dict[str, Any]:

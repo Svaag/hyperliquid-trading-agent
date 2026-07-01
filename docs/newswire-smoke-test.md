@@ -6,6 +6,8 @@ Run after enabling `ALPACA_NEWS_ENABLED=true` with valid API keys.
 
 - [ ] `ALPACA_API_KEY` and `ALPACA_API_SECRET` are set in `.env` (get from https://app.alpaca.markets/)
 - [ ] `ALPACA_NEWS_ENABLED=true`
+- [ ] `NEWSWIRE_DISCORD_ENABLED=true`
+- [ ] `DISCORD_BOT_TOKEN` is set for the send-only publisher (or the full bot runtime)
 - [ ] `NEWSWIRE_NEWS_CHANNEL_ID` is set to a Discord channel ID (for the curated news feed)
 - [ ] `ALPACA_NEWS_SYMBOLS=*` (or your watchlist like `AAPL,NVDA,MSFT,TSLA`)
 
@@ -37,9 +39,10 @@ Run after enabling `ALPACA_NEWS_ENABLED=true` with valid API keys.
 
 ## Discord Delivery
 
+- [ ] `POST /newswire/discord/test` sends a clearly-labeled test embed to #news
 - [ ] Breaking news (urgency=breaking or score >= NEWSWIRE_BREAKING_MIN_IMPORTANCE) appears immediately in the #news channel
 - [ ] Non-breaking news appears in periodic digest posts (every NEWSWIRE_DIGEST_INTERVAL_SECONDS)
-- [ ] Each message ends with "News feed only — no trade was placed."
+- [ ] Each message/embed footer includes "News feed only — no trade was placed."
 - [ ] Halt-state events (`⛔ Halt state`) show the halt warning when applicable
 
 ## WebSocket Stream

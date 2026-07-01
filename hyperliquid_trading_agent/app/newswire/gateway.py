@@ -4,7 +4,7 @@ import asyncio
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.logging import get_logger
@@ -16,6 +16,11 @@ from hyperliquid_trading_agent.app.newswire.service import NewswireService
 log = get_logger(__name__)
 
 router = APIRouter()
+
+
+class NewswireDiscordTestRequest(BaseModel):
+    channel_id: str | None = None
+    dry_run: bool = False
 
 
 def register_newswire_routes(app: FastAPI) -> None:
@@ -84,7 +89,24 @@ async def get_newswire_event(request: Request, event_id: str, authorization: str
 @router.get("/newswire/status")
 async def newswire_status(request: Request, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _auth(request.app.state.settings, authorization)
-    return _service(request).status()
+    status = _service(request).status()
+    publisher = getattr(request.app.state, "newswire_discord", None)
+    if publisher is not None and callable(getattr(publisher, "status_async", None)):
+        status["discord_publisher"] = await publisher.status_async()
+    return status
+
+
+@router.post("/newswire/discord/test")
+async def newswire_discord_test(
+    body: NewswireDiscordTestRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _auth(request.app.state.settings, authorization)
+    publisher = getattr(request.app.state, "newswire_discord", None)
+    if publisher is None or not callable(getattr(publisher, "send_test_message", None)):
+        raise HTTPException(status_code=503, detail="newswire discord publisher is not configured")
+    return await publisher.send_test_message(channel_id=body.channel_id, dry_run=body.dry_run)
 
 
 @router.get("/newswire/sources")

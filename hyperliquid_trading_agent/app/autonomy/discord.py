@@ -63,15 +63,15 @@ def _format_evidence_value(value: Any, kind: str) -> str:
 
 
 class AutonomyAlertSink(Protocol):
-    async def send(self, channel_id: str, content: str) -> str | None: ...
+    async def send(self, channel_id: str, content: str, embeds: list[dict[str, Any]] | None = None) -> str | None: ...
 
 
 class DiscordAutonomyAlertSink:
     def __init__(self, bot):
         self.bot = bot
 
-    async def send(self, channel_id: str, content: str) -> str | None:
-        return await self.bot.send_channel_message(channel_id, content)
+    async def send(self, channel_id: str, content: str, embeds: list[dict[str, Any]] | None = None) -> str | None:
+        return await self.bot.send_channel_message(channel_id, content, embeds=embeds)
 
 
 def parse_autonomy_command(prompt: str, referenced_message: Any = None) -> AutonomyCommand | None:

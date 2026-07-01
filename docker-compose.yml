@@ -102,7 +102,7 @@ services:
     environment:
       RUNTIME_PROFILE: world_model_live
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-hlagent}:${POSTGRES_PASSWORD:-hlagent}@postgres:5432/${POSTGRES_DB:-hlagent}
-      DISCORD_BOT_TOKEN: ""
+      NEWSWIRE_DISCORD_ENABLED: "true"
       TRADFI_ENABLED: "false"
       ENGINE_ENABLED: "false"
       ENGINE_PNL_ATTRIBUTION_ENABLED: "false"

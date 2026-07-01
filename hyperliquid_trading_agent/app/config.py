@@ -451,6 +451,7 @@ class Settings(BaseSettings):
     x_min_public_metric_score: int = 0
 
     # Free-standing Newswire gateway (ingest -> normalize -> bus -> #news / agent / WS)
+    newswire_discord_enabled: bool = True
     newswire_news_channel_id: str = ""
     newswire_digest_interval_seconds: int = 300
     newswire_news_min_importance: float = 60.0
@@ -458,6 +459,8 @@ class Settings(BaseSettings):
     newswire_agent_min_importance: float = 50.0
     newswire_max_events_buffer: int = 500
     newswire_send_min_interval_ms: int = 1200
+    newswire_discord_digest_max_items: int = 10
+    newswire_discord_startup_grace_seconds: int = 300
     newswire_rss_feeds: str = DEFAULT_NEWSWIRE_RSS_FEEDS
     newswire_rss_poll_seconds: int = 60
     newswire_llm_enrich_enabled: bool = True
@@ -823,8 +826,11 @@ class Settings(BaseSettings):
 
     def newswire_config_warnings(self) -> list[str]:
         warnings: list[str] = []
-        if self.newswire_enabled and self.discord_bot_token and not self.newswire_news_channel_configured:
+        discord_requested = self.newswire_enabled and self.newswire_discord_enabled and (self.discord_bot_token or self.newswire_news_channel_configured)
+        if discord_requested and not self.newswire_news_channel_configured:
             warnings.append("NEWSWIRE_NEWS_CHANNEL_ID is required to post the news feed to #news")
+        if discord_requested and not self.discord_bot_token:
+            warnings.append("DISCORD_BOT_TOKEN is required for Newswire Discord #news publishing")
         if self.alpaca_news_enabled and not (self.alpaca_api_key and self.alpaca_api_secret):
             warnings.append("ALPACA_NEWS_ENABLED requires ALPACA_API_KEY and ALPACA_API_SECRET")
         if self.trading_economics_enabled and not self.trading_economics_api_key:

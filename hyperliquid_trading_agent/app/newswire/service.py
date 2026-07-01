@@ -102,7 +102,7 @@ class NewswireService:
                 self.adapter_errors += 1
                 NEWSWIRE_ADAPTER_UP.labels(adapter=adapter.name).set(0)
                 NEWSWIRE_ADAPTER_RECONNECTS.labels(adapter=adapter.name).inc()
-                log.warning("newswire_adapter_restart", adapter=adapter.name, error=type(exc).__name__)
+                log.warning("newswire_adapter_restart", adapter=adapter.name, error=type(exc).__name__, detail=str(exc)[:200])
                 try:
                     await asyncio.sleep(backoff)
                 except asyncio.CancelledError:

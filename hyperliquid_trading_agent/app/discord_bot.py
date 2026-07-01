@@ -61,7 +61,7 @@ class DiscordTradingBot:
         if self.client is not None and not self.client.is_closed():
             await self.client.close()
 
-    async def send_channel_message(self, channel_id: str, content: str) -> str | None:
+    async def send_channel_message(self, channel_id: str, content: str, embeds: list[dict[str, Any]] | None = None) -> str | None:
         if self.client is None or not channel_id:
             return None
         channel = self.client.get_channel(int(channel_id)) if str(channel_id).isdigit() else None
@@ -74,7 +74,7 @@ class DiscordTradingBot:
         if channel is None or not callable(getattr(channel, "send", None)):
             log.warning("discord_autonomy_channel_unresolved", channel_id=channel_id)
             return None
-        sent = await channel.send(content)
+        sent = await channel.send(content=content, embeds=_build_embeds(embeds))
         log.info("discord_autonomy_message_sent", channel_id=channel_id, message_id=_maybe_str(getattr(sent, "id", None)), preview=content[:200])
         return _maybe_str(getattr(sent, "id", None))
 
@@ -332,6 +332,12 @@ def _chunk(content: str, max_chars: int) -> list[str]:
         chunks.append(remaining[:split_at].strip())
         remaining = remaining[split_at:].strip()
     return chunks
+
+
+def _build_embeds(items: list[dict[str, Any]] | None):
+    if not items or discord is None:
+        return None
+    return [discord.Embed.from_dict(item) for item in items]
 
 
 def _maybe_str(value) -> str | None:

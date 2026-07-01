@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import anyio
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.db.models import NewswirePublishLedgerRow
+from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.main import create_app
 from hyperliquid_trading_agent.app.newswire.adapters.alpaca_ws import AlpacaNewsAdapter
 from hyperliquid_trading_agent.app.newswire.adapters.base import NewswireAdapter, RawEmit
 from hyperliquid_trading_agent.app.newswire.bus import InProcessNewswireBus, QueueSubscriber
 from hyperliquid_trading_agent.app.newswire.classify import classify_event_type, classify_urgency, source_score
 from hyperliquid_trading_agent.app.newswire.consumers.discord_news import DiscordNewsPublisher
+from hyperliquid_trading_agent.app.newswire.format import (
+    NEWSWIRE_DISCLAIMER,
+    format_news_digest_message,
+    format_news_event_message,
+)
 from hyperliquid_trading_agent.app.newswire.normalize import normalize
 from hyperliquid_trading_agent.app.newswire.riskgate import HaltStateGate
 from hyperliquid_trading_agent.app.newswire.schemas import NewswireEvent, NewswireFilter, RawNewsItem
@@ -74,6 +83,20 @@ def test_to_news_event_bridge_preserves_core_fields():
     assert legacy.title == event.headline
     assert legacy.assets == event.symbols
     assert legacy.metadata["event_type"] == event.event_type
+
+
+def test_discord_embed_payloads_include_fallback_and_footer():
+    event = _event(source="coindesk", headline="ETH rallies on inflows", symbols=["ETH"])
+    event.importance_score = 82.0
+    event.urgency = "breaking"
+    single = format_news_event_message(event)
+    assert "ETH rallies" in single["content"]
+    assert single["embeds"][0]["footer"]["text"] == NEWSWIRE_DISCLAIMER
+    assert single["embeds"][0]["color"] == 0xE74C3C
+
+    digest = format_news_digest_message([event], max_items=10)
+    assert "Newswire digest" in digest["embeds"][0]["title"]
+    assert digest["embeds"][0]["footer"]["text"] == NEWSWIRE_DISCLAIMER
 
 
 # --- bus ---------------------------------------------------------------------
@@ -174,10 +197,10 @@ def test_alpaca_frame_parses_into_raw_item():
 
 class _FakeSink:
     def __init__(self) -> None:
-        self.sent: list[tuple[str, str]] = []
+        self.sent: list[tuple[str, str, list[dict] | None]] = []
 
-    async def send(self, channel_id: str, content: str) -> str | None:
-        self.sent.append((channel_id, content))
+    async def send(self, channel_id: str, content: str, embeds: list[dict] | None = None) -> str | None:
+        self.sent.append((channel_id, content, embeds))
         return "msg-1"
 
 
@@ -204,8 +227,32 @@ def test_discord_publisher_posts_breaking_immediately_and_batches_rest():
     before_flush, after_flush = anyio.run(run)
     assert len(before_flush) == 1  # only the breaking event posted immediately
     assert "Trading halt on NVDA" in before_flush[0][1]
+    assert before_flush[0][2]  # embed payload included
     assert len(after_flush) == 2  # digest flushed the buffered normal event
     assert "digest" in after_flush[1][1].lower()
+
+
+def test_discord_publisher_skips_startup_backlog():
+    async def run():
+        settings = Settings(
+            newswire_news_channel_id="999",
+            newswire_send_min_interval_ms=0,
+            newswire_news_min_importance=0,
+            newswire_discord_startup_grace_seconds=60,
+        )
+        sink = _FakeSink()
+        publisher = DiscordNewsPublisher(settings=settings, bus=InProcessNewswireBus(), alert_sink=sink)
+        publisher._started_at_ms = 1_000_000
+        event = _event(source="coindesk", external_id="old", headline="BTC headline", symbols=["BTC"])
+        event.importance_score = 90.0
+        event.published_at_ms = 800_000
+        event.freshness = "fresh"
+        await publisher._on_event(event)
+        return sink.sent, publisher.status()
+
+    sent, status = anyio.run(run)
+    assert sent == []
+    assert status["skip_counts"]["startup_backlog"] == 1
 
 
 # --- gateway -----------------------------------------------------------------
@@ -232,6 +279,81 @@ def test_newswire_gateway_lists_filters_and_404s():
         assert status.json()["buffered_events"] == 2
 
         assert client.get("/newswire/events/does-not-exist").status_code == 404
+
+
+def test_newswire_discord_test_endpoint_dry_run():
+    settings = Settings(
+        environment="test",
+        newswire_enabled=False,
+        newswire_news_channel_id="999",
+        discord_bot_token="not-used",
+        position_tracking_enabled=False,
+        autonomy_enabled=False,
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        response = client.post("/newswire/discord/test", json={"dry_run": True})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["dry_run"] is True
+    assert body["channel_id"] == "999"
+    assert "News feed only" in body["payload"]["content"]
+
+
+def test_world_model_live_exposes_newswire_discord_without_full_bot():
+    settings = Settings(
+        environment="test",
+        runtime_profile="world_model_live",
+        newswire_enabled=False,
+        newswire_discord_enabled=True,
+        newswire_news_channel_id="999",
+        discord_bot_token="not-used",
+        world_model_streams_enabled=False,
+        position_tracking_enabled=True,
+        autonomy_enabled=True,
+        tradfi_enabled=True,
+        engine_enabled=True,
+        hip4_enabled=True,
+        hip4_scan_enabled=True,
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        ready = client.get("/ready").json()
+        health = client.get("/health/config").json()
+
+    assert ready["checks"]["discord_enabled"] is False
+    assert health["newswire"]["discord_enabled"] is True
+    assert health["newswire"]["discord_publisher"]["channel_configured"] is True
+    assert health["newswire"]["discord_publisher"]["discord"]["configured"] is True
+
+
+# --- repository ledger -------------------------------------------------------
+
+
+def test_repository_newswire_publish_ledger_claims_and_status():
+    async def run():
+        engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+        async with engine.begin() as conn:
+            await conn.run_sync(NewswirePublishLedgerRow.__table__.create)
+        repo = Repository(async_sessionmaker(engine, expire_on_commit=False))
+        first = await repo.claim_newswire_publish("nw_1", "999", "breaking", 1_000)
+        duplicate_pending = await repo.claim_newswire_publish("nw_1", "999", "breaking", 2_000)
+        await repo.mark_newswire_publish_failed(["nw_1"], "999", "boom", 3_000)
+        retry_failed = await repo.claim_newswire_publish("nw_1", "999", "digest", 4_000)
+        await repo.mark_newswire_publish_posted(["nw_1"], "999", "msg-1", 5_000)
+        duplicate_posted = await repo.claim_newswire_publish("nw_1", "999", "breaking", 6_000)
+        status = await repo.newswire_publish_status("999")
+        await engine.dispose()
+        return first, duplicate_pending, retry_failed, duplicate_posted, status
+
+    first, duplicate_pending, retry_failed, duplicate_posted, status = anyio.run(run)
+    assert first is True
+    assert duplicate_pending is False
+    assert retry_failed is True
+    assert duplicate_posted is False
+    assert status["counts"] == {"posted": 1}
+    assert status["last_event_id"] == "nw_1"
 
 
 # --- service supervisor lifecycle --------------------------------------------

@@ -116,7 +116,9 @@ Stream-first World Model runtime:
 docker compose --profile world-model-live up world-model-live
 ```
 
-This runs the dashboard plus live World Model ingestion with `RUNTIME_PROFILE=world_model_live`. It starts Newswire and World Model streams, keeps trading/engine/autonomy/Discord/HIP-4 execution disabled, and exposes the dashboard at `http://127.0.0.1:${WORLD_MODEL_LIVE_HOST_PORT:-8091}/world-model/dashboard`. Polymarket WebSocket streaming is enabled in the profile; Alpaca News and Trading Economics streams become active when their API keys/settings are present. REST adapters remain available for discovery, manual repair, and backfill.
+This runs the dashboard plus live World Model ingestion with `RUNTIME_PROFILE=world_model_live`. It starts Newswire and World Model streams, keeps trading/engine/autonomy/HIP-4 execution disabled, and exposes the dashboard at `http://127.0.0.1:${WORLD_MODEL_LIVE_HOST_PORT:-8091}/world-model/dashboard`. Polymarket WebSocket streaming is enabled in the profile; Alpaca News and Trading Economics streams become active when their API keys/settings are present. REST adapters remain available for discovery, manual repair, and backfill.
+
+Newswire can also publish the curated feed from this restricted runtime without enabling the interactive trading bot. Set `DISCORD_BOT_TOKEN`, `NEWSWIRE_DISCORD_ENABLED=true`, and `NEWSWIRE_NEWS_CHANNEL_ID=<#news channel id>`; the send-only publisher posts embeds to `#news` while signals remain isolated to `AUTONOMY_ALERT_CHANNEL_ID` in the full runtime.
 
 Model chain:
 
@@ -235,6 +237,11 @@ AUTONOMY_TUNING_PROPOSAL_TTL_DAYS=14
 
 NEWSWIRE_ENABLED=true
 NEWSWIRE_GATEWAY_ENABLED=true
+NEWSWIRE_DISCORD_ENABLED=true
+NEWSWIRE_NEWS_CHANNEL_ID=<discord-news-channel-id>
+NEWSWIRE_NEWS_MIN_IMPORTANCE=60
+NEWSWIRE_BREAKING_MIN_IMPORTANCE=80
+NEWSWIRE_DIGEST_INTERVAL_SECONDS=300
 AUTONOMY_LEGACY_NEWS_POLL_ENABLED=false
 NEWS_SIGNAL_GENERATION_ENABLED=true
 NEWS_EVENT_RISK_BLOCKS_ENABLED=true

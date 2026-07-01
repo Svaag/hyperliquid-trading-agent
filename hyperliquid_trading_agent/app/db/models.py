@@ -4,7 +4,20 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -676,6 +689,29 @@ class NewswireEventRow(TimestampMixin, Base):
     source_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     tradability_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     enrichment_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class NewswirePublishLedgerRow(TimestampMixin, Base):
+    __tablename__ = "newswire_publish_ledger"
+    __table_args__ = (
+        UniqueConstraint("destination", "channel_id", "event_id", name="uq_newswire_publish_destination_channel_event"),
+        Index("ix_newswire_publish_ledger_channel_status", "channel_id", "status"),
+        Index("ix_newswire_publish_ledger_event", "event_id"),
+    )
+
+    publish_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    destination: Mapped[str] = mapped_column(String(32), nullable=False, default="discord")
+    channel_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    discord_message_id: Mapped[str | None] = mapped_column(String(64))
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    first_attempt_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_attempt_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    posted_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    last_error: Mapped[str | None] = mapped_column(Text)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 

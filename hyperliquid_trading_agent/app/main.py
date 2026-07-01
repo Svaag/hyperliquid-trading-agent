@@ -35,6 +35,7 @@ from hyperliquid_trading_agent.app.dashboard import register_dashboard_routes
 from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.db.session import create_engine, create_sessionmaker
 from hyperliquid_trading_agent.app.discord_bot import DiscordTradingBot
+from hyperliquid_trading_agent.app.discord_publish import SendOnlyDiscordClient, SendOnlyDiscordSink
 from hyperliquid_trading_agent.app.engine.monitor import EngineValidationMonitorService
 from hyperliquid_trading_agent.app.engine.pnl_loop import EnginePnLAttributionLoopService
 from hyperliquid_trading_agent.app.engine.routes import register_engine_routes
@@ -270,7 +271,15 @@ async def lifespan(app: FastAPI):
     engine_pnl_attribution = EnginePnLAttributionLoopService(settings=settings, repository=repository, hyperliquid=hyperliquid)
     newswire_service = NewswireService(settings=settings, repository=repository)
     newswire_enricher = Enricher(settings=settings, model_gateway=model_gateway)
-    newswire_discord = DiscordNewsPublisher(settings=settings, bus=newswire_service.bus, alert_sink=autonomy_alert_sink, enricher=newswire_enricher)
+    newswire_discord_client = SendOnlyDiscordClient(token=settings.discord_bot_token) if world_model_live else None
+    newswire_alert_sink = SendOnlyDiscordSink(newswire_discord_client) if newswire_discord_client is not None else autonomy_alert_sink
+    newswire_discord = DiscordNewsPublisher(
+        settings=settings,
+        bus=newswire_service.bus,
+        alert_sink=newswire_alert_sink,
+        enricher=newswire_enricher,
+        repository=repository,
+    )
     newswire_agent_consumer = AgentNewsConsumer(
         settings=settings,
         bus=newswire_service.bus,
@@ -311,6 +320,8 @@ async def lifespan(app: FastAPI):
     app.state.world_model_adapter_service = world_model_adapter_service
     app.state.world_model_stream_service = world_model_stream_service
     app.state.newswire_service = newswire_service
+    app.state.newswire_discord = newswire_discord
+    app.state.newswire_discord_client = newswire_discord_client
     app.state.tradfi_client = tradfi_client
     app.state.options_flow_detector = options_flow_detector
     app.state.flow_enricher = flow_enricher
@@ -319,6 +330,7 @@ async def lifespan(app: FastAPI):
     app.state.wave_supervisor = wave_supervisor
 
     bot_task: asyncio.Task | None = None
+    newswire_discord_task: asyncio.Task | None = None
     ws_task: asyncio.Task | None = None
     tracking_task: asyncio.Task | None = None
     autonomy_task: asyncio.Task | None = None
@@ -337,15 +349,23 @@ async def lifespan(app: FastAPI):
         bot_task = asyncio.create_task(bot.start(), name="discord-bot")
         log.info("discord_bot_task_started")
     else:
-        reason = "test-environment" if settings.environment.lower() == "test" else "DISCORD_BOT_TOKEN-not-set"
+        if settings.environment.lower() == "test":
+            reason = "test-environment"
+        elif restricted_runtime:
+            reason = f"{settings.runtime_profile}-restricted-runtime"
+        else:
+            reason = "DISCORD_BOT_TOKEN-not-set"
         log.info("discord_bot_disabled", reason=reason)
     if not restricted_runtime:
         await engine_validation_monitor.start()
         await engine_pnl_attribution.start()
     if settings.newswire_enabled and not dashboard_only:
         # Subscribe consumers before adapters start so no early events are missed.
-        if not world_model_live:
-            await newswire_discord.start()
+        if world_model_live and newswire_discord_client is not None and settings.discord_bot_token and settings.environment.lower() != "test":
+            newswire_discord_task = asyncio.create_task(newswire_discord_client.start(), name="discord-news-send-only")
+            ready = await newswire_discord_client.wait_until_ready(timeout=30)
+            log.info("newswire_send_only_discord_started", ready=ready)
+        await newswire_discord.start()
         await newswire_agent_consumer.start()
         await newswire_service.start()
         log.info("newswire_started")
@@ -370,9 +390,10 @@ async def lifespan(app: FastAPI):
             await world_model_stream_service.stop()
         if settings.newswire_enabled and not dashboard_only:
             await newswire_service.stop()
-            if not world_model_live:
-                await newswire_discord.stop()
+            await newswire_discord.stop()
             await newswire_agent_consumer.stop()
+            if newswire_discord_client is not None:
+                await newswire_discord_client.stop()
         if not restricted_runtime:
             await engine_pnl_attribution.stop()
             await engine_validation_monitor.stop()
@@ -386,7 +407,7 @@ async def lifespan(app: FastAPI):
             await tradfi_client.close()
         await hyperliquid.close()
         await engine.dispose()
-        for task in [bot_task, autonomy_task, tracking_task, ws_task]:
+        for task in [bot_task, newswire_discord_task, autonomy_task, tracking_task, ws_task]:
             if task is not None:
                 task.cancel()
                 try:
@@ -535,6 +556,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
             "newswire": {
                 "enabled": settings.newswire_enabled,
+                "discord_enabled": settings.newswire_discord_enabled,
                 "news_channel_configured": settings.newswire_news_channel_configured,
                 "rss_feed_count": len(settings.newswire_rss_feed_urls),
                 "alpaca_news_enabled": settings.alpaca_news_enabled,
@@ -546,9 +568,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "news_min_importance": settings.newswire_news_min_importance,
                     "breaking_min_importance": settings.newswire_breaking_min_importance,
                     "agent_min_importance": settings.newswire_agent_min_importance,
+                    "digest_interval_seconds": settings.newswire_digest_interval_seconds,
+                    "discord_digest_max_items": settings.newswire_discord_digest_max_items,
+                    "discord_startup_grace_seconds": settings.newswire_discord_startup_grace_seconds,
                 },
                 "warnings": settings.newswire_config_warnings(),
                 "service": app.state.newswire_service.status() if getattr(app.state, "newswire_service", None) is not None else {},
+                "discord_publisher": await app.state.newswire_discord.status_async() if getattr(app.state, "newswire_discord", None) is not None else {},
             },
         }
 
