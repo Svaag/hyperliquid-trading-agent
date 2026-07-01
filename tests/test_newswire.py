@@ -233,6 +233,24 @@ class _FakeSink:
         return "msg-1"
 
 
+def test_discord_publisher_role_can_run_without_owning_news_ingestion():
+    settings = Settings(
+        environment="test",
+        service_role="discord_publisher",
+        newswire_enabled=False,
+        discord_publisher_enabled=True,
+        newswire_discord_enabled=True,
+        newswire_news_channel_id="999",
+        discord_bot_token="not-used",
+        engine_enabled=False,
+        autonomy_enabled=False,
+        _env_file=None,
+    )
+    publisher = DiscordNewsPublisher(settings=settings, bus=InProcessNewswireBus(), alert_sink=_FakeSink())
+
+    assert publisher.enabled is True
+
+
 def test_discord_publisher_posts_breaking_immediately_and_batches_rest():
     async def run():
         settings = Settings(

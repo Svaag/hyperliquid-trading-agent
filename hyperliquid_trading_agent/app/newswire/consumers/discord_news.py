@@ -59,7 +59,8 @@ class DiscordNewsPublisher:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.settings.newswire_enabled and self.settings.newswire_discord_enabled and self.settings.newswire_news_channel_configured)
+        owns_news_channel = self.settings.newswire_enabled or self.settings.discord_publisher_enabled
+        return bool(owns_news_channel and self.settings.newswire_discord_enabled and self.settings.newswire_news_channel_configured)
 
     async def start(self) -> None:
         if not self.enabled or self._running:
