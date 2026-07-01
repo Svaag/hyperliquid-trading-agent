@@ -13,6 +13,10 @@ from hyperliquid_trading_agent.app.engine.schemas import FeatureValue, RegimeVec
 class RegimeEngine:
     """Computes a first-version RegimeVector from point-in-time features."""
 
+    def __init__(self, *, news_catalyst_threshold: float = 0.35, news_catalyst_ttl_ms: int = 60 * 60_000):
+        self.news_catalyst_threshold = max(0.0, min(1.0, float(news_catalyst_threshold)))
+        self.news_catalyst_ttl_ms = max(1, int(news_catalyst_ttl_ms))
+
     def compute(self, features: Iterable[FeatureValue], *, primary_asset: str = "GLOBAL", as_of_ms: int | None = None) -> RegimeVector:
         items = sorted(list(features), key=lambda item: (item.computed_ts_ms, item.received_ts_ms, item.feature_id))
         ts = as_of_ms or max((item.computed_ts_ms for item in items), default=now_ms())
@@ -26,7 +30,7 @@ class RegimeEngine:
         depths = [item.scalar_value for item in by_name.get("top_depth_usd", []) if item.scalar_value is not None]
         funding = [item.scalar_value for item in by_name.get("funding_hourly", []) if item.scalar_value is not None]
         oi = [item.scalar_value for item in by_name.get("open_interest", []) if item.scalar_value is not None]
-        catalyst = [abs(item.scalar_value or 0) for item in by_name.get("catalyst_pressure", [])]
+        news_summary = _news_summary(by_name, as_of_ms=ts, ttl_ms=self.news_catalyst_ttl_ms)
         top_imbalance = _latest_scalar(by_name, "top_imbalance")
         liq_notional_5m = _latest_scalar(by_name, "liq_notional_5m") or 0.0
         liq_imbalance_5m = _latest_scalar(by_name, "long_vs_short_liq_imbalance_5m") or 0.0
@@ -51,14 +55,14 @@ class RegimeEngine:
         oi_velocity_z = _latest_scalar(by_name, "oi_velocity_z")
         if oi_velocity_z is None:
             oi_velocity_z = _velocity_z(oi)
-        news_pressure = min(1.0, max(catalyst) if catalyst else 0.0)
+        news_pressure = news_summary["pressure"]
         stability = _stability_score(trend_confidence, realized_vol, spread_state, liquidity_state, news_pressure, quality_flags)
         volatility_state = _volatility_state(realized_vol)
         funding_state = _funding_state(funding_stress_z)
         oi_state = _oi_state(oi_velocity_z)
         liquidation_state = _liquidation_state(liq_notional_5m=liq_notional_5m, imbalance=liq_imbalance_5m, event_count=liq_event_count_5m)
         orderflow_state = _orderflow_state(top_imbalance)
-        news_state = "catalyst" if news_pressure >= 0.35 else "no_event"
+        news_state = "catalyst" if news_pressure >= self.news_catalyst_threshold else "no_event"
         correlation_breakdown_prob = max(0.0, min(1.0, (realized_vol or 0.0) * (1.0 - stability)))
         correlation_state = _correlation_state(correlation_breakdown_prob)
         session_state = _session_state(ts)
@@ -93,6 +97,10 @@ class RegimeEngine:
             "liquidation": liquidation_state,
             "orderflow": orderflow_state,
             "news": news_state,
+            "news_risk_tier": str(news_summary["risk_tier"]),
+            "news_direction": str(news_summary["direction"]),
+            "news_event_count_recent": str(news_summary["event_count"]),
+            "news_source_event_ids": ",".join(news_summary["source_event_ids"]),
             "correlation": correlation_state,
             "session": session_state,
             "regime_label": regime_label,
@@ -132,7 +140,58 @@ class RegimeEngine:
             raw_feature_refs={item.feature_name: item.feature_id for item in items[-100:]},
             derived_labels=derived_labels,
             quality_flags=quality_flags,
+            metadata={"news": news_summary, "news_catalyst_ttl_ms": self.news_catalyst_ttl_ms, "news_catalyst_threshold": self.news_catalyst_threshold},
         )
+
+
+def _news_summary(by_name: dict[str, list[FeatureValue]], *, as_of_ms: int, ttl_ms: int) -> dict[str, object]:
+    cutoff = as_of_ms - ttl_ms
+    catalyst_items = _recent_feature_items(by_name, "catalyst_pressure", cutoff)
+    risk_items = _recent_feature_items(by_name, "event_risk_pressure", cutoff)
+    catalyst_values = [float(item.scalar_value or 0.0) for item in catalyst_items]
+    risk_values = [abs(float(item.scalar_value or 0.0)) for item in risk_items]
+    directional_pressure = max([abs(value) for value in catalyst_values], default=0.0)
+    event_risk_pressure = max(risk_values, default=0.0)
+    pressure = max(0.0, min(1.0, max(directional_pressure, event_risk_pressure)))
+    positive = sum(max(value, 0.0) for value in catalyst_values)
+    negative = sum(abs(min(value, 0.0)) for value in catalyst_values)
+    if positive > negative * 1.25 and positive > 0:
+        direction = "bullish"
+    elif negative > positive * 1.25 and negative > 0:
+        direction = "bearish"
+    elif positive or negative:
+        direction = "mixed"
+    else:
+        direction = "unknown"
+    source_event_ids = sorted({_news_source_id(item) for item in [*catalyst_items, *risk_items] if _news_source_id(item)})
+    return {
+        "pressure": pressure,
+        "directional_pressure": max(-1.0, min(1.0, sum(catalyst_values))),
+        "event_risk_pressure": event_risk_pressure,
+        "risk_tier": _news_risk_tier(pressure),
+        "direction": direction,
+        "event_count": len(source_event_ids) or len(catalyst_items) + len(risk_items),
+        "source_event_ids": source_event_ids,
+    }
+
+
+def _recent_feature_items(by_name: dict[str, list[FeatureValue]], feature_name: str, cutoff_ms: int) -> list[FeatureValue]:
+    return [item for item in by_name.get(feature_name, []) if item.scalar_value is not None and item.computed_ts_ms >= cutoff_ms]
+
+
+def _news_source_id(item: FeatureValue) -> str:
+    metadata = item.metadata if isinstance(item.metadata, dict) else {}
+    return str(metadata.get("newswire_event_id") or item.source_event_id or "")
+
+
+def _news_risk_tier(pressure: float) -> str:
+    if pressure >= 0.75:
+        return "event_shock"
+    if pressure >= 0.50:
+        return "event_risk"
+    if pressure >= 0.35:
+        return "catalyst"
+    return "no_event"
 
 
 def _trend(mids: list[float]) -> tuple[str, float]:

@@ -319,6 +319,13 @@ class Settings(BaseSettings):
     engine_shadow_enabled: bool = True
     engine_paper_enabled: bool = False
     engine_live_enabled: bool = False
+    engine_newsfeed_enabled: bool = True
+    engine_news_min_importance: float = 35.0
+    engine_news_min_source_score: float = 0.4
+    engine_news_catalyst_threshold: float = 0.35
+    engine_news_catalyst_ttl_seconds: int = 3600
+    engine_news_macro_min_importance: float = 60.0
+    engine_news_macro_proxy_symbols: str = ""
     engine_validation_digest_enabled: bool = True
     engine_validation_digest_interval_seconds: int = 3600
     engine_validation_alert_stale_loop_seconds: int = 180
@@ -743,6 +750,11 @@ class Settings(BaseSettings):
         return [mode for mode in modes if mode in {"paper", "shadow"}]
 
     @property
+    def engine_news_macro_proxy_symbol_list(self) -> list[str]:
+        configured = [symbol.upper() for symbol in _csv(self.engine_news_macro_proxy_symbols)]
+        return configured or self.autonomy_core_symbols
+
+    @property
     def autonomy_evaluation_effective_enabled(self) -> bool:
         return self.autonomy_enabled and self.autonomy_evaluation_enabled
 
@@ -839,6 +851,16 @@ class Settings(BaseSettings):
             warnings.append("X_NEWSWIRE_ENABLED requires X_BEARER_TOKEN")
         if self.newswire_breaking_min_importance < self.newswire_news_min_importance:
             warnings.append("NEWSWIRE_BREAKING_MIN_IMPORTANCE should be >= NEWSWIRE_NEWS_MIN_IMPORTANCE")
+        if self.engine_newsfeed_enabled and not self.newswire_enabled:
+            warnings.append("ENGINE_NEWSFEED_ENABLED requires NEWSWIRE_ENABLED=true")
+        if self.engine_news_min_source_score < 0 or self.engine_news_min_source_score > 1:
+            warnings.append("ENGINE_NEWS_MIN_SOURCE_SCORE must be between 0 and 1")
+        if self.engine_news_catalyst_threshold < 0 or self.engine_news_catalyst_threshold > 1:
+            warnings.append("ENGINE_NEWS_CATALYST_THRESHOLD must be between 0 and 1")
+        if self.engine_news_catalyst_ttl_seconds <= 0:
+            warnings.append("ENGINE_NEWS_CATALYST_TTL_SECONDS must be positive")
+        if self.engine_news_macro_min_importance < 0 or self.engine_news_macro_min_importance > 100:
+            warnings.append("ENGINE_NEWS_MACRO_MIN_IMPORTANCE must be between 0 and 100")
         return warnings
 
     def autonomy_config_warnings(self) -> list[str]:

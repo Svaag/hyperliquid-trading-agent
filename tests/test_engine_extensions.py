@@ -273,7 +273,33 @@ def test_unified_dashboard_routes_registered():
     async def list_candidate_config_diffs(**kwargs):
         return []
 
+    async def list_regime_snapshots(**kwargs):
+        asset = kwargs.get("primary_asset") or "BTC"
+        return [
+            {
+                "regime_snapshot_id": f"reg_{asset}",
+                "primary_asset": asset,
+                "created_at_ms": now_ms,
+                "as_of_ms": now_ms,
+                "vector": {
+                    "regime_snapshot_id": f"reg_{asset}",
+                    "primary_asset": asset,
+                    "created_at_ms": now_ms,
+                    "as_of_ms": now_ms,
+                    "regime_label": "trend=bull|news=catalyst",
+                    "trend_state": "bull",
+                    "volatility_state": "normal",
+                    "news_state": "catalyst",
+                    "news_catalyst_pressure": 0.4,
+                    "regime_stability_score": 0.7,
+                    "feature_coverage_pct": 100,
+                    "derived_labels": {"news_risk_tier": "catalyst", "news_direction": "bullish"},
+                },
+            }
+        ]
+
     repo.list_candidate_config_diffs = list_candidate_config_diffs
+    repo.list_regime_snapshots = list_regime_snapshots
     app.state.repository = repo
     app.state.engine_service = FakeReadinessService(now_ms=now_ms)
     client = TestClient(app)
@@ -282,3 +308,4 @@ def test_unified_dashboard_routes_registered():
     data = client.get("/dashboard/data").json()
     assert "engine" in data
     assert "readiness" in data["engine"]
+    assert data["engine"]["regime"]["latest_by_asset"]["BTC"]["news_risk_tier"] == "catalyst"

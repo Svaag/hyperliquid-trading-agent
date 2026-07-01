@@ -824,6 +824,14 @@ class Repository:
         )
         return items[0] if items else None
 
+    async def list_regime_snapshots(self, *, primary_asset: str | None = None, since_ms: int | None = None, limit: int = 500) -> list[dict[str, Any]]:
+        filters = []
+        if primary_asset:
+            filters.append(RegimeSnapshotRecord.primary_asset == primary_asset.upper())
+        if since_ms is not None:
+            filters.append(RegimeSnapshotRecord.created_at_ms >= int(since_ms))
+        return await self._list_engine_records(RegimeSnapshotRecord, order_by=RegimeSnapshotRecord.created_at_ms, limit=limit, filters=filters)
+
     async def record_alpha_candidate(self, candidate: dict[str, Any]) -> str | None:
         metadata = {
             **dict(candidate.get("metadata") or {}),

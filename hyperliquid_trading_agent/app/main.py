@@ -37,6 +37,7 @@ from hyperliquid_trading_agent.app.db.session import create_engine, create_sessi
 from hyperliquid_trading_agent.app.discord_bot import DiscordTradingBot
 from hyperliquid_trading_agent.app.discord_publish import SendOnlyDiscordClient, SendOnlyDiscordSink
 from hyperliquid_trading_agent.app.engine.monitor import EngineValidationMonitorService
+from hyperliquid_trading_agent.app.engine.newswire_bridge import EngineNewsConsumer
 from hyperliquid_trading_agent.app.engine.pnl_loop import EnginePnLAttributionLoopService
 from hyperliquid_trading_agent.app.engine.routes import register_engine_routes
 from hyperliquid_trading_agent.app.engine.service import InstitutionalEngineService
@@ -270,6 +271,7 @@ async def lifespan(app: FastAPI):
     engine_validation_monitor = EngineValidationMonitorService(settings=settings, repository=repository, engine_service=engine_service, alert_sink=autonomy_alert_sink)
     engine_pnl_attribution = EnginePnLAttributionLoopService(settings=settings, repository=repository, hyperliquid=hyperliquid)
     newswire_service = NewswireService(settings=settings, repository=repository)
+    engine_news_consumer = EngineNewsConsumer(settings=settings, bus=newswire_service.bus, engine_service=engine_service)
     newswire_enricher = Enricher(settings=settings, model_gateway=model_gateway)
     newswire_discord_client = SendOnlyDiscordClient(token=settings.discord_bot_token) if world_model_live else None
     newswire_alert_sink = SendOnlyDiscordSink(newswire_discord_client) if newswire_discord_client is not None else autonomy_alert_sink
@@ -320,6 +322,7 @@ async def lifespan(app: FastAPI):
     app.state.world_model_adapter_service = world_model_adapter_service
     app.state.world_model_stream_service = world_model_stream_service
     app.state.newswire_service = newswire_service
+    app.state.engine_news_consumer = engine_news_consumer
     app.state.newswire_discord = newswire_discord
     app.state.newswire_discord_client = newswire_discord_client
     app.state.tradfi_client = tradfi_client
@@ -365,6 +368,7 @@ async def lifespan(app: FastAPI):
             newswire_discord_task = asyncio.create_task(newswire_discord_client.start(), name="discord-news-send-only")
             ready = await newswire_discord_client.wait_until_ready(timeout=30)
             log.info("newswire_send_only_discord_started", ready=ready)
+        await engine_news_consumer.start()
         await newswire_discord.start()
         await newswire_agent_consumer.start()
         await newswire_service.start()
@@ -392,6 +396,7 @@ async def lifespan(app: FastAPI):
             await newswire_service.stop()
             await newswire_discord.stop()
             await newswire_agent_consumer.stop()
+            await engine_news_consumer.stop()
             if newswire_discord_client is not None:
                 await newswire_discord_client.stop()
         if not restricted_runtime:

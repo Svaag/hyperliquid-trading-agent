@@ -127,7 +127,17 @@ def derive_world_model_features(*, asset: str, snapshot: Any) -> list[FeatureVal
     return out
 
 
-def _feature(event: NormalizedEvent, *, asset: str, group: str, name: str, value: dict[str, Any], scalar: float | None = None, quality: float | None = None) -> FeatureValue:
+def _feature(
+    event: NormalizedEvent,
+    *,
+    asset: str,
+    group: str,
+    name: str,
+    value: dict[str, Any],
+    scalar: float | None = None,
+    quality: float | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> FeatureValue:
     computed = now_ms()
     fid = "feat_" + hashlib.sha1(f"{event.event_id}:{asset}:{group}:{name}".encode()).hexdigest()[:24]
     return FeatureValue(
@@ -145,7 +155,7 @@ def _feature(event: NormalizedEvent, *, asset: str, group: str, name: str, value
         version=FEATURE_VERSION,
         quality_score=quality if quality is not None else event.quality_score,
         staleness_ms=event.staleness_ms,
-        metadata=dict(event.metadata or {}),
+        metadata={**dict(event.metadata or {}), **(metadata or {})},
     )
 
 
@@ -206,9 +216,29 @@ def _orderbook_features(event: NormalizedEvent) -> list[FeatureValue]:
 
 
 def _news_features(event: NormalizedEvent) -> list[FeatureValue]:
-    importance = _float(event.payload.get("importance_score")) or _float(event.payload.get("importance")) or 0.0
-    sentiment = str(event.payload.get("sentiment") or "unknown")
+    payload = event.payload or {}
+    importance = _float(payload.get("importance_score")) or _float(payload.get("importance")) or 0.0
+    sentiment = str(payload.get("sentiment") or "unknown").lower()
+    confidence = _float(payload.get("confidence"))
+    if confidence is None:
+        confidence = float(event.quality_score or 0.0)
+    source_score = _float(payload.get("source_score"))
+    if source_score is None:
+        source_score = float(event.quality_score or 0.0)
+    weighted = max(0.0, min(1.0, importance / 100.0 * max(0.0, min(1.0, confidence)) * max(0.0, min(1.0, source_score))))
     direction = 1.0 if sentiment == "bullish" else -1.0 if sentiment == "bearish" else 0.0
+    catalyst_pressure = direction * weighted
+    newswire_event_id = str(payload.get("newswire_event_id") or event.metadata.get("source_newswire_event_id") or event.event_id)
+    news_metadata = {
+        "newswire_event_id": newswire_event_id,
+        "headline": payload.get("headline"),
+        "event_type": payload.get("event_type") or event.event_type,
+        "urgency": payload.get("urgency"),
+        "importance_score": importance,
+        "sentiment": sentiment,
+        "confidence": confidence,
+        "source_score": source_score,
+    }
     out: list[FeatureValue] = []
     for symbol in event.symbols:
         out.append(
@@ -217,8 +247,34 @@ def _news_features(event: NormalizedEvent) -> list[FeatureValue]:
                 asset=symbol,
                 group="news",
                 name="catalyst_pressure",
-                value={"importance_score": importance, "sentiment": sentiment, "pressure": direction * importance / 100.0},
-                scalar=direction * importance / 100.0,
+                value={
+                    "importance_score": importance,
+                    "sentiment": sentiment,
+                    "confidence": confidence,
+                    "source_score": source_score,
+                    "pressure": catalyst_pressure,
+                    "weighted_pressure": weighted,
+                },
+                scalar=catalyst_pressure,
+                metadata=news_metadata,
+            )
+        )
+        out.append(
+            _feature(
+                event,
+                asset=symbol,
+                group="news",
+                name="event_risk_pressure",
+                value={
+                    "importance_score": importance,
+                    "sentiment": sentiment,
+                    "confidence": confidence,
+                    "source_score": source_score,
+                    "pressure": weighted,
+                    "directional_pressure": catalyst_pressure,
+                },
+                scalar=weighted,
+                metadata=news_metadata,
             )
         )
     return out

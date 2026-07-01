@@ -54,6 +54,7 @@ NEWSWIRE_ADAPTER_RECONNECTS = Counter("hyperliquid_trading_agent_newswire_adapte
 NEWSWIRE_DISCORD_POSTS = Counter("hyperliquid_trading_agent_newswire_discord_posts_total", "Newswire Discord posts", ["mode", "result"])
 NEWSWIRE_DISCORD_SKIPS = Counter("hyperliquid_trading_agent_newswire_discord_skips_total", "Newswire Discord skipped posts", ["reason"])
 NEWSWIRE_ENRICH_CALLS = Counter("hyperliquid_trading_agent_newswire_enrich_calls_total", "Newswire LLM enrichment calls", ["result"])
+ENGINE_NEWS_EVENTS = Counter("hyperliquid_trading_agent_engine_news_events_total", "Newswire events processed by the engine news bridge", ["result"])
 ENGINE_VALIDATION_DIGESTS = Counter("hyperliquid_trading_agent_engine_validation_digests_total", "Engine validation Discord digests", ["result"])
 ENGINE_VALIDATION_ALERTS = Counter("hyperliquid_trading_agent_engine_validation_alerts_total", "Engine validation alert conditions", ["alert_type"])
 LIQUIDATION_EVENTS = Counter("hyperliquid_trading_agent_liquidation_events_total", "Liquidation events ingested", ["venue", "source_integrity", "event_type"])

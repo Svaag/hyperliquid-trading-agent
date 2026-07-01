@@ -60,6 +60,8 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
         monitor_status = monitor.status() if monitor is not None and callable(getattr(monitor, "status", None)) else {}
         pnl = getattr(app.state, "engine_pnl_attribution", None)
         pnl_status = pnl.status() if pnl is not None and callable(getattr(pnl, "status", None)) else {}
+        news_consumer = getattr(app.state, "engine_news_consumer", None)
+        news_status = news_consumer.status() if news_consumer is not None and callable(getattr(news_consumer, "status", None)) else {}
         return {
             "enabled": settings.engine_enabled,
             "mode": settings.engine_mode,
@@ -74,6 +76,7 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
             },
             "repository_enabled": getattr(repository, "enabled", False),
             "service": service_status,
+            "newsfeed": news_status,
             "validation_monitor": monitor_status,
             "pnl_attribution": pnl_status,
             "debate": {"enabled": settings.engine_debate_enabled, "max_per_day": settings.engine_debate_max_per_day, "priority_min": settings.engine_debate_priority_min},
@@ -111,6 +114,14 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
         if item is None:
             raise HTTPException(status_code=404, detail="regime snapshot not found")
         return item
+
+    @app.get("/engine/regime/history")
+    async def engine_regime_history(primary_asset: str | None = None, since_ms: int | None = None, limit: int = 500, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        _auth(authorization)
+        method = getattr(_repo(), "list_regime_snapshots", None)
+        if not callable(method):
+            return []
+        return await method(primary_asset=primary_asset, since_ms=since_ms, limit=limit)
 
     @app.get("/engine/candidates")
     async def engine_candidates(status: str | None = None, asset: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:

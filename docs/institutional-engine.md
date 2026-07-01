@@ -103,6 +103,8 @@ Wave 1B adds the evidence spine: every candidate receives candidate evidence lin
 
 Wave 1C deterministic strategies are implemented but gated behind `ENGINE_WAVE1C_ENABLED=false` by default until Wave 1B outcome evidence is reliable. The gated active set is `microstructure_absorption_v1`, `funding_squeeze_v1`, `basis_reversion_v1`, and `news_impulse_v1`; optional `range_rotation_v1` and `volatility_compression_breakout_v1` remain disabled pending replay depth.
 
+Newswire events can be bridged into the engine with `ENGINE_NEWSFEED_ENABLED=true`. Qualifying canonical `NewswireEvent`s become engine `newswire` normalized events and derive `catalyst_pressure` plus `event_risk_pressure` features. Macro news proxies to `ENGINE_NEWS_MACRO_PROXY_SYMBOLS` or, when empty, the core autonomy universe. Regime snapshots only consider news features inside `ENGINE_NEWS_CATALYST_TTL_SECONDS` and expose `derived_labels.news_risk_tier`. The conservative strategy selector can suppress reversion/range strategies during `event_risk` and additionally suppress microstructure/funding-basis strategies during `event_shock`; it never enables disabled strategies, promotes Wave 1C, changes paper/live flags, or creates order authority.
+
 Every candidate builds a `CandidateTradePacket`, receives a deterministic role-based Council review, and must pass RiskGateway plus Council before a paper/shadow execution report can exist. The offline contextual-bandit endpoint is report-only: it writes recommendations with `auto_apply_allowed=false` and never mutates config, risk limits, or orders.
 
 Wave 2 is explicitly deferred. `ENGINE_WAVE2_ENABLED=true` is rejected until Wave 1 outcome attribution, replay grouping, and readiness gates are reliable. Wave 2 is not “more simple strategies”; it is reserved for DEX-native, cross-venue, regime-aware proprietary strategies: lead/lag, liquidity vacuum, stop-cluster, liquidation divergence, crowded long/short unwind, perp-basis momentum/reversion, carry-risk intelligence, and constrained policy recommendations.
@@ -133,6 +135,12 @@ Endpoints:
 - `GET /orchestration/wave/status`
 - `POST /orchestration/wave/run-once`
 
+## Dashboard regime history
+
+The unified dashboard (`GET /dashboard`) has a Regime tab backed by persisted `regime_snapshots`. It charts per-asset `news_risk_tier`, volatility score, stability, and regime-change markers over time. The client tries the Percept/TitanCharts React package documented at `https://percept.one/docs/quickstart.md`; when the package/license is unavailable in the static dashboard runtime, it falls back to the built-in canvas chart without changing the API shape.
+
+The underlying read API is `GET /engine/regime/history?primary_asset=BTC&limit=500`.
+
 ## Read-only API
 
 Protected by the existing agent API token outside dev/test/local:
@@ -143,6 +151,7 @@ GET /engine/events
 GET /engine/events/{event_id}
 GET /engine/features?asset=BTC
 GET /engine/regime/latest
+GET /engine/regime/history
 GET /engine/candidates
 GET /engine/candidates/{candidate_id}
 GET /engine/candidate-book/latest

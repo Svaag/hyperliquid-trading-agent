@@ -21,6 +21,9 @@ class FakeEngineRepository:
     async def latest_regime_snapshot(self, primary_asset=None):
         return {"regime_snapshot_id": "reg_1", "primary_asset": primary_asset or "GLOBAL"}
 
+    async def list_regime_snapshots(self, **kwargs):
+        return [{"regime_snapshot_id": "reg_1", "primary_asset": kwargs.get("primary_asset") or "GLOBAL", "created_at_ms": 1_000}]
+
     async def list_alpha_candidates(self, **kwargs):
         return [{"candidate_id": "cand_1", "status": kwargs.get("status") or "new"}]
 
@@ -116,6 +119,7 @@ def test_engine_readonly_routes_are_registered_and_auth_protected_in_dev():
     assert client.get("/engine/events/evt_1").json()["event_id"] == "evt_1"
     assert client.get("/engine/features", params={"asset": "BTC"}).json()[0]["asset"] == "BTC"
     assert client.get("/engine/regime/latest").json()["regime_snapshot_id"] == "reg_1"
+    assert client.get("/engine/regime/history", params={"primary_asset": "BTC"}).json()[0]["primary_asset"] == "BTC"
     assert client.get("/engine/candidates").json()[0]["candidate_id"] == "cand_1"
     assert client.get("/engine/candidates/cand_1").json()["candidate_id"] == "cand_1"
     assert client.get("/engine/candidate-book/latest").json()["candidate_book_id"] == "book_1"

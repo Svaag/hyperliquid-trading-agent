@@ -25,6 +25,7 @@ from hyperliquid_trading_agent.app.engine.replay_compare import latest_engine_re
 from hyperliquid_trading_agent.app.engine.schemas import AlphaCandidate, OrderIntent
 from hyperliquid_trading_agent.app.engine.scorer import EVScorerService
 from hyperliquid_trading_agent.app.engine.strategy_registry import create_default_strategy_registry
+from hyperliquid_trading_agent.app.engine.strategy_selector import ConservativeStrategySelector
 from hyperliquid_trading_agent.app.engine.throttles import StrategyThrottleController
 from hyperliquid_trading_agent.app.governance.risk_gateway import RiskGateway
 
@@ -56,7 +57,10 @@ class InstitutionalEngineService:
         self.liquidation_bridge = liquidation_bridge
         self.ledger = EventLedger(repository)
         self.feature_store = FeatureStore(repository)
-        self.regime_engine = RegimeEngine()
+        self.regime_engine = RegimeEngine(
+            news_catalyst_threshold=getattr(settings, "engine_news_catalyst_threshold", 0.35),
+            news_catalyst_ttl_ms=int(getattr(settings, "engine_news_catalyst_ttl_seconds", 3600)) * 1000,
+        )
         self.candidate_book = CandidateBook(repository)
         self.scorer = EVScorerService(repository)
         self.allocator = PortfolioAllocator(
@@ -74,6 +78,7 @@ class InstitutionalEngineService:
         self.candidate_outcomes = CandidateOutcomeAttributionService(repository)
         self.diversity = PortfolioDiversityController(settings)
         self.throttles = StrategyThrottleController(settings)
+        self.strategy_selector = ConservativeStrategySelector()
         self.strategy_registry = create_default_strategy_registry(enable_wave_1c=bool(getattr(settings, "engine_wave1c_enabled", False)))
         self.strategies = self.strategy_registry.strategies(enabled_only=True)
         self.last_run_at_ms: int | None = None
@@ -86,6 +91,7 @@ class InstitutionalEngineService:
         self.council_reviews_created = 0
         self.last_throttle_summary: dict[str, Any] = {}
         self.last_diversity_summary: dict[str, Any] = {}
+        self.last_strategy_selection_summary: dict[str, Any] = {}
 
     def status(self) -> dict[str, Any]:
         return {
@@ -100,6 +106,7 @@ class InstitutionalEngineService:
             "debate_count_today": self.debate_count_today,
             "council_reviews_created": self.council_reviews_created,
             "last_throttle_summary": self.last_throttle_summary,
+            "last_strategy_selection_summary": self.last_strategy_selection_summary,
             "throttles": self.throttles.status(),
             "diversity": {**self.diversity.status(), "last_summary": self.last_diversity_summary},
             "strategy_registry": self.strategy_registry.metadata(),
@@ -152,6 +159,7 @@ class InstitutionalEngineService:
             current_loop_allocations = []
             throttle_events = []
             diversity_decisions = []
+            strategy_selection_summaries: dict[str, Any] = {}
             for symbol in symbols:
                 await self._record_world_model_features(symbol)
                 await self._record_liquidation_features(symbol)
@@ -162,7 +170,9 @@ class InstitutionalEngineService:
                 await self._persist_regime(regime)
                 snapshot = self.feature_store.snapshot(asset=symbol)
                 symbol_candidates = []
-                for strategy in self.strategies:
+                selection = self.strategy_selector.select(self.strategies, regime)
+                strategy_selection_summaries[symbol] = selection.summary()
+                for strategy in selection.strategies:
                     await self._prepare_strategy(strategy, timestamp_ms=ts)
                     symbol_candidates.extend(strategy.generate(snapshot, regime, timestamp_ms=ts))
                 symbol_candidates = symbol_candidates[: self.settings.engine_max_candidates_per_loop]
@@ -288,6 +298,7 @@ class InstitutionalEngineService:
             self.candidates_created += len(all_candidates)
             self.last_throttle_summary = self._throttle_summary(throttle_events=throttle_events, timestamp_ms=ts)
             self.last_diversity_summary = self._diversity_summary(diversity_decisions=diversity_decisions, timestamp_ms=ts)
+            self.last_strategy_selection_summary = {"timestamp_ms": ts, "symbols": strategy_selection_summaries}
             self.last_run_at_ms = ts
             self.run_count += 1
             return {"candidate_book_id": book.candidate_book_id, "candidates": len(all_candidates), "executed": len(executed), "throttle_events": len(throttle_events), "throttle_summary": self.last_throttle_summary, "diversity_summary": self.last_diversity_summary}
