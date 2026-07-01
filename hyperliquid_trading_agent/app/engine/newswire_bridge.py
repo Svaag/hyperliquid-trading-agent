@@ -39,18 +39,13 @@ class EngineNewsConsumer:
 
     @property
     def effective_enabled(self) -> bool:
-        return bool(
-            self.settings.newswire_enabled
-            and self.settings.engine_enabled
-            and self.settings.engine_newsfeed_enabled
-            and self.engine_service is not None
-        )
+        return bool(self.settings.engine_enabled and self.settings.engine_newsfeed_enabled and self.engine_service is not None)
 
     async def start(self) -> None:
         if self.running or not self.effective_enabled:
             return
         flt = NewswireFilter(min_importance=float(self.settings.engine_news_min_importance))
-        self._subscription_id = await self.bus.subscribe(self._on_event, filter=flt)
+        self._subscription_id = await self.bus.subscribe(self.handle_event, filter=flt)
         self.running = True
         log.info("engine_news_consumer_started", min_importance=self.settings.engine_news_min_importance)
 
@@ -84,7 +79,7 @@ class EngineNewsConsumer:
             },
         }
 
-    async def _on_event(self, event: NewswireEvent) -> None:
+    async def handle_event(self, event: NewswireEvent) -> None:
         self.received_events += 1
         self.last_event_id = event.event_id
         try:
@@ -108,6 +103,9 @@ class EngineNewsConsumer:
             self.last_error = type(exc).__name__
             ENGINE_NEWS_EVENTS.labels(result="error").inc()
             log.warning("engine_news_consumer_event_failed", event_id=event.event_id, error=type(exc).__name__)
+
+    async def _on_event(self, event: NewswireEvent) -> None:
+        await self.handle_event(event)
 
     def _skip(self, reason: str) -> None:
         self.skipped_events += 1

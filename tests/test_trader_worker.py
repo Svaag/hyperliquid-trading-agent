@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import anyio
 
-from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.config import ServiceRole, Settings
 from hyperliquid_trading_agent.app.workers.trader_worker import TraderWorker
 
 
@@ -84,6 +84,36 @@ def test_trader_autonomy_handlers_delegate_to_real_service_methods() -> None:
         assert worker.heartbeat_metadata()["trader"]["command_count"] == 4
 
     anyio.run(run)
+
+
+def test_trader_engine_newsfeed_pump_starts_with_persisted_consumer() -> None:
+    async def run() -> None:
+        settings = Settings(environment="test", engine_enabled=True, engine_newsfeed_enabled=True, newswire_enabled=False, _env_file=None)
+        worker = TraderWorker(settings)
+        await worker._start_engine_newsfeed()
+        metadata = worker.heartbeat_metadata()["engine_newsfeed"]
+
+        assert worker._engine_service is not None
+        assert worker._engine_news_bus is not None
+        assert worker._engine_news_consumer is not None
+        assert worker._engine_news_pump is not None
+        assert worker._engine_news_pump.consumer_name == "trader:engine_newswire"
+        assert metadata["enabled"] is True
+        assert metadata["consumer_name"] == "trader:engine_newswire"
+        assert metadata["consumer"]["effective_enabled"] is True
+        assert metadata["consumer"]["running"] is True
+        assert metadata["pump"]["bootstrap_from_latest"] is True
+        await worker._engine_news_consumer.stop()
+
+    anyio.run(run)
+
+
+def test_trader_role_keeps_newswire_ingestion_disabled_while_engine_newsfeed_enabled() -> None:
+    settings = Settings(service_role=ServiceRole.TRADER, environment="prod", engine_enabled=True, engine_newsfeed_enabled=True, newswire_enabled=False, _env_file=None)
+
+    assert settings.service_role == ServiceRole.TRADER
+    assert settings.newswire_enabled is False
+    assert settings.engine_newsfeed_enabled is True
 
 
 def test_trader_hip4_and_tracking_handlers_delegate_to_real_service_methods() -> None:

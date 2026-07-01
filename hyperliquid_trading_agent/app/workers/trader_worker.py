@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -8,10 +9,15 @@ from hyperliquid_trading_agent.app.autonomy.schemas import SignalEvidence, Trade
 from hyperliquid_trading_agent.app.autonomy.service import AutonomousTradingLoopService
 from hyperliquid_trading_agent.app.config import ServiceRole, Settings
 from hyperliquid_trading_agent.app.engine.bandit import OfflineContextualBanditReporter
+from hyperliquid_trading_agent.app.engine.newswire_bridge import EngineNewsConsumer
 from hyperliquid_trading_agent.app.engine.replay_compare import EngineReplayComparisonService
+from hyperliquid_trading_agent.app.engine.service import InstitutionalEngineService
 from hyperliquid_trading_agent.app.engine.strategy_performance import refresh_strategy_regime_performance
+from hyperliquid_trading_agent.app.governance.risk_gateway import RiskGateway
 from hyperliquid_trading_agent.app.hip4.service import Hip4Service
+from hyperliquid_trading_agent.app.newswire.bus import InProcessNewswireBus
 from hyperliquid_trading_agent.app.workers.base import BaseWorker
+from hyperliquid_trading_agent.app.workers.stored_newswire_pump import StoredNewswirePump
 
 
 class TraderWorker(BaseWorker):
@@ -25,30 +31,77 @@ class TraderWorker(BaseWorker):
         self._hip4_service: Hip4Service | None = None
         self._autonomy_service: AutonomousTradingLoopService | None = None
         self._memory_service: MemoryService | None = None
+        self._engine_service: InstitutionalEngineService | None = None
+        self._engine_news_bus: InProcessNewswireBus | None = None
+        self._engine_news_consumer: EngineNewsConsumer | None = None
+        self._engine_news_pump: StoredNewswirePump | None = None
 
     async def run(self) -> None:
-        await self.command_loop(
-            {
-                "engine_strategy_regime_refresh": self._handle_engine_strategy_regime_refresh,
-                "engine_bandit_run": self._handle_engine_bandit_run,
-                "engine_replay_comparison_run": self._handle_engine_replay_comparison_run,
-                "hip4_loop_run_once": self._handle_hip4_loop_run_once,
-                "hip4_scan_run": self._handle_hip4_scan_run,
-                "hip4_paper_execute": self._handle_hip4_paper_execute,
-                "hip4_reconcile_run": self._handle_hip4_reconcile_run,
-                "hip4_manual_ticket": self._handle_hip4_manual_ticket,
-                "autonomy_pause": self._handle_autonomy_pause,
-                "autonomy_resume": self._handle_autonomy_resume,
-                "autonomy_signal_approve": self._handle_autonomy_signal_approve,
-                "autonomy_signal_reject": self._handle_autonomy_signal_reject,
-                "autonomy_signal_expire": self._handle_autonomy_signal_expire,
-                "autonomy_equity_signal_approve": self._handle_autonomy_equity_signal_approve,
-                "autonomy_equity_signal_reject": self._handle_autonomy_equity_signal_reject,
-                "tracking_pause": self._handle_tracking_pause,
-                "tracking_resume": self._handle_tracking_resume,
-                "tracking_stop": self._handle_tracking_stop,
-                "admin_debug_seed_flip_demo": self._handle_admin_debug_seed_flip_demo,
-            }
+        await self._start_engine_newsfeed()
+        tasks = [asyncio.create_task(self.command_loop(self._command_handlers()), name="trader-command-loop")]
+        if self._engine_news_pump is not None:
+            tasks.append(asyncio.create_task(self._engine_news_pump.run_forever(), name="trader-engine-newswire-pump"))
+        try:
+            await self.wait_until_stopped()
+        finally:
+            if self._engine_news_pump is not None:
+                await self._engine_news_pump.stop()
+            if self._engine_news_consumer is not None:
+                await self._engine_news_consumer.stop()
+            for task in tasks:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    def _command_handlers(self):
+        return {
+            "engine_strategy_regime_refresh": self._handle_engine_strategy_regime_refresh,
+            "engine_bandit_run": self._handle_engine_bandit_run,
+            "engine_replay_comparison_run": self._handle_engine_replay_comparison_run,
+            "hip4_loop_run_once": self._handle_hip4_loop_run_once,
+            "hip4_scan_run": self._handle_hip4_scan_run,
+            "hip4_paper_execute": self._handle_hip4_paper_execute,
+            "hip4_reconcile_run": self._handle_hip4_reconcile_run,
+            "hip4_manual_ticket": self._handle_hip4_manual_ticket,
+            "autonomy_pause": self._handle_autonomy_pause,
+            "autonomy_resume": self._handle_autonomy_resume,
+            "autonomy_signal_approve": self._handle_autonomy_signal_approve,
+            "autonomy_signal_reject": self._handle_autonomy_signal_reject,
+            "autonomy_signal_expire": self._handle_autonomy_signal_expire,
+            "autonomy_equity_signal_approve": self._handle_autonomy_equity_signal_approve,
+            "autonomy_equity_signal_reject": self._handle_autonomy_equity_signal_reject,
+            "tracking_pause": self._handle_tracking_pause,
+            "tracking_resume": self._handle_tracking_resume,
+            "tracking_stop": self._handle_tracking_stop,
+            "admin_debug_seed_flip_demo": self._handle_admin_debug_seed_flip_demo,
+        }
+
+    async def _start_engine_newsfeed(self) -> None:
+        if self._engine_news_pump is not None or not (self.settings.engine_enabled and self.settings.engine_newsfeed_enabled):
+            return
+        self._engine_news_bus = InProcessNewswireBus()
+        risk_gateway = RiskGateway(settings=self.settings, repository=self.repository)
+        self._engine_service = InstitutionalEngineService(
+            settings=self.settings,
+            repository=self.repository,
+            hyperliquid=None,
+            risk_gateway=risk_gateway,
+            portfolio_service=None,
+            world_model_service=None,
+            liquidation_bridge=None,
+        )
+        self._engine_news_consumer = EngineNewsConsumer(settings=self.settings, bus=self._engine_news_bus, engine_service=self._engine_service)
+        await self._engine_news_consumer.start()
+        self._engine_news_pump = StoredNewswirePump(
+            consumer_name="trader:engine_newswire",
+            repository=self.repository,
+            callbacks=[self._engine_news_bus.publish],
+            poll_seconds=self.settings.consumer_poll_seconds,
+            batch_size=self.settings.consumer_batch_size,
+            bootstrap_from_latest=True,
+            bootstrap_metadata={"consumer": "engine_newsfeed", "owner_role": self.role.value},
         )
 
     async def _handle_engine_strategy_regime_refresh(self, command: dict[str, Any]) -> dict[str, Any]:
@@ -283,4 +336,23 @@ class TraderWorker(BaseWorker):
         return self._autonomy_service
 
     def heartbeat_metadata(self) -> dict[str, Any]:
-        return {"trader": {"command_count": self.command_count, "last_command_type": self.last_command_type, "execution_authority": "paper-only/settings-gated"}}
+        return {
+            "trader": {"command_count": self.command_count, "last_command_type": self.last_command_type, "execution_authority": "paper-only/settings-gated"},
+            "engine_newsfeed": self._engine_newsfeed_metadata(),
+        }
+
+    def _engine_newsfeed_metadata(self) -> dict[str, Any]:
+        enabled = bool(self.settings.engine_enabled and self.settings.engine_newsfeed_enabled)
+        return {
+            "enabled": enabled,
+            "consumer_name": "trader:engine_newswire",
+            "consumer": self._engine_news_consumer.status() if self._engine_news_consumer is not None else {},
+            "pump": self._engine_news_pump.status() if self._engine_news_pump is not None else {},
+            "bus": self._engine_news_bus.status() if self._engine_news_bus is not None else {},
+            "thresholds": {
+                "min_importance": self.settings.engine_news_min_importance,
+                "min_source_score": self.settings.engine_news_min_source_score,
+                "macro_min_importance": self.settings.engine_news_macro_min_importance,
+                "catalyst_threshold": self.settings.engine_news_catalyst_threshold,
+            },
+        }

@@ -61,6 +61,68 @@ def test_stored_newswire_pump_resumes_after_same_timestamp_batch_boundary(tmp_pa
     anyio.run(run)
 
 
+def test_stored_newswire_pump_bootstraps_from_latest_without_replaying_history(tmp_path: Path) -> None:
+    async def run() -> None:
+        repo = await _repo(tmp_path)
+        await _record(repo, "nw_a", 100)
+        await _record(repo, "nw_b", 200)
+        seen: list[str] = []
+
+        async def callback(event: NewswireEvent) -> None:
+            seen.append(event.event_id)
+
+        pump = StoredNewswirePump(consumer_name="trader:engine_newswire", repository=repo, callbacks=[callback], bootstrap_from_latest=True)
+        assert await pump.run_once() == 0
+        assert seen == []
+        offset = await repo.get_consumer_offset("trader:engine_newswire")
+        assert offset["last_event_id"] == "nw_b"
+        assert offset["last_event_ts_ms"] == 200
+        assert offset["metadata"]["bootstrap_from_latest"] is True
+        assert offset["metadata"]["reason"] == "avoid_historical_news_regime_pollution"
+
+        await _record(repo, "nw_c", 300)
+        assert await pump.run_once() == 1
+        assert seen == ["nw_c"]
+
+    anyio.run(run)
+
+
+def test_stored_newswire_pump_skips_invalid_rows_and_continues(tmp_path: Path) -> None:
+    async def run() -> None:
+        repo = await _repo(tmp_path)
+        await _record(repo, "nw_a", 100)
+        await repo.record_newswire_event(
+            {
+                "event_id": "nw_bad",
+                "source": "alpaca",
+                "provider": "benzinga",
+                "transport": "websocket",
+                "headline": "bad sentiment row",
+                "symbols": ["BTC"],
+                "asset_class": "crypto",
+                "event_type": "headline",
+                "received_at_ms": 200,
+                "published_at_ms": 200,
+                "sentiment": "positive",
+            }
+        )
+        await _record(repo, "nw_c", 300)
+        seen: list[str] = []
+
+        async def callback(event: NewswireEvent) -> None:
+            seen.append(event.event_id)
+
+        pump = StoredNewswirePump(consumer_name="world_model:newswire", repository=repo, callbacks=[callback], batch_size=10)
+        assert await pump.run_once() == 3
+        assert seen == ["nw_a", "nw_c"]
+        assert pump.error_count == 1
+        assert pump.invalid_rows_skipped == 1
+        offset = await repo.get_consumer_offset("world_model:newswire")
+        assert offset["last_event_id"] == "nw_c"
+
+    anyio.run(run)
+
+
 def test_stored_newswire_pump_does_not_advance_offset_past_failed_event(tmp_path: Path) -> None:
     async def run() -> None:
         repo = await _repo(tmp_path)

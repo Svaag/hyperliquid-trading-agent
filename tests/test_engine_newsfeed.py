@@ -104,6 +104,26 @@ def _regime(*, news_risk_tier: str, news_pressure: float) -> RegimeVector:
     )
 
 
+def test_engine_news_consumer_runs_without_process_owned_news_ingestion() -> None:
+    async def run():
+        settings = Settings(environment="test", newswire_enabled=False, engine_enabled=True, engine_newsfeed_enabled=True, engine_news_min_importance=35, engine_news_min_source_score=0.4, _env_file=None)
+        bus = InProcessNewswireBus()
+        engine = _EngineHarness()
+        consumer = EngineNewsConsumer(settings=settings, bus=bus, engine_service=engine)
+        await consumer.start()
+        await bus.publish(_news_event(importance_score=35.0))
+        await consumer.stop()
+        return consumer.status(), await engine.ledger.list(event_type="newswire"), {feature.feature_name: feature for feature in await engine.feature_store.latest(asset="BTC", limit=10)}
+
+    status, events, features = anyio.run(run)
+
+    assert status["recorded_events"] == 1
+    assert events[0].event_id == "evt_nw_test_btc"
+    assert "catalyst_pressure" in features
+    assert "event_risk_pressure" in features
+    assert "source_consensus_score" in features
+
+
 def test_newswire_consumer_records_engine_event_and_derives_news_features() -> None:
     async def run():
         settings = Settings(environment="test", newswire_enabled=True, engine_enabled=True, engine_newsfeed_enabled=True, engine_news_min_importance=35, engine_news_min_source_score=0.4)
@@ -127,6 +147,41 @@ def test_newswire_consumer_records_engine_event_and_derives_news_features() -> N
     assert features["catalyst_pressure"].scalar_value > 0
     assert features["event_risk_pressure"].scalar_value == features["catalyst_pressure"].scalar_value
     assert features["event_risk_pressure"].metadata["newswire_event_id"] == "nw_test_btc"
+
+
+def test_engine_news_consumer_filters_below_importance_threshold() -> None:
+    async def run():
+        settings = Settings(environment="test", newswire_enabled=False, engine_enabled=True, engine_newsfeed_enabled=True, engine_news_min_importance=35, engine_news_min_source_score=0.4, _env_file=None)
+        bus = InProcessNewswireBus()
+        engine = _EngineHarness()
+        consumer = EngineNewsConsumer(settings=settings, bus=bus, engine_service=engine)
+        await consumer.start()
+        await bus.publish(_news_event(event_id="nw_low", importance_score=34.9))
+        await consumer.stop()
+        return consumer.status(), await engine.ledger.list(event_type="newswire")
+
+    status, events = anyio.run(run)
+
+    assert status["received_events"] == 0
+    assert events == []
+
+
+def test_engine_news_consumer_records_event_but_skips_features_for_low_source_score() -> None:
+    async def run():
+        settings = Settings(environment="test", newswire_enabled=False, engine_enabled=True, engine_newsfeed_enabled=True, engine_news_min_source_score=0.4, _env_file=None)
+        bus = InProcessNewswireBus()
+        engine = _EngineHarness()
+        consumer = EngineNewsConsumer(settings=settings, bus=bus, engine_service=engine)
+        await consumer.start()
+        await bus.publish(_news_event(event_id="nw_low_source", importance_score=90.0, source_score=0.2))
+        await consumer.stop()
+        return consumer.status(), await engine.ledger.list(event_type="newswire"), await engine.feature_store.latest(asset="BTC", limit=10)
+
+    status, events, features = anyio.run(run)
+
+    assert len(events) == 1
+    assert status["skip_reasons"]["source_score_below_minimum"] == 1
+    assert features == []
 
 
 def test_macro_news_proxies_to_all_core_symbols_by_default() -> None:

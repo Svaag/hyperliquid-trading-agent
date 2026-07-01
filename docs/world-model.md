@@ -67,7 +67,8 @@ docker compose up newswire world-model
 ```
 
 - `SERVICE_ROLE=newswire` owns external news provider connections and persists normalized `newswire_events`.
-- `SERVICE_ROLE=world_model` consumes persisted events through `consumer_offsets`, updates world-model tables/snapshots, and owns prediction-market streams.
+- `SERVICE_ROLE=world_model` consumes persisted events through `world_model:newswire`, updates world-model tables/snapshots, and owns prediction-market streams.
+- `SERVICE_ROLE=trader` consumes the same persisted table through `trader:engine_newswire` to derive Institutional Engine news evidence/features. It keeps `NEWSWIRE_ENABLED=false` and never opens news provider connections.
 - The deprecated `world-model-live` profile is a no-port compatibility alias and must not expose a dashboard.
 
 For a blank local instance, `POST /world-model/dev/seed` creates a `world_model` worker command outside tests. The endpoint is disabled unless `WORLD_MODEL_DEV_SEED_ENABLED=true` and the environment is local/dev/test.
@@ -94,10 +95,11 @@ Adapters retain raw source payloads in metadata for audit/calibration and mark e
 
 ## Integration
 
-- Newswire events feed the world model through the agent news consumer.
+- Newswire events feed the world model through the persisted `world_model:newswire` consumer.
 - HIP-4 outcome books become prediction-market probability signals.
 - HIP-4 edge candidates become advisory evidence only.
 - Completed signal and alpha-event evaluations reinforce source credibility and episodic memory.
 - The institutional engine records world-model features such as `narrative_pressure`, `belief_conflict_score`, `source_consensus_score`, `prediction_implied_probability`, and `belief_salience`.
+- The institutional engine also records direct Newswire features from `trader:engine_newswire`: `catalyst_pressure`, `event_risk_pressure`, and `source_consensus_score`. These are gated by `ENGINE_NEWS_MIN_IMPORTANCE` and source-score settings and remain advisory/paper-only.
 - High-stakes roles receive a compact wiki block labeled advisory-only.
 - The engine feature boundary rejects world-model snapshots carrying execution authority, exchange actions, order intents, risk mutations, or config changes.

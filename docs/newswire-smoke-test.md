@@ -11,6 +11,8 @@ Run after enabling `ALPACA_NEWS_ENABLED=true` with valid API keys.
 - [ ] `DISCORD_BOT_TOKEN` is set for the send-only publisher
 - [ ] `NEWSWIRE_NEWS_CHANNEL_ID` is set to a Discord channel ID (for the curated news feed)
 - [ ] `ALPACA_NEWS_SYMBOLS=*` (or your watchlist like `AAPL,NVDA,MSFT,TSLA`)
+- [ ] `ENGINE_NEWS_MIN_IMPORTANCE` is set to the desired Institutional Engine gate (default `35`)
+- [ ] `NEWSWIRE_NEWS_MIN_IMPORTANCE` is set to the desired Discord #news gate (local runtime may use `25` for a livelier feed)
 
 ## Start-up Checks
 
@@ -52,6 +54,16 @@ docker compose --profile discord-publisher up -d discord-publisher
 - [ ] Each message/embed footer includes "News feed only — no trade was placed."
 - [ ] Halt-state events (`⛔ Halt state`) show the halt warning when applicable
 
+## Institutional Engine Delivery
+
+The `trader` worker consumes persisted Newswire rows through `trader:engine_newswire`; it does not own Alpaca/RSS/X/TradingEconomics connections.
+
+- [ ] `curl http://127.0.0.1:8081/runtime/offsets` includes `trader:engine_newswire`
+- [ ] `curl http://127.0.0.1:8081/runtime/heartbeats?service_role=trader` shows `metadata.engine_newsfeed.pump.running=true`
+- [ ] Fresh events with `importance_score >= ENGINE_NEWS_MIN_IMPORTANCE` and symbols in the engine core universe (`BTC,ETH,HYPE` by default) appear in `/engine/events?event_type=newswire`
+- [ ] Macro events without symbols require `importance_score >= ENGINE_NEWS_MACRO_MIN_IMPORTANCE` to proxy into core symbols
+- [ ] Engine news features are advisory only: no Discord news post or engine news event places a trade
+
 ## WebSocket Stream
 
 - [ ] Connect: `wscat -H "Authorization: Bearer <AGENT_API_BEARER_TOKEN>" wss://<host>/newswire/stream`
@@ -64,6 +76,11 @@ docker compose --profile discord-publisher up -d discord-publisher
 - [ ] After reconnect, adapter should re-authenticate and re-subscribe
 - [ ] `curl http://127.0.0.1:8081/newswire/status` reports degraded/latest state but the API remains healthy
 - [ ] `curl http://127.0.0.1:8081/newswire/sources` — `"alpaca"` shows `"transport":"websocket"` with correct source score
+
+## Threshold Reference
+
+- Discord #news: `NEWSWIRE_NEWS_MIN_IMPORTANCE`; breaking/immediate posts use `NEWSWIRE_BREAKING_MIN_IMPORTANCE`, otherwise qualifying items roll into `NEWSWIRE_DIGEST_INTERVAL_SECONDS` digests.
+- Institutional Engine: `ENGINE_NEWS_MIN_IMPORTANCE` for event admission, `ENGINE_NEWS_MIN_SOURCE_SCORE` for feature derivation, `ENGINE_NEWS_MACRO_MIN_IMPORTANCE` for macro proxying, and `ENGINE_NEWS_CATALYST_THRESHOLD` for regime `news_state=catalyst`.
 
 ## End-to-End with Autonomy
 

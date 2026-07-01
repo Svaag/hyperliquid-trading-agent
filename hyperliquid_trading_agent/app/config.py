@@ -1025,8 +1025,8 @@ class Settings(BaseSettings):
             warnings.append("X_NEWSWIRE_ENABLED requires X_BEARER_TOKEN")
         if self.newswire_breaking_min_importance < self.newswire_news_min_importance:
             warnings.append("NEWSWIRE_BREAKING_MIN_IMPORTANCE should be >= NEWSWIRE_NEWS_MIN_IMPORTANCE")
-        if self.engine_newsfeed_enabled and not self.newswire_enabled:
-            warnings.append("ENGINE_NEWSFEED_ENABLED requires NEWSWIRE_ENABLED=true")
+        if self.engine_news_min_importance < 0 or self.engine_news_min_importance > 100:
+            warnings.append("ENGINE_NEWS_MIN_IMPORTANCE must be between 0 and 100")
         if self.engine_news_min_source_score < 0 or self.engine_news_min_source_score > 1:
             warnings.append("ENGINE_NEWS_MIN_SOURCE_SCORE must be between 0 and 1")
         if self.engine_news_catalyst_threshold < 0 or self.engine_news_catalyst_threshold > 1:

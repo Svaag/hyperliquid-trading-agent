@@ -11,7 +11,7 @@ This deployment has one public FastAPI process and dedicated non-web workers for
 | `api` | HTTP dashboard/API, command enqueueing, persisted-state reads | news providers, prediction streams, Discord sessions, trading loops |
 | `newswire` | RSS/Alpaca/TradingEconomics/X ingestion into `newswire_events` | dashboard port, Discord sessions, trading loops |
 | `world_model` | persisted news consumption, world-model updates, prediction-market streams | dashboard port, external news providers |
-| `trader` | engine/autonomy/HIP4/tracking loops under existing safety flags | dashboard port, news providers, Discord sessions |
+| `trader` | engine/autonomy/HIP4/tracking loops under existing safety flags; persisted Newswire consumption for engine features | dashboard port, news providers, Discord sessions |
 | `agent` | LLM command execution for `/ask` and `/trade/proposals` | dashboard port, ingestion loops, order execution |
 | `discord_publisher` | send-only publishing from persisted Newswire events | dashboard port, news providers, trading loops |
 | `discord_bot` | optional command/control Discord session | dashboard port, ingestion/trading loops |
@@ -72,6 +72,16 @@ curl http://127.0.0.1:${HOST_PORT:-8081}/runtime/offsets
 open http://127.0.0.1:${HOST_PORT:-8081}/runtime/dashboard
 ```
 
+## Newswire consumers
+
+Persisted Newswire rows fan out through independent `consumer_offsets` entries:
+
+- `world_model:newswire` updates world-model events, beliefs, narratives, and memories.
+- `discord_publisher:newswire` publishes curated Discord news using `NEWSWIRE_NEWS_MIN_IMPORTANCE` and digest settings.
+- `trader:engine_newswire` feeds the Institutional Engine evidence spine using `ENGINE_NEWS_MIN_IMPORTANCE` without enabling news provider connections in the trader process.
+
+`SERVICE_ROLE=trader` must keep `NEWSWIRE_ENABLED=false`; the trader consumes stored rows only. On first start, `trader:engine_newswire` bootstraps its offset to the latest Newswire row so historical articles do not pollute current regime features. Use a dedicated replay/backfill tool if historical engine news features are desired.
+
 Paper-signoff preflight remains read-only and never allows live execution:
 
 ```bash
@@ -91,7 +101,7 @@ Remove the compatibility aliases after a clean post-soak window with all of the 
 
 1. At least one full local soak has no stale required workers, failed commands, or duplicate host app ports.
 2. `/runtime/command-health` reports no missing default roles.
-3. Newswire -> World Model offsets advance and resume after restarts without skipped events.
+3. Newswire -> World Model and Newswire -> Engine offsets advance and resume after restarts without skipped valid events.
 4. Operators have switched to service-role names (`api`, `world-model`, `trader`, etc.) in runbooks and automation.
 5. No deployment scripts reference `bot`, `world-model-live`, `8091`, or `WORLD_MODEL_LIVE_HOST_PORT`.
 
