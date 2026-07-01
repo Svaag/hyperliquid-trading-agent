@@ -62,7 +62,16 @@ class AgentWorker(BaseWorker):
         if self.runner is None:
             raise RuntimeError("agent_runner_unavailable")
         payload = command.get("payload") or {}
-        response = await self.runner.answer(str(payload.get("prompt") or ""), context=AgentContext(source="api-command"))
+        context_payload = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        agent_context = AgentContext(
+            source=str(context_payload.get("source") or "api-command"),
+            discord_guild_id=_optional_str(context_payload.get("discord_guild_id")),
+            discord_channel_id=_optional_str(context_payload.get("discord_channel_id")),
+            discord_thread_id=_optional_str(context_payload.get("discord_thread_id")),
+            discord_user_id=_optional_str(context_payload.get("discord_user_id")),
+            conversation_context=_optional_str(context_payload.get("conversation_context")),
+        )
+        response = await self.runner.answer(str(payload.get("prompt") or ""), context=agent_context)
         return {
             "content": response.content,
             "refused": response.refused,
@@ -86,3 +95,10 @@ class AgentWorker(BaseWorker):
 
     def heartbeat_metadata(self) -> dict[str, Any]:
         return {"agent": {"runner_configured": self.runner is not None, "high_stakes_configured": self.graph is not None}}
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text or None
