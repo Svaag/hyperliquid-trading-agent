@@ -50,27 +50,27 @@ GET /world-model/streams/status
 
 These endpoints are protected by the existing agent API token outside dev/test/local.
 
-## Dashboard-Only Runtime
+## Service-Role Runtime
 
-Use the Compose dashboard profile for local supervision:
-
-```bash
-docker compose --profile dashboard up dashboard
-```
-
-The profile applies migrations, connects to Compose Postgres, and starts only the FastAPI dashboard/API. It does not start Discord, Alpaca/TradFi, HIP-4, autonomy, engine loops, position tracking, newswire workers, or Hyperliquid WebSocket streaming.
-
-For a blank local instance, the dashboard can seed advisory-only demo data through `POST /world-model/dev/seed`. The endpoint is disabled unless `WORLD_MODEL_DEV_SEED_ENABLED=true` and the process is running in local/test/dev or `dashboard_only` mode.
-
-## Stream-First Runtime
-
-Use the live World Model profile when the dashboard should ingest real-time world state:
+Use the single public API for local supervision:
 
 ```bash
-docker compose --profile world-model-live up world-model-live
+docker compose up api
 ```
 
-This starts Newswire, World Model streams, FastAPI, and Postgres only. It keeps Discord, autonomy, engine loops, HIP-4 execution, position tracking, and trading disabled. The dashboard stream panel shows connection state, last message time, reconnects, subscription count, gap repairs, and the latest normalized signal/event.
+The `api` service applies no side-effect workers. It exposes dashboards/API on `127.0.0.1:${HOST_PORT:-8081}` and reads persisted world-model state from Postgres.
+
+Real-time world state is owned by workers with no public ports:
+
+```bash
+docker compose up newswire world-model
+```
+
+- `SERVICE_ROLE=newswire` owns external news provider connections and persists normalized `newswire_events`.
+- `SERVICE_ROLE=world_model` consumes persisted events through `consumer_offsets`, updates world-model tables/snapshots, and owns prediction-market streams.
+- The deprecated `world-model-live` profile is a no-port compatibility alias and must not expose a dashboard.
+
+For a blank local instance, `POST /world-model/dev/seed` creates a `world_model` worker command outside tests. The endpoint is disabled unless `WORLD_MODEL_DEV_SEED_ENABLED=true` and the environment is local/dev/test.
 
 ## Supervision
 
@@ -83,7 +83,7 @@ This starts Newswire, World Model streams, FastAPI, and Postgres only. It keeps 
 
 The live architecture is stream-first, with REST retained for discovery, manual repair, and backfill:
 
-- `newswire`: streams Alpaca News and Trading Economics WebSocket events into the World Model through the existing bus.
+- `newswire`: persists Alpaca/RSS/Trading Economics/X events to `newswire_events`; World Model consumes them from Postgres, not an in-process API bus.
 - `polymarket_ws`: subscribes to the public Polymarket market WebSocket and normalizes market updates into stable prediction signals.
 - `polymarket`: REST discovery/backfill for active markets.
 - `kalshi`: REST normalization remains available; WebSocket streaming is deferred.

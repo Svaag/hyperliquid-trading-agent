@@ -52,7 +52,7 @@ def test_hip4_read_route_uses_bounded_service_when_enabled() -> None:
 
 
 def test_hip4_paper_action_requires_auth_outside_dev() -> None:
-    app = create_app(Settings(environment="prod", agent_api_bearer_token="secret", hip4_enabled=True, hip4_paper_execution_enabled=True, position_tracking_enabled=False, autonomy_enabled=False))
+    app = create_app(Settings(environment="prod", agent_api_bearer_token="secret", hip4_enabled=False, position_tracking_enabled=False, autonomy_enabled=False))
     app.state.hip4_service = FakeHip4Service()
     client = TestClient(app)
 

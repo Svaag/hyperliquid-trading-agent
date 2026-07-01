@@ -8,15 +8,11 @@ from pydantic import BaseModel, Field
 
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.engine.alpha_graph import build_strategy_regime_alpha_graph
-from hyperliquid_trading_agent.app.engine.bandit import OfflineContextualBanditReporter
-from hyperliquid_trading_agent.app.engine.event_ledger import now_ms
 from hyperliquid_trading_agent.app.engine.readiness import build_paper_readiness_scorecard
 from hyperliquid_trading_agent.app.engine.replay_compare import (
-    EngineReplayComparisonService,
     latest_engine_replay_comparison,
     list_engine_replay_comparisons,
 )
-from hyperliquid_trading_agent.app.engine.strategy_performance import refresh_strategy_regime_performance
 from hyperliquid_trading_agent.app.engine.validation_report import (
     build_engine_validation_report,
     render_engine_validation_dashboard,
@@ -39,6 +35,26 @@ class EngineReplayComparisonRequest(BaseModel):
     baseline_config: dict[str, Any] = Field(default_factory=dict)
     candidate_config: dict[str, Any] = Field(default_factory=dict)
     variant_id: str | None = None
+
+
+async def _enqueue_command(repo: Any, *, target_role: str, command_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if callable(getattr(repo, "enqueue_worker_command", None)):
+        return await repo.enqueue_worker_command(target_role=target_role, command_type=command_type, payload=payload, requested_by="api")
+    return {"command_id": f"unpersisted_{command_type}", "target_role": target_role, "command_type": command_type, "status": "accepted_unpersisted"}
+
+
+def _accepted_command(command: dict[str, Any]) -> dict[str, Any]:
+    command_id = str(command.get("command_id") or "")
+    return {
+        "accepted": True,
+        "command_id": command_id,
+        "status_url": f"/commands/{command_id}",
+        "target_role": command.get("target_role"),
+        "command_type": command.get("command_type"),
+        "status": command.get("status"),
+        "report_only": True,
+        "auto_apply_allowed": False,
+    }
 
 
 def _strategy_catalog_from_specs(specs: list[dict[str, Any]], *, mode: str) -> dict[str, Any]:
@@ -253,10 +269,8 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
     @app.post("/engine/strategy-regime-performance/refresh")
     async def engine_strategy_regime_performance_refresh(request: EngineStrategyRegimeRefreshRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _auth(authorization)
-        end_ms = now_ms()
-        start_ms = end_ms - request.window_hours * 3_600_000
-        rows = await refresh_strategy_regime_performance(_repo(), window_start_ms=start_ms, window_end_ms=end_ms)
-        return {"status": "completed", "report_only": True, "window_hours": request.window_hours, "created_at_ms": end_ms, "refreshed_count": len(rows), "rows": rows}
+        command = await _enqueue_command(_repo(), target_role="trader", command_type="engine_strategy_regime_refresh", payload=request.model_dump(mode="json"))
+        return _accepted_command(command)
 
     @app.get("/engine/candidate-trade-packets")
     async def engine_candidate_trade_packets(candidate_id: str | None = None, strategy_id: str | None = None, limit: int = 100, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
@@ -306,10 +320,8 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
     @app.post("/engine/bandit-recommendations/run")
     async def engine_bandit_recommendations_run(request: EngineBanditRecommendationRunRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _auth(authorization)
-        end_ms = now_ms()
-        start_ms = end_ms - request.window_hours * 3_600_000
-        result = await OfflineContextualBanditReporter(_repo()).run(window_start_ms=start_ms, window_end_ms=end_ms)
-        return {"status": "completed", "window_hours": request.window_hours, "created_at_ms": end_ms, **result}
+        command = await _enqueue_command(_repo(), target_role="trader", command_type="engine_bandit_run", payload=request.model_dump(mode="json"))
+        return _accepted_command(command)
 
     @app.get("/engine/evidence-packs/{evidence_pack_id}")
     async def engine_evidence_pack(evidence_pack_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -386,17 +398,8 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
     @app.post("/engine/replay-comparisons/run")
     async def engine_replay_comparison_run(request: EngineReplayComparisonRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _auth(authorization)
-        end_ms = int(__import__("time").time() * 1000)
-        start_ms = end_ms - request.window_hours * 60 * 60 * 1000
-        service = EngineReplayComparisonService(repository=_repo(), settings=settings)
-        return await service.compare_variant(
-            baseline_config=request.baseline_config,
-            candidate_config=request.candidate_config,
-            window_start_ms=start_ms,
-            window_end_ms=end_ms,
-            universe=request.universe or settings.autonomy_core_symbols,
-            variant_id=request.variant_id,
-        )
+        command = await _enqueue_command(_repo(), target_role="trader", command_type="engine_replay_comparison_run", payload=request.model_dump(mode="json"))
+        return _accepted_command(command)
 
     @app.get("/engine/dashboard", response_class=HTMLResponse)
     async def engine_dashboard(limit: int = 500, authorization: str | None = Header(default=None)) -> HTMLResponse:

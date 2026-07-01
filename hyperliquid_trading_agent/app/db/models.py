@@ -715,6 +715,59 @@ class NewswirePublishLedgerRow(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class ServiceHeartbeatRecord(TimestampMixin, Base):
+    __tablename__ = "service_heartbeats"
+    __table_args__ = (
+        Index("ix_service_heartbeats_role_updated", "service_role", "updated_at_ms"),
+        Index("ix_service_heartbeats_status_updated", "status", "updated_at_ms"),
+    )
+
+    service_role: Mapped[str] = mapped_column(String(64), primary_key=True)
+    instance_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    hostname: Mapped[str | None] = mapped_column(String(255))
+    pid: Mapped[int | None] = mapped_column(Integer)
+    version: Mapped[str | None] = mapped_column(String(64))
+    started_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="starting")
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class ConsumerOffsetRecord(TimestampMixin, Base):
+    __tablename__ = "consumer_offsets"
+
+    consumer_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    source_table: Mapped[str] = mapped_column(String(128), nullable=False)
+    last_event_id: Mapped[str | None] = mapped_column(String(128))
+    last_event_ts_ms: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WorkerCommandRecord(TimestampMixin, Base):
+    __tablename__ = "worker_commands"
+    __table_args__ = (
+        Index("ix_worker_commands_role_status_requested", "target_role", "status", "requested_at_ms"),
+        Index("uq_worker_commands_idempotency_key", "idempotency_key", unique=True),
+    )
+
+    command_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    target_role: Mapped[str] = mapped_column(String(64), nullable=False)
+    command_type: Mapped[str] = mapped_column(String(96), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    idempotency_key: Mapped[str | None] = mapped_column(String(255))
+    requested_by: Mapped[str | None] = mapped_column(String(128))
+    requested_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    claimed_by: Mapped[str | None] = mapped_column(String(128))
+    claimed_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    completed_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class NormalizedEventRecord(TimestampMixin, Base):
     __tablename__ = "normalized_events"
     __table_args__ = (

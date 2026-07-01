@@ -39,6 +39,18 @@ class SeedRequest(BaseModel):
     actor_id: str | None = "dashboard_seed"
 
 
+def _accepted_command(command: dict[str, Any]) -> dict[str, Any]:
+    command_id = str(command.get("command_id") or "")
+    return {
+        "accepted": True,
+        "command_id": command_id,
+        "status_url": f"/commands/{command_id}",
+        "target_role": command.get("target_role"),
+        "command_type": command.get("command_type"),
+        "status": command.get("status"),
+    }
+
+
 def register_world_model_routes(app: FastAPI, settings: Settings, require_auth: RequireAuth) -> None:
     def _auth(authorization: str | None) -> None:
         require_auth(settings, authorization)
@@ -95,11 +107,12 @@ def register_world_model_routes(app: FastAPI, settings: Settings, require_auth: 
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _auth(authorization)
+        snapshots = await _service().list_snapshots(limit=1, symbol=symbol, topic=topic)
+        if snapshots:
+            return snapshots[0]
         symbols = [symbol.upper()] if symbol else None
         topics = [topic.lower()] if topic else None
-        snapshot = _service().snapshot(symbols=symbols, topics=topics)
-        await _service().persist_snapshot(snapshot)
-        return snapshot.model_dump(mode="json")
+        return _service().snapshot(symbols=symbols, topics=topics).model_dump(mode="json")
 
     @app.get("/world-model/events")
     async def world_model_events(
@@ -274,19 +287,24 @@ def register_world_model_routes(app: FastAPI, settings: Settings, require_auth: 
     @app.post("/world-model/adapters/poll")
     async def world_model_adapters_poll(force: bool = False, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _auth(authorization)
-        return await _adapter_service().poll(force=force)
+        command = await app.state.repository.enqueue_worker_command(target_role="world_model", command_type="world_model_adapter_poll", payload={"force": force}, requested_by="api")
+        return _accepted_command(command)
 
     @app.post("/world-model/adapters/{adapter_name}/poll")
     async def world_model_adapter_poll(adapter_name: str, force: bool = False, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _auth(authorization)
-        return await _adapter_service().poll(adapter_name, force=force)
+        command = await app.state.repository.enqueue_worker_command(target_role="world_model", command_type="world_model_adapter_poll", payload={"adapter_name": adapter_name, "force": force}, requested_by="api")
+        return _accepted_command(command)
 
     @app.post("/world-model/dev/seed")
     async def world_model_dev_seed(request: SeedRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _auth(authorization)
         if not _seed_allowed(settings):
             raise HTTPException(status_code=403, detail="world model seed endpoint is disabled")
-        return await _seed_world_model(_service(), request, settings)
+        if settings.environment.lower() in {"test"}:
+            return await _seed_world_model(_service(), request, settings)
+        command = await app.state.repository.enqueue_worker_command(target_role="world_model", command_type="world_model_dev_seed", payload=request.model_dump(mode="json"), requested_by="api")
+        return _accepted_command(command)
 
 
 async def _dashboard_data(

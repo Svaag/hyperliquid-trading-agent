@@ -45,7 +45,19 @@ def register_orchestration_routes(app: FastAPI, settings: Settings, require_auth
     @app.post("/orchestration/wave/run-once")
     async def wave_orchestration_run_once(request: WaveSupervisorRunRequest, authorization: str | None = Header(default=None)) -> dict:
         _auth(authorization)
-        supervisor = _supervisor()
-        perform_maintenance = supervisor.settings.orchestration_wave_supervisor_maintenance_enabled if request.perform_maintenance is None else request.perform_maintenance
-        escalate = supervisor.settings.orchestration_wave_supervisor_escalation_enabled if request.escalate is None else request.escalate
-        return await supervisor.run_once(WaveSupervisorRunOptions(perform_maintenance=perform_maintenance, escalate=escalate))
+        repo = getattr(app.state, "repository", None)
+        if repo is None or not callable(getattr(repo, "enqueue_worker_command", None)):
+            return await _supervisor().run_once(
+                WaveSupervisorRunOptions(
+                    perform_maintenance=bool(request.perform_maintenance),
+                    escalate=bool(request.escalate),
+                )
+            )
+        command = await repo.enqueue_worker_command(
+            target_role="scheduler",
+            command_type="orchestration_wave_run_once",
+            payload=request.model_dump(mode="json"),
+            requested_by="api",
+        )
+        command_id = str(command.get("command_id") or "")
+        return {"accepted": True, "command_id": command_id, "status_url": f"/commands/{command_id}", "target_role": "scheduler", "command_type": "orchestration_wave_run_once", "status": command.get("status")}

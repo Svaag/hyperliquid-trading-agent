@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
+from uuid import uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -27,6 +28,7 @@ from hyperliquid_trading_agent.app.db.models import (
     CandidateOutcomeAttributionRecord,
     CandidateTradePacketRecord,
     ConfigVersionRecord,
+    ConsumerOffsetRecord,
     ConversationMessage,
     ConversationThread,
     CouncilReviewRecord,
@@ -102,6 +104,7 @@ from hyperliquid_trading_agent.app.db.models import (
     RiskGatewayDecisionRecord,
     RoleLessonRecord,
     RollbackPlanRecord,
+    ServiceHeartbeatRecord,
     ShadowComparisonRecord,
     ShadowRoleLessonRecord,
     SignalEvaluationMarkRecord,
@@ -117,6 +120,7 @@ from hyperliquid_trading_agent.app.db.models import (
     TradeSignalRecord,
     TuningProposalRecord,
     WeeklyReportRecord,
+    WorkerCommandRecord,
     WorldEventRecord,
     WorldMemoryAtomRecord,
     WorldModelAnnotationRecord,
@@ -139,6 +143,236 @@ class Repository:
     @property
     def enabled(self) -> bool:
         return self.sessionmaker is not None
+
+    async def upsert_service_heartbeat(
+        self,
+        *,
+        service_role: str,
+        instance_id: str,
+        status: str,
+        updated_at_ms: int | None = None,
+        started_at_ms: int | None = None,
+        hostname: str | None = None,
+        pid: int | None = None,
+        version: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        now_ms = updated_at_ms or _runtime_now_ms()
+        async with self.sessionmaker() as session:
+            item = await session.get(ServiceHeartbeatRecord, {"service_role": str(service_role), "instance_id": str(instance_id)})
+            if item is None:
+                item = ServiceHeartbeatRecord(
+                    service_role=str(service_role),
+                    instance_id=str(instance_id),
+                    started_at_ms=started_at_ms or now_ms,
+                    updated_at_ms=now_ms,
+                    status=str(status),
+                )
+                session.add(item)
+            item.status = str(status)
+            item.updated_at_ms = now_ms
+            if started_at_ms is not None:
+                item.started_at_ms = int(started_at_ms)
+            if hostname is not None:
+                item.hostname = hostname
+            if pid is not None:
+                item.pid = int(pid)
+            if version is not None:
+                item.version = version
+            if metadata is not None:
+                item.metadata_json = redact_secrets(metadata)
+            await session.commit()
+            return item.instance_id
+
+    async def mark_service_stopping(self, service_role: str, instance_id: str, *, metadata: dict[str, Any] | None = None) -> None:
+        await self.upsert_service_heartbeat(service_role=service_role, instance_id=instance_id, status="stopping", metadata=metadata)
+
+    async def list_service_heartbeats(self, *, service_role: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(ServiceHeartbeatRecord).order_by(ServiceHeartbeatRecord.updated_at_ms.desc()).limit(limit)
+            if service_role:
+                stmt = stmt.where(ServiceHeartbeatRecord.service_role == str(service_role))
+            result = await session.execute(stmt)
+            return [_service_heartbeat_to_dict(item) for item in result.scalars().all()]
+
+    async def get_consumer_offset(self, consumer_name: str, *, source_table: str = "newswire_events") -> dict[str, Any]:
+        if self.sessionmaker is None:
+            return {"consumer_name": consumer_name, "source_table": source_table, "last_event_id": None, "last_event_ts_ms": 0, "updated_at_ms": 0, "metadata": {}}
+        async with self.sessionmaker() as session:
+            item = await session.get(ConsumerOffsetRecord, str(consumer_name))
+            if item is None:
+                return {"consumer_name": consumer_name, "source_table": source_table, "last_event_id": None, "last_event_ts_ms": 0, "updated_at_ms": 0, "metadata": {}}
+            return _consumer_offset_to_dict(item)
+
+    async def update_consumer_offset(
+        self,
+        consumer_name: str,
+        *,
+        source_table: str = "newswire_events",
+        last_event_id: str | None,
+        last_event_ts_ms: int,
+        metadata: dict[str, Any] | None = None,
+        updated_at_ms: int | None = None,
+    ) -> None:
+        if self.sessionmaker is None:
+            return
+        now_ms = updated_at_ms or _runtime_now_ms()
+        async with self.sessionmaker() as session:
+            item = await session.get(ConsumerOffsetRecord, str(consumer_name))
+            if item is None:
+                item = ConsumerOffsetRecord(consumer_name=str(consumer_name), source_table=str(source_table), last_event_ts_ms=0, updated_at_ms=now_ms)
+                session.add(item)
+            item.source_table = str(source_table)
+            item.last_event_id = last_event_id
+            item.last_event_ts_ms = int(last_event_ts_ms)
+            item.updated_at_ms = now_ms
+            if metadata is not None:
+                item.metadata_json = redact_secrets(metadata)
+            await session.commit()
+
+    async def list_newswire_events_after(self, *, last_event_ts_ms: int = 0, last_event_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(NewswireEventRow).order_by(NewswireEventRow.received_at_ms.asc(), NewswireEventRow.event_id.asc()).limit(max(1, limit))
+            if last_event_id:
+                stmt = stmt.where(or_(NewswireEventRow.received_at_ms > int(last_event_ts_ms), and_(NewswireEventRow.received_at_ms == int(last_event_ts_ms), NewswireEventRow.event_id > str(last_event_id))))
+            else:
+                stmt = stmt.where(NewswireEventRow.received_at_ms > int(last_event_ts_ms))
+            result = await session.execute(stmt)
+            return [_newswire_event_to_dict(item) for item in result.scalars().all()]
+
+    async def enqueue_worker_command(
+        self,
+        *,
+        target_role: str,
+        command_type: str,
+        payload: dict[str, Any] | None = None,
+        requested_by: str | None = None,
+        idempotency_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        requested_at_ms: int | None = None,
+    ) -> dict[str, Any]:
+        command_id = "cmd_" + uuid4().hex
+        now_ms = requested_at_ms or _runtime_now_ms()
+        if self.sessionmaker is None:
+            return {
+                "command_id": command_id,
+                "target_role": str(target_role),
+                "command_type": str(command_type),
+                "status": "accepted_unpersisted",
+                "idempotency_key": idempotency_key,
+                "requested_by": requested_by,
+                "requested_at_ms": now_ms,
+                "payload": redact_secrets(payload or {}),
+                "metadata": redact_secrets(metadata or {}),
+            }
+        async with self.sessionmaker() as session:
+            if idempotency_key:
+                existing_result = await session.execute(select(WorkerCommandRecord).where(WorkerCommandRecord.idempotency_key == str(idempotency_key)).limit(1))
+                existing = existing_result.scalars().first()
+                if existing is not None:
+                    return _worker_command_to_dict(existing)
+            item = WorkerCommandRecord(
+                command_id=command_id,
+                target_role=str(target_role),
+                command_type=str(command_type),
+                status="pending",
+                idempotency_key=idempotency_key,
+                requested_by=requested_by,
+                requested_at_ms=now_ms,
+                payload_json=redact_secrets(payload or {}),
+                metadata_json=redact_secrets(metadata or {}),
+            )
+            session.add(item)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                if idempotency_key:
+                    existing_result = await session.execute(select(WorkerCommandRecord).where(WorkerCommandRecord.idempotency_key == str(idempotency_key)).limit(1))
+                    existing = existing_result.scalars().first()
+                    if existing is not None:
+                        return _worker_command_to_dict(existing)
+                raise
+            return _worker_command_to_dict(item)
+
+    async def get_worker_command(self, command_id: str) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(WorkerCommandRecord, str(command_id))
+            return _worker_command_to_dict(item) if item is not None else None
+
+    async def list_worker_commands(self, *, target_role: str | None = None, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(WorkerCommandRecord).order_by(WorkerCommandRecord.requested_at_ms.desc()).limit(limit)
+            if target_role:
+                stmt = stmt.where(WorkerCommandRecord.target_role == str(target_role))
+            if status:
+                stmt = stmt.where(WorkerCommandRecord.status == str(status))
+            result = await session.execute(stmt)
+            return [_worker_command_to_dict(item) for item in result.scalars().all()]
+
+    async def claim_next_worker_command(self, *, target_role: str, instance_id: str, stale_after_ms: int) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        now_ms = _runtime_now_ms()
+        stale_before = now_ms - int(stale_after_ms)
+        async with self.sessionmaker() as session:
+            stmt = (
+                select(WorkerCommandRecord)
+                .where(
+                    WorkerCommandRecord.target_role == str(target_role),
+                    or_(WorkerCommandRecord.status == "pending", and_(WorkerCommandRecord.status == "claimed", WorkerCommandRecord.claimed_at_ms < stale_before)),
+                )
+                .order_by(WorkerCommandRecord.requested_at_ms.asc())
+                .limit(1)
+                .with_for_update(skip_locked=True)
+            )
+            result = await session.execute(stmt)
+            item = result.scalars().first()
+            if item is None:
+                return None
+            item.status = "claimed"
+            item.claimed_by = str(instance_id)
+            item.claimed_at_ms = now_ms
+            item.attempt_count = int(item.attempt_count or 0) + 1
+            item.last_error = None
+            await session.commit()
+            return _worker_command_to_dict(item)
+
+    async def complete_worker_command(self, command_id: str, *, result: dict[str, Any] | None = None, completed_at_ms: int | None = None) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            item = await session.get(WorkerCommandRecord, str(command_id))
+            if item is None:
+                return
+            item.status = "completed"
+            item.completed_at_ms = completed_at_ms or _runtime_now_ms()
+            item.result_json = redact_secrets(result or {})
+            item.last_error = None
+            await session.commit()
+
+    async def fail_worker_command(self, command_id: str, *, error: str, result: dict[str, Any] | None = None, completed_at_ms: int | None = None) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            item = await session.get(WorkerCommandRecord, str(command_id))
+            if item is None:
+                return
+            item.status = "failed"
+            item.completed_at_ms = completed_at_ms or _runtime_now_ms()
+            item.result_json = redact_secrets(result or {}) if result is not None else item.result_json
+            item.last_error = str(error)[:1000]
+            await session.commit()
 
     async def record_audit_event(self, event_type: str, actor: str = "", payload: dict[str, Any] | None = None) -> None:
         if self.sessionmaker is None:
@@ -2215,6 +2449,13 @@ class Repository:
             result = await session.execute(select(NewswireEventRow).order_by(NewswireEventRow.received_at_ms.desc()).limit(limit))
             return [_newswire_event_to_dict(item) for item in result.scalars().all()]
 
+    async def get_newswire_event(self, event_id: str) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(NewswireEventRow, str(event_id))
+            return _newswire_event_to_dict(item) if item is not None else None
+
     async def claim_newswire_publish(
         self,
         event_id: str,
@@ -4132,6 +4373,55 @@ def _newswire_kwargs(event: dict[str, Any]) -> dict[str, Any]:
         "tradability_json": dict(event.get("tradability") or {}),
         "enrichment_json": event.get("enrichment"),
         "metadata_json": redact_secrets(dict(event.get("metadata") or {})),
+    }
+
+
+def _runtime_now_ms() -> int:
+    return int(datetime.now(UTC).timestamp() * 1000)
+
+
+def _service_heartbeat_to_dict(item: ServiceHeartbeatRecord) -> dict[str, Any]:
+    return {
+        "service_role": item.service_role,
+        "instance_id": item.instance_id,
+        "hostname": item.hostname,
+        "pid": item.pid,
+        "version": item.version,
+        "started_at_ms": item.started_at_ms,
+        "updated_at_ms": item.updated_at_ms,
+        "status": item.status,
+        "metadata": item.metadata_json or {},
+    }
+
+
+def _consumer_offset_to_dict(item: ConsumerOffsetRecord) -> dict[str, Any]:
+    return {
+        "consumer_name": item.consumer_name,
+        "source_table": item.source_table,
+        "last_event_id": item.last_event_id,
+        "last_event_ts_ms": item.last_event_ts_ms,
+        "updated_at_ms": item.updated_at_ms,
+        "metadata": item.metadata_json or {},
+    }
+
+
+def _worker_command_to_dict(item: WorkerCommandRecord) -> dict[str, Any]:
+    return {
+        "command_id": item.command_id,
+        "target_role": item.target_role,
+        "command_type": item.command_type,
+        "status": item.status,
+        "idempotency_key": item.idempotency_key,
+        "requested_by": item.requested_by,
+        "requested_at_ms": item.requested_at_ms,
+        "claimed_by": item.claimed_by,
+        "claimed_at_ms": item.claimed_at_ms,
+        "completed_at_ms": item.completed_at_ms,
+        "attempt_count": item.attempt_count,
+        "payload": item.payload_json or {},
+        "result": item.result_json,
+        "last_error": item.last_error,
+        "metadata": item.metadata_json or {},
     }
 
 

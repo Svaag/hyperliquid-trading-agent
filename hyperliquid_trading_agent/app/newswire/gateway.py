@@ -8,10 +8,8 @@ from pydantic import BaseModel, ValidationError
 
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.logging import get_logger
-from hyperliquid_trading_agent.app.newswire.bus import QueueSubscriber
 from hyperliquid_trading_agent.app.newswire.classify import SOURCE_SCORES
-from hyperliquid_trading_agent.app.newswire.schemas import NewswireFilter
-from hyperliquid_trading_agent.app.newswire.service import NewswireService
+from hyperliquid_trading_agent.app.newswire.schemas import NewswireEvent, NewswireFilter
 
 log = get_logger(__name__)
 
@@ -25,13 +23,6 @@ class NewswireDiscordTestRequest(BaseModel):
 
 def register_newswire_routes(app: FastAPI) -> None:
     app.include_router(router)
-
-
-def _service(request: Request) -> NewswireService:
-    service = getattr(request.app.state, "newswire_service", None)
-    if service is None:
-        raise HTTPException(status_code=503, detail="newswire is not enabled")
-    return service
 
 
 def _auth(settings: Settings, authorization: str | None) -> None:
@@ -73,14 +64,27 @@ async def list_newswire_events(
 ) -> dict[str, Any]:
     _auth(request.app.state.settings, authorization)
     flt = _build_filter(symbol, asset_class, event_type, source, min_importance)
-    events = _service(request).list_events(filter=flt, limit=max(1, min(limit, 500)))
+    try:
+        rows = await request.app.state.repository.list_newswire_events(limit=max(1, min(limit, 500)))
+        events = [NewswireEvent.model_validate(row) for row in rows]
+    except Exception:
+        service = getattr(request.app.state, "newswire_service", None)
+        events = service.list_events(limit=max(1, min(limit, 500))) if service is not None else []
+    events = [event for event in events if flt.matches(event)]
     return {"items": [event.model_dump(mode="json") for event in events], "count": len(events)}
 
 
 @router.get("/newswire/events/{event_id}")
 async def get_newswire_event(request: Request, event_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _auth(request.app.state.settings, authorization)
-    event = _service(request).get_event(event_id)
+    try:
+        row = await request.app.state.repository.get_newswire_event(event_id)
+        if row is not None:
+            return NewswireEvent.model_validate(row).model_dump(mode="json")
+    except Exception:
+        pass
+    service = getattr(request.app.state, "newswire_service", None)
+    event = service.get_event(event_id) if service is not None else None
     if event is None:
         raise HTTPException(status_code=404, detail="newswire event not found")
     return event.model_dump(mode="json")
@@ -89,11 +93,25 @@ async def get_newswire_event(request: Request, event_id: str, authorization: str
 @router.get("/newswire/status")
 async def newswire_status(request: Request, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _auth(request.app.state.settings, authorization)
-    status = _service(request).status()
-    publisher = getattr(request.app.state, "newswire_discord", None)
-    if publisher is not None and callable(getattr(publisher, "status_async", None)):
-        status["discord_publisher"] = await publisher.status_async()
-    return status
+    repo = request.app.state.repository
+    try:
+        latest = await repo.list_newswire_events(limit=1)
+        newswire_workers = await repo.list_service_heartbeats(service_role="newswire", limit=10)
+        publisher_workers = await repo.list_service_heartbeats(service_role="discord_publisher", limit=10)
+    except Exception:
+        service = getattr(request.app.state, "newswire_service", None)
+        status = service.status() if service is not None else {"enabled": request.app.state.settings.newswire_enabled, "running": False}
+        publisher = getattr(request.app.state, "newswire_discord", None)
+        if publisher is not None and callable(getattr(publisher, "status_async", None)):
+            status["discord_publisher"] = await publisher.status_async()
+        return status
+    return {
+        "enabled": request.app.state.settings.newswire_enabled,
+        "running": any(item.get("status") == "running" for item in newswire_workers),
+        "latest_event": latest[0] if latest else None,
+        "workers": newswire_workers,
+        "discord_publisher_workers": publisher_workers,
+    }
 
 
 @router.post("/newswire/discord/test")
@@ -103,10 +121,20 @@ async def newswire_discord_test(
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _auth(request.app.state.settings, authorization)
-    publisher = getattr(request.app.state, "newswire_discord", None)
-    if publisher is None or not callable(getattr(publisher, "send_test_message", None)):
-        raise HTTPException(status_code=503, detail="newswire discord publisher is not configured")
-    return await publisher.send_test_message(channel_id=body.channel_id, dry_run=body.dry_run)
+    try:
+        command = await request.app.state.repository.enqueue_worker_command(
+            target_role="discord_publisher",
+            command_type="discord_test",
+            payload=body.model_dump(mode="json"),
+            requested_by="api",
+        )
+        command_id = str(command.get("command_id") or "")
+        return {"accepted": True, "command_id": command_id, "status_url": f"/commands/{command_id}", "target_role": "discord_publisher", "command_type": "discord_test", "status": command.get("status")}
+    except Exception:
+        publisher = getattr(request.app.state, "newswire_discord", None)
+        if publisher is None or not callable(getattr(publisher, "send_test_message", None)):
+            raise HTTPException(status_code=503, detail="newswire discord publisher is not configured")
+        return await publisher.send_test_message(channel_id=body.channel_id, dry_run=body.dry_run)
 
 
 @router.get("/newswire/sources")
@@ -125,20 +153,23 @@ async def newswire_sources(request: Request, authorization: str | None = Header(
 @router.websocket("/newswire/stream")
 async def newswire_stream(websocket: WebSocket) -> None:
     settings: Settings = websocket.app.state.settings
-    service: NewswireService | None = getattr(websocket.app.state, "newswire_service", None)
-    if service is None:
-        await websocket.close(code=1011)
-        return
     if not _ws_authorized(settings, websocket.query_params.get("token")):
         await websocket.close(code=1008)
         return
     await websocket.accept()
     flt = await _read_filter_frame(websocket)
+    last_ts = 0
+    last_id: str | None = None
     try:
-        async with QueueSubscriber(service.bus, filter=flt) as subscription:
-            while True:
-                event = await subscription.get()
-                await websocket.send_json(event.model_dump(mode="json"))
+        while True:
+            rows = await websocket.app.state.repository.list_newswire_events_after(last_event_ts_ms=last_ts, last_event_id=last_id, limit=100)
+            for row in rows:
+                event = NewswireEvent.model_validate(row)
+                last_ts = int(event.received_at_ms)
+                last_id = event.event_id
+                if flt is None or flt.matches(event):
+                    await websocket.send_json(event.model_dump(mode="json"))
+            await asyncio.sleep(1.0)
     except WebSocketDisconnect:
         return
     except Exception as exc:  # pragma: no cover - websocket runtime behavior

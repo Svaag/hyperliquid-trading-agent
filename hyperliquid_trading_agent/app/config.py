@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from enum import StrEnum
 from functools import lru_cache
 from typing import Literal
 
@@ -95,6 +96,21 @@ AUTONOMY_WEEKDAYS = {"MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"}
 EngineAlphaCatalogMode = Literal["wave1a_locked", "wave1c", "shadow_full_catalog", "specs_only"]
 
 
+class ServiceRole(StrEnum):
+    API = "api"
+    NEWSWIRE = "newswire"
+    WORLD_MODEL = "world_model"
+    TRADER = "trader"
+    DISCORD_PUBLISHER = "discord_publisher"
+    DISCORD_BOT = "discord_bot"
+    AGENT = "agent"
+    LIQUIDATIONS = "liquidations"
+    SCHEDULER = "scheduler"
+
+
+LEGACY_RUNTIME_PROFILES = {"full", "dashboard_only", "world_model_live"}
+
+
 class Settings(BaseSettings):
     """Runtime settings loaded from environment and .env.
 
@@ -111,7 +127,17 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8080
     public_hostname: str = ""
-    runtime_profile: Literal["full", "dashboard_only", "world_model_live"] = "full"
+    service_role: ServiceRole = Field(default=ServiceRole.API, validation_alias="SERVICE_ROLE")
+    runtime_profile: str = "dev"
+
+    discord_bot_enabled: bool = False
+    discord_publisher_enabled: bool = False
+    service_heartbeat_interval_seconds: int = 15
+    service_heartbeat_stale_seconds: int = 90
+    worker_command_poll_seconds: float = 1.0
+    worker_command_claim_stale_seconds: int = 300
+    consumer_poll_seconds: float = 1.0
+    consumer_batch_size: int = 100
 
     database_url: str = "postgresql+asyncpg://hlagent:hlagent@postgres:5432/hlagent"
 
@@ -242,7 +268,7 @@ class Settings(BaseSettings):
     hip4_proactive_reconcile_interval_seconds: int = 300
     hip4_proactive_learning_enabled: bool = True
 
-    position_tracking_enabled: bool = True
+    position_tracking_enabled: bool = False
     position_tracking_auto_arm: bool = True
     position_tracking_default_ttl_hours: int = 168
     position_tracking_price_source: Literal["allMids"] = "allMids"
@@ -389,7 +415,7 @@ class Settings(BaseSettings):
     engine_strategy_max_allocation_share_pct: float = 55.0
     engine_strategy_throttle_lookback_hours: int = 24
     engine_strategy_throttle_cooldown_loops: int = 3
-    engine_pnl_attribution_enabled: bool = True
+    engine_pnl_attribution_enabled: bool = False
     engine_pnl_attribution_mark_source: str = "all_mids"
     engine_pnl_attribution_close_on_expired_horizon: bool = True
     engine_pnl_attribution_max_position_age_hours: int = 48
@@ -451,7 +477,7 @@ class Settings(BaseSettings):
     autonomy_memory_prompt_roles: str = DEFAULT_AUTONOMY_MEMORY_PROMPT_ROLES
     autonomy_memory_require_change_control_for_risk_execution: bool = True
 
-    newswire_enabled: bool = True
+    newswire_enabled: bool = False
     newswire_gateway_enabled: bool = True
     autonomy_legacy_news_poll_enabled: bool = False
     news_signal_generation_enabled: bool = True
@@ -609,6 +635,124 @@ class Settings(BaseSettings):
         # These flags only enable read/paper/manual-instruction features. They must never
         # imply signing, private keys, /exchange mutation, or live orders.
         return value
+
+    @model_validator(mode="after")
+    def service_role_boundaries(self) -> "Settings":
+        env = self.environment.lower()
+        if self.runtime_profile in LEGACY_RUNTIME_PROFILES and env in {"prod", "production"}:
+            raise ValueError(
+                f"RUNTIME_PROFILE={self.runtime_profile!r} is deprecated for production. "
+                "Use SERVICE_ROLE to select process behavior."
+            )
+        role_explicit = "service_role" in self.model_fields_set
+        if env in {"dev", "local", "development", "test"} and not role_explicit:
+            return self
+
+        role = self.service_role
+        if role == ServiceRole.API:
+            self._reject_enabled(
+                {
+                    "NEWSWIRE_ENABLED": self.newswire_enabled,
+                    "WORLD_MODEL_STREAMS_ENABLED": self.world_model_streams_enabled,
+                    "WORLD_MODEL_ADAPTERS_ENABLED": self.world_model_adapters_enabled,
+                    "ENGINE_ENABLED": self.engine_enabled,
+                    "ENGINE_PNL_ATTRIBUTION_ENABLED": self.engine_pnl_attribution_enabled,
+                    "POSITION_TRACKING_ENABLED": self.position_tracking_enabled,
+                    "AUTONOMY_ENABLED": self.autonomy_enabled,
+                    "HIP4_ENABLED": self.hip4_enabled,
+                    "ORCHESTRATION_WAVE_SUPERVISOR_ENABLED": self.orchestration_wave_supervisor_enabled,
+                    "LIQUIDATIONS_ENABLED": self.liquidations_enabled,
+                    "TRADFI_ENABLED": self.tradfi_enabled,
+                    "HYPERLIQUID_WS_ENABLED": self.hyperliquid_ws_enabled,
+                    "DISCORD_BOT_ENABLED": self.discord_bot_enabled,
+                    "DISCORD_PUBLISHER_ENABLED": self.discord_publisher_enabled,
+                },
+                "SERVICE_ROLE=api must be passive",
+            )
+        elif role == ServiceRole.NEWSWIRE:
+            self._require_enabled({"NEWSWIRE_ENABLED": self.newswire_enabled}, "SERVICE_ROLE=newswire")
+            self._reject_enabled(
+                {
+                    "DISCORD_PUBLISHER_ENABLED": self.discord_publisher_enabled,
+                    "ENGINE_ENABLED": self.engine_enabled,
+                    "AUTONOMY_ENABLED": self.autonomy_enabled,
+                    "HIP4_ENABLED": self.hip4_enabled,
+                    "WORLD_MODEL_STREAMS_ENABLED": self.world_model_streams_enabled,
+                },
+                "SERVICE_ROLE=newswire owns only external news ingestion",
+            )
+        elif role == ServiceRole.WORLD_MODEL:
+            self._reject_enabled(
+                {
+                    "NEWSWIRE_ENABLED": self.newswire_enabled,
+                    "ENGINE_ENABLED": self.engine_enabled,
+                    "AUTONOMY_ENABLED": self.autonomy_enabled,
+                    "HIP4_ENABLED": self.hip4_enabled,
+                    "DISCORD_BOT_ENABLED": self.discord_bot_enabled,
+                    "DISCORD_PUBLISHER_ENABLED": self.discord_publisher_enabled,
+                },
+                "SERVICE_ROLE=world_model consumes persisted events and prediction streams only",
+            )
+        elif role == ServiceRole.TRADER:
+            self._reject_enabled(
+                {
+                    "NEWSWIRE_ENABLED": self.newswire_enabled,
+                    "DISCORD_BOT_ENABLED": self.discord_bot_enabled,
+                    "DISCORD_PUBLISHER_ENABLED": self.discord_publisher_enabled,
+                },
+                "SERVICE_ROLE=trader must not own news providers or Discord sessions",
+            )
+        elif role == ServiceRole.DISCORD_PUBLISHER:
+            self._require_enabled({"DISCORD_PUBLISHER_ENABLED": self.discord_publisher_enabled}, "SERVICE_ROLE=discord_publisher")
+            missing = []
+            if not self.discord_bot_token:
+                missing.append("DISCORD_BOT_TOKEN")
+            if not self.newswire_news_channel_configured:
+                missing.append("NEWSWIRE_NEWS_CHANNEL_ID")
+            if missing:
+                raise ValueError(f"SERVICE_ROLE=discord_publisher missing required settings: {', '.join(missing)}")
+            self._reject_enabled(
+                {
+                    "NEWSWIRE_ENABLED": self.newswire_enabled,
+                    "ENGINE_ENABLED": self.engine_enabled,
+                    "AUTONOMY_ENABLED": self.autonomy_enabled,
+                },
+                "SERVICE_ROLE=discord_publisher publishes only from persisted events",
+            )
+        elif role == ServiceRole.DISCORD_BOT:
+            self._require_enabled({"DISCORD_BOT_ENABLED": self.discord_bot_enabled}, "SERVICE_ROLE=discord_bot")
+            self._reject_enabled(
+                {
+                    "NEWSWIRE_ENABLED": self.newswire_enabled,
+                    "ENGINE_ENABLED": self.engine_enabled,
+                    "AUTONOMY_ENABLED": self.autonomy_enabled,
+                },
+                "SERVICE_ROLE=discord_bot must not own ingestion or trading loops",
+            )
+        elif role == ServiceRole.AGENT:
+            self._reject_enabled(
+                {
+                    "NEWSWIRE_ENABLED": self.newswire_enabled,
+                    "ENGINE_ENABLED": self.engine_enabled,
+                    "AUTONOMY_ENABLED": self.autonomy_enabled,
+                    "HIP4_ENABLED": self.hip4_enabled,
+                },
+                "SERVICE_ROLE=agent owns LLM command execution only",
+            )
+        elif role == ServiceRole.LIQUIDATIONS:
+            self._require_enabled({"LIQUIDATIONS_ENABLED": self.liquidations_enabled}, "SERVICE_ROLE=liquidations")
+            self._reject_enabled({"ENGINE_ENABLED": self.engine_enabled, "AUTONOMY_ENABLED": self.autonomy_enabled}, "SERVICE_ROLE=liquidations must not trade")
+        return self
+
+    def _reject_enabled(self, flags: dict[str, bool], context: str) -> None:
+        enabled = [name for name, value in flags.items() if bool(value)]
+        if enabled:
+            raise ValueError(f"{context}; disable: {', '.join(enabled)}")
+
+    def _require_enabled(self, flags: dict[str, bool], context: str) -> None:
+        missing = [name for name, value in flags.items() if not bool(value)]
+        if missing:
+            raise ValueError(f"{context} requires: {', '.join(missing)}")
 
     @model_validator(mode="after")
     def shadow_full_alpha_catalog_requires_shadow_only(self) -> "Settings":

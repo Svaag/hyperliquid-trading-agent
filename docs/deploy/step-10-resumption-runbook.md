@@ -61,7 +61,7 @@ Recommended Hyrule Cloud spec:
 - Domain mode: `auto`
 - Hostname: generated under `*.deploy.hyrule.host`
 - Open inbound ports: 22, 80, 443
-- Runtime app port: 8080 internally; optionally reverse proxy 80/443 to 8080 later
+- Runtime app port: 8080 internally; Compose publishes only `api` on `127.0.0.1:${HOST_PORT:-8081}` by default; optionally reverse proxy 80/443 to 8081 later
 
 ## Prerequisites to resume
 
@@ -217,7 +217,7 @@ Start:
 ```bash
 docker compose up -d --build
 docker compose ps
-docker compose logs -f bot
+docker compose logs -f api
 ```
 
 ## Validate service
@@ -225,31 +225,32 @@ docker compose logs -f bot
 On VM:
 
 ```bash
-curl -fsS http://127.0.0.1:8080/health
-curl -fsS http://127.0.0.1:8080/ready
-curl -fsS http://127.0.0.1:8080/health/config | python3 -m json.tool
+curl -fsS http://127.0.0.1:8081/health
+curl -fsS http://127.0.0.1:8081/ready
+curl -fsS http://127.0.0.1:8081/runtime/status | python3 -m json.tool
+curl -fsS http://127.0.0.1:8081/health/config | python3 -m json.tool
 ```
 
 Expected:
 
 - `/health` status `ok`
-- `/ready` status `ready`; Hyperliquid check should be `ok` or temporarily `degraded:<error>` during network issues
+- `/ready` status `ready`; worker health is reported from service heartbeats, not from duplicate dashboard processes
 - `/health/config` confirms:
   - `hyperliquid_exchange_enabled: false`
   - `hyperliquid_ws_enabled: false` unless intentionally enabled
-  - `position_tracking.enabled: true` unless intentionally disabled
+  - `service_role: api`
   - `high_stakes.model_contract.status` is `ok` or an intentional `warning`; Judge primary should not overlap reviewer primaries in production
   - at least one configured model has `missing: null`
 
 Protected metrics check:
 
 ```bash
-curl -fsS -H "Authorization: Bearer $METRICS_BEARER_TOKEN" http://127.0.0.1:8080/metrics | head
+curl -fsS -H "Authorization: Bearer $METRICS_BEARER_TOKEN" http://127.0.0.1:8081/metrics | head
 ```
 
 ## Validate Discord
 
-In an allowlisted channel, mention the bot:
+If the optional `discord-bot` worker profile is enabled, mention the bot in an allowlisted channel:
 
 ```text
 @bot what is your BTC market read?
@@ -272,14 +273,14 @@ Expected behavior:
 
 ## Optional Caddy reverse proxy
 
-If exposing HTTP(S), put Caddy or another reverse proxy in front of port 8080.
+If exposing HTTP(S), put Caddy or another reverse proxy in front of the single API port 8081. Do not expose worker containers.
 Keep `/metrics` protected by `METRICS_BEARER_TOKEN` even if the service is not public.
 
 Example Caddyfile sketch:
 
 ```caddyfile
 <auto>.deploy.hyrule.host {
-  reverse_proxy 127.0.0.1:8080
+  reverse_proxy 127.0.0.1:8081
 }
 ```
 
@@ -289,12 +290,12 @@ Example Caddyfile sketch:
 cd /opt/hyperliquid-trading-agent
 
 docker compose ps
-docker compose logs -f bot
-docker compose restart bot
+docker compose logs -f api
+docker compose restart api
 docker compose pull && docker compose up -d --build
 
 docker compose exec postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
-docker compose exec bot alembic current
+docker compose run --rm migrate alembic current
 ```
 
 ## Rollback / stop
@@ -312,7 +313,7 @@ docker compose down -v
 
 ## Autonomous loop rollout
 
-Autonomy is disabled by default. To run paper/signoff mode locally or on a VM:
+Autonomy is disabled by default. To run paper/signoff mode locally or on a VM, enable the flags for the `trader` worker; the public `api` process remains passive:
 
 ```env
 AUTONOMY_ENABLED=true
@@ -327,12 +328,12 @@ AUTONOMY_MAX_SIGNALS_PER_DAY=3
 Validate:
 
 ```bash
-curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8080/autonomy/status
-curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8080/autonomy/market-map
-curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8080/autonomy/portfolio
-curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8080/autonomy/evaluations/signals
-curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8080/autonomy/token-capital
-curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8080/autonomy/tuning-proposals
+curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8081/autonomy/status
+curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8081/autonomy/market-map
+curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8081/autonomy/portfolio
+curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8081/autonomy/evaluations/signals
+curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8081/autonomy/token-capital
+curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8081/autonomy/tuning-proposals
 ```
 
 Discord `#ai-bot-alerts` commands:
@@ -368,8 +369,8 @@ All approvals are paper-only. `HYPERLIQUID_EXCHANGE_ENABLED=true` remains reject
 - [ ] `/health` returns ok.
 - [ ] `/ready` returns ready.
 - [ ] `/health/config` shows at least one model provider available.
-- [ ] Discord bot is online.
-- [ ] Mention test answers live Hyperliquid BTC data.
+- [ ] Optional `discord-bot` worker is online if that profile is enabled.
+- [ ] Mention test answers live Hyperliquid BTC data when the Discord bot worker is enabled.
 - [ ] Paper trade simulation works and persists.
 - [ ] Off-topic refusal works.
 - [ ] Metrics access is protected or internal-only.

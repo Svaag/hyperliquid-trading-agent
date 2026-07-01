@@ -134,11 +134,13 @@ VAULT_TOKEN=<read-only-agent-token>
 
 `VAULT_ENV_OVERRIDE=false` means already-present environment values win. Empty values can still be filled from Vault. Set `VAULT_ENV_OVERRIDE=true` only when you explicitly want Vault to replace non-empty local values.
 
-Start Vault and the live dashboard together:
+Start Vault and the API/worker services together:
 
 ```bash
-docker compose --profile vault --profile world-model-live up -d vault world-model-live
+docker compose --profile vault up -d vault api newswire world-model
 ```
+
+Only `api` exposes the dashboard/API port. Vault and service-role workers expose no app dashboard ports.
 
 ## Read-Only App Token
 

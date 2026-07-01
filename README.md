@@ -13,8 +13,10 @@ design.
   - `GET /health`
   - `GET /ready`
   - `GET /health/config`
-  - `POST /ask`
-  - `POST /trade/proposals`
+  - `GET /runtime/status`, `GET /runtime/heartbeats`
+  - `GET /commands`, `GET /commands/{command_id}`
+  - `POST /ask` (accepted command executed by the `agent` worker)
+  - `POST /trade/proposals` (accepted command executed by the `agent` worker)
   - `GET /trade/proposals/{proposal_id}`
   - `GET /tracking/positions`
   - `GET /tracking/positions/{tracker_id}`
@@ -42,7 +44,7 @@ design.
 - Semantic tool gathering for market snapshots, funding, candles, account public state, fills, docs, news, and paper trades.
 - PostgreSQL persistence for audit events, tool calls, conversations, cache, news, paper trades, debate runs, role outputs, state snapshots, trade proposals, autonomous market state, signals, paper orders/fills/positions, and portfolio snapshots.
 - Paper/shadow-only institutional engine scaffolding: normalized event ledger, point-in-time feature store, regime vector, alpha candidates, EV estimates, allocation decisions, EvidencePacks, debate decisions, OrderIntents, execution reports, position theses, reconciliation/attribution/model registry tables, and read-only `/engine/*` inspection endpoints.
-- Alembic migrations through `0017_world_model_supervision`.
+- Alembic migrations through `0022_service_runtime_boundaries`.
 - Dockerfile and Docker Compose with Postgres.
 
 ## Quick start
@@ -58,13 +60,12 @@ Docker Compose:
 
 ```bash
 cp .env.example .env
-# Fill Discord + at least one model provider key for full LLM answers.
+# Fill provider keys only for the worker roles you enable.
 docker compose up -d --build
-curl http://127.0.0.1:8080/health
+curl http://127.0.0.1:8081/health
 ```
 
-`docker compose config` works without `.env`; the env file is optional for static
-validation and expected for real deployments.
+Compose now starts exactly one public app service, `api`, bound to `127.0.0.1:${HOST_PORT:-8081}` by default. Worker services (`newswire`, `world-model`, `trader`, `agent`, etc.) expose no host ports and select behavior with `SERVICE_ROLE`; `RUNTIME_PROFILE` is only an environment label. See [docs/deploy/service-role-runtime.md](docs/deploy/service-role-runtime.md). `docker compose config` works without `.env`; the env file is optional for static validation and expected for real deployments.
 
 Optional local Vault:
 
@@ -84,41 +85,26 @@ DISCORD_ALLOWED_GUILD_IDS=
 DISCORD_ALLOWED_CHANNEL_IDS=
 ```
 
-Dashboard-only World Model runtime:
+Service-role runtime layout:
 
-```bash
-docker compose --profile dashboard up dashboard
-```
-
-This profile runs migrations, connects to the Compose Postgres service, and starts only the FastAPI dashboard/API surface with `RUNTIME_PROFILE=dashboard_only`. It intentionally disables Discord, Alpaca/TradFi, HIP-4, engine loops, autonomy, position tracking, newswire workers, and Hyperliquid WebSocket streaming. Open `http://127.0.0.1:8090/world-model/dashboard`.
-
-For a fresh local dashboard, seed advisory-only demo data from the UI or API:
-
-```bash
-curl -X POST http://127.0.0.1:8090/world-model/dev/seed \
-  -H 'content-type: application/json' \
-  -d '{"symbol":"BTC","topic":"macro"}'
+```text
+api                  public dashboard/API only, no side-effect workers
+newswire             owns RSS/Alpaca/TradingEconomics/X ingestion
+world-model          consumes persisted events and owns prediction-market streams
+trader               owns engine/autonomy/HIP4/trading loops, settings-gated
+agent                executes LLM `/ask` and proposal commands
+discord-publisher    optional profile; publishes persisted news to Discord
 ```
 
 Useful smoke endpoints:
 
 ```bash
-curl http://127.0.0.1:8090/world-model/repository/health
-curl 'http://127.0.0.1:8090/world-model/dashboard/data?symbol=BTC&mode=prediction_consensus'
-curl 'http://127.0.0.1:8090/world-model/snapshots?symbol=BTC'
+curl http://127.0.0.1:8081/runtime/status
+curl http://127.0.0.1:8081/newswire/status
+curl 'http://127.0.0.1:8081/world-model/dashboard/data?symbol=BTC&mode=prediction_consensus'
 ```
 
-Live adapters are disabled by default. Enable them explicitly with `WORLD_MODEL_ADAPTERS_ENABLED=true` plus the venue flag, for example `WORLD_MODEL_POLYMARKET_ENABLED=true`; use `POST /world-model/adapters/poll?force=true` for manual dashboard polling.
-
-Stream-first World Model runtime:
-
-```bash
-docker compose --profile world-model-live up world-model-live
-```
-
-This runs the dashboard plus live World Model ingestion with `RUNTIME_PROFILE=world_model_live`. It starts Newswire and World Model streams, keeps trading/engine/autonomy/HIP-4 execution disabled, and exposes the dashboard at `http://127.0.0.1:${WORLD_MODEL_LIVE_HOST_PORT:-8091}/world-model/dashboard`. Polymarket WebSocket streaming is enabled in the profile; Alpaca News and Trading Economics streams become active when their API keys/settings are present. REST adapters remain available for discovery, manual repair, and backfill.
-
-Newswire can also publish the curated feed from this restricted runtime without enabling the interactive trading bot. Set `DISCORD_BOT_TOKEN`, `NEWSWIRE_DISCORD_ENABLED=true`, and `NEWSWIRE_NEWS_CHANNEL_ID=<#news channel id>`; the send-only publisher posts embeds to `#news` while signals remain isolated to `AUTONOMY_ALERT_CHANNEL_ID` in the full runtime.
+Command-style endpoints return `accepted=true`, a `command_id`, and a `/commands/{command_id}` polling URL while a worker performs the side-effectful work. The deprecated `bot` and `world-model-live` profiles are retained only as no-port legacy aliases. `world-model-live` no longer exposes `8091` and it no longer owns Newswire ingestion.
 
 Model chain:
 

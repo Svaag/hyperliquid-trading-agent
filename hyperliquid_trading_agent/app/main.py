@@ -18,9 +18,9 @@ from hyperliquid_trading_agent import __version__
 from hyperliquid_trading_agent.app.agent.high_stakes.context import HighStakesContextBuilder
 from hyperliquid_trading_agent.app.agent.high_stakes.graph import HighStakesDebateGraph
 from hyperliquid_trading_agent.app.agent.high_stakes.roles import HighStakesRoleRunner
-from hyperliquid_trading_agent.app.agent.high_stakes.schemas import TradeProposalRequest, TradeProposalResponse
+from hyperliquid_trading_agent.app.agent.high_stakes.schemas import TradeProposalRequest
 from hyperliquid_trading_agent.app.agent.model_gateway import ModelGateway
-from hyperliquid_trading_agent.app.agent.runner import AgentContext, TradingAgentRunner
+from hyperliquid_trading_agent.app.agent.runner import TradingAgentRunner
 from hyperliquid_trading_agent.app.agent.tools import AgentTools
 from hyperliquid_trading_agent.app.autonomy.discord import DiscordAutonomyAlertSink
 from hyperliquid_trading_agent.app.autonomy.equity_features import EquitySignalGenerator
@@ -28,10 +28,10 @@ from hyperliquid_trading_agent.app.autonomy.evaluation import SignalEvaluationSe
 from hyperliquid_trading_agent.app.autonomy.event_evaluation import AlphaEventEvaluationService
 from hyperliquid_trading_agent.app.autonomy.memory import MemoryService
 from hyperliquid_trading_agent.app.autonomy.reports import AutonomyReportService
-from hyperliquid_trading_agent.app.autonomy.schemas import NewsEvent, OperatorFeedback, TradeSignal
+from hyperliquid_trading_agent.app.autonomy.schemas import OperatorFeedback
 from hyperliquid_trading_agent.app.autonomy.service import AutonomousTradingLoopService
 from hyperliquid_trading_agent.app.autonomy.tuning import TuningProposalService
-from hyperliquid_trading_agent.app.config import Settings, load_settings
+from hyperliquid_trading_agent.app.config import ServiceRole, Settings, load_settings
 from hyperliquid_trading_agent.app.dashboard import register_dashboard_routes
 from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.db.session import create_engine, create_sessionmaker
@@ -118,9 +118,9 @@ class CandidatePromotionRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
-    dashboard_only = settings.runtime_profile == "dashboard_only"
-    world_model_live = settings.runtime_profile == "world_model_live"
-    restricted_runtime = dashboard_only or world_model_live
+    dashboard_only = settings.service_role == ServiceRole.API
+    world_model_live = False
+    restricted_runtime = True
     UP.set(1)
     SERVICE_INFO.info({"version": __version__, "environment": settings.environment})
 
@@ -424,6 +424,8 @@ async def lifespan(app: FastAPI):
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
+    if settings.service_role != ServiceRole.API:
+        raise RuntimeError(f"FastAPI app may only run with SERVICE_ROLE=api, got {settings.service_role!s}")
     configure_logging(settings.log_level)
     app = FastAPI(title="Hyperliquid Trading Agent", version=__version__, lifespan=lifespan)
     app.state.settings = settings
@@ -443,60 +445,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/ready")
     async def ready() -> dict[str, Any]:
-        dashboard_only = settings.runtime_profile == "dashboard_only"
-        world_model_live = settings.runtime_profile == "world_model_live"
-        restricted_runtime = dashboard_only or world_model_live
-        ready_checks: dict[str, Any] = {"discord_enabled": bool(settings.discord_bot_token) and not restricted_runtime, "runtime_profile": settings.runtime_profile}
-        if restricted_runtime:
-            health = await app.state.world_model_service.repository_health()
-            ready_checks["world_model_repository"] = "ok" if health.get("ping", {}).get("ok") else f"degraded:{health.get('ping', {}).get('error')}"
-            if world_model_live:
-                newswire_status = app.state.newswire_service.status()
-                stream_status = app.state.world_model_stream_service.status()
-                ready_checks["newswire"] = "ok" if newswire_status.get("running") else "disabled" if not settings.newswire_enabled else "degraded:not_running"
-                stream_items = stream_status.get("streams") or []
-                enabled_streams = [item for item in stream_items if item.get("enabled")]
-                connected = [item for item in enabled_streams if item.get("connected") and not item.get("stale")]
-                ready_checks["world_model_streams"] = "ok" if connected else "disabled" if not settings.world_model_streams_enabled or not enabled_streams else "degraded:no_connected_streams"
-            return {"status": "ready", "checks": ready_checks}
-        else:
-            try:
-                await app.state.hyperliquid.all_mids()
-                ready_checks["hyperliquid"] = "ok"
-            except Exception as exc:
-                ready_checks["hyperliquid"] = f"degraded:{type(exc).__name__}"
-        if settings.position_tracking_enabled:
-            tracking_status = app.state.tracking_service.status()
-            ws_status = app.state.ws_worker.status()
-            last_message_at = ws_status.get("last_message_at_ms")
-            stale = tracking_status.get("active_count", 0) > 0 and (not last_message_at or int(time.time() * 1000) - int(last_message_at) > 120_000)
-            ready_checks["position_tracking"] = "degraded:websocket_stale" if stale else "ok"
-        if settings.autonomy_enabled:
-            autonomy_warnings = settings.autonomy_config_warnings()
-            autonomy_service = getattr(app.state, "autonomy_service", None)
-            autonomy_status = autonomy_service.status() if autonomy_service is not None else {}
-            last_market_data_at = autonomy_status.get("last_market_data_at_ms")
-            last_iteration_at = autonomy_status.get("last_iteration_at_ms")
-            now_ms = int(time.time() * 1000)
-            if autonomy_warnings:
-                ready_checks["autonomy"] = "degraded:config"
-            elif not app.state.repository.enabled:
-                ready_checks["autonomy"] = "degraded:persistence_disabled"
-            elif last_market_data_at and now_ms - int(last_market_data_at) > 120_000:
-                ready_checks["autonomy"] = "degraded:market_data_stale"
-            elif not last_market_data_at and last_iteration_at and now_ms - int(last_iteration_at) > 120_000:
-                ready_checks["autonomy"] = "degraded:no_market_data"
-            elif _autonomy_learning_degraded(autonomy_status, now_ms):
-                ready_checks["autonomy"] = "degraded:learning_loop"
-            else:
-                ready_checks["autonomy"] = "ok"
-        if settings.tradfi_enabled:
-            if settings.tradfi_config_warnings():
-                ready_checks["tradfi"] = "degraded:config"
-            elif getattr(app.state, "tradfi_client", None) is None:
-                ready_checks["tradfi"] = "degraded:client_unavailable"
-            else:
-                ready_checks["tradfi"] = "ok"
+        ready_checks: dict[str, Any] = {
+            "service_role": str(settings.service_role),
+            "runtime_profile": settings.runtime_profile,
+            "discord_enabled": False,
+        }
+        health = await app.state.world_model_service.repository_health()
+        ready_checks["world_model_repository"] = "ok" if health.get("ping", {}).get("ok") else f"degraded:{health.get('ping', {}).get('error')}"
+        if settings.runtime_profile == "world_model_live":
+            ready_checks["newswire"] = "disabled" if not settings.newswire_enabled else "worker-owned"
+            ready_checks["world_model_streams"] = "disabled" if not settings.world_model_streams_enabled else "worker-owned"
+        try:
+            heartbeats = await app.state.repository.list_service_heartbeats(limit=25) if app.state.repository.enabled else []
+            ready_checks["worker_heartbeats"] = len(heartbeats)
+        except Exception as exc:
+            ready_checks["worker_heartbeats"] = f"degraded:{type(exc).__name__}"
         return {"status": "ready", "checks": ready_checks}
 
     @app.get("/health/config")
@@ -504,6 +467,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         gateway = ModelGateway(settings)
         attempts = gateway.configured_attempts()
         return {
+            "service_role": str(settings.service_role),
             "runtime_profile": settings.runtime_profile,
             "environment": settings.environment,
             "hyperliquid_network": settings.hyperliquid_network,
@@ -588,29 +552,64 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         }
 
-    @app.post("/ask", response_model=AskResponse)
-    async def ask(request: AskRequest) -> AskResponse:
-        runner: TradingAgentRunner = app.state.agent_runner
-        response = await runner.answer(request.prompt, context=AgentContext(source="api"))
-        return AskResponse(
-            content=response.content,
-            refused=response.refused,
-            fallback_used=response.fallback_used,
-            model_used=response.model_used,
-            tool_count=len(response.tool_results),
-            decision_run_id=response.decision_run_id,
-            proposal_id=response.proposal_id,
-            high_stakes=response.high_stakes,
-        )
+    @app.get("/runtime/heartbeats")
+    async def runtime_heartbeats(service_role: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = _annotate_heartbeats(settings, await app.state.repository.list_service_heartbeats(service_role=service_role, limit=100))
+        return {"items": items, "count": len(items), "stale_count": len([item for item in items if item.get("stale") is True])}
 
-    @app.post("/trade/proposals", response_model=TradeProposalResponse)
-    async def create_trade_proposal(request: TradeProposalRequest, authorization: str | None = Header(default=None)) -> TradeProposalResponse:
+    @app.get("/runtime/status")
+    async def runtime_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        heartbeats = _annotate_heartbeats(settings, await app.state.repository.list_service_heartbeats(limit=100))
+        return {
+            "service_role": str(settings.service_role),
+            "runtime_profile": settings.runtime_profile,
+            "workers": heartbeats,
+            "worker_count": len(heartbeats),
+            "stale_worker_count": len([item for item in heartbeats if item.get("stale") is True]),
+            "heartbeat_stale_seconds": settings.service_heartbeat_stale_seconds,
+        }
+
+    @app.get("/commands")
+    async def list_commands(target_role: str | None = None, status: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = await app.state.repository.list_worker_commands(target_role=target_role, status=status, limit=100)
+        return {"items": items, "count": len(items)}
+
+    @app.get("/commands/{command_id}")
+    async def get_command(command_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        command = await app.state.repository.get_worker_command(command_id)
+        if command is None:
+            raise HTTPException(status_code=404, detail="command not found")
+        return command
+
+    @app.post("/ask", status_code=202)
+    async def ask(request: AskRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        command = await app.state.repository.enqueue_worker_command(
+            target_role=ServiceRole.AGENT.value,
+            command_type="ask",
+            payload=request.model_dump(mode="json"),
+            requested_by="api",
+            idempotency_key=None,
+        )
+        return _accepted_command(command)
+
+    @app.post("/trade/proposals", status_code=202)
+    async def create_trade_proposal(request: TradeProposalRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
         if not settings.high_stakes_debate_enabled:
-            raise HTTPException(status_code=409, detail="high-stakes debate is disabled")
-        graph: HighStakesDebateGraph = app.state.high_stakes_graph
-        forced = request.model_copy(update={"force_debate": True, "dry_run": True})
-        return await graph.run(forced, agent_context={"source": "api", "actor": "api"})
+            raise HTTPException(status_code=409, detail="high-stakes trade proposals are disabled")
+        command = await app.state.repository.enqueue_worker_command(
+            target_role=ServiceRole.AGENT.value,
+            command_type="trade_proposal",
+            payload=request.model_dump(mode="json"),
+            requested_by="api",
+            idempotency_key=None,
+        )
+        return _accepted_command(command)
 
     @app.get("/trade/proposals/{proposal_id}")
     async def get_trade_proposal(proposal_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -672,14 +671,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/autonomy/pause")
     async def pause_autonomy(request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        await app.state.autonomy_service.pause(actor=(request.actor if request else "api"))
-        return app.state.autonomy_service.status()
+        command = await app.state.repository.enqueue_worker_command(target_role="trader", command_type="autonomy_pause", payload=(request.model_dump(mode="json") if request else {}), requested_by="api")
+        return _accepted_command(command)
 
     @app.post("/autonomy/resume")
     async def resume_autonomy(request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        await app.state.autonomy_service.resume(actor=(request.actor if request else "api"))
-        return app.state.autonomy_service.status()
+        command = await app.state.repository.enqueue_worker_command(target_role="trader", command_type="autonomy_resume", payload=(request.model_dump(mode="json") if request else {}), requested_by="api")
+        return _accepted_command(command)
 
     @app.get("/autonomy/universe")
     async def autonomy_universe(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -717,88 +716,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/autonomy/signals/{signal_id}/approve")
     async def approve_autonomy_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        try:
-            return await app.state.autonomy_service.approve_signal(signal_id, actor=(request.actor if request else "api"))
-        except KeyError:
-            raise HTTPException(status_code=404, detail="signal not found") from None
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from None
+        command = await app.state.repository.enqueue_worker_command(target_role="trader", command_type="autonomy_signal_approve", payload={"signal_id": signal_id, **(request.model_dump(mode="json") if request else {})}, requested_by="api")
+        return _accepted_command(command)
 
     @app.post("/autonomy/signals/{signal_id}/reject")
     async def reject_autonomy_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        try:
-            signal = await app.state.autonomy_service.reject_signal(signal_id, actor=(request.actor if request else "api"), reason=(request.reason if request else "api"))
-        except KeyError:
-            raise HTTPException(status_code=404, detail="signal not found") from None
-        return signal.model_dump(mode="json")
+        command = await app.state.repository.enqueue_worker_command(target_role="trader", command_type="autonomy_signal_reject", payload={"signal_id": signal_id, **(request.model_dump(mode="json") if request else {})}, requested_by="api")
+        return _accepted_command(command)
 
     @app.post("/autonomy/signals/{signal_id}/expire")
     async def expire_autonomy_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        try:
-            signal = await app.state.autonomy_service.expire_signal(signal_id, actor=(request.actor if request else "api"))
-        except KeyError:
-            raise HTTPException(status_code=404, detail="signal not found") from None
-        return signal.model_dump(mode="json")
+        command = await app.state.repository.enqueue_worker_command(target_role="trader", command_type="autonomy_signal_expire", payload={"signal_id": signal_id, **(request.model_dump(mode="json") if request else {})}, requested_by="api")
+        return _accepted_command(command)
 
     @app.post("/admin/debug/seed-flip-demo")
     async def seed_flip_demo(request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        service: AutonomousTradingLoopService = app.state.autonomy_service
-        now_ms = int(time.time() * 1000)
-        future_ms = now_ms + 3600 * 1000
-        actor = (request.actor if request and request.actor else "admin_demo")
-        # 1) open a real SOL short paper position
-        short_sig = TradeSignal(
-            id=f"sig_demo_short_{uuid4().hex[:8]}",
-            symbol="SOL",
-            side="short",
-            signal_type="trend_continuation",
-            score=70,
-            confidence=0.7,
-            created_at_ms=now_ms,
-            expires_at_ms=future_ms,
-            entry=72.0,
-            stop=75.0,
-            take_profit=66.0,
-            invalidation="above 75",
-            thesis="demo short",
-            risk_plan={"rr": 2, "exchange_actions": []},
-        )
-        service.signals[short_sig.id] = short_sig
-        await service.approve_signal(short_sig.id, actor=actor)
-        # 2) create opposing long signal + post the alert
-        long_sig = TradeSignal(
-            id=f"sig_demo_long_{uuid4().hex[:8]}",
-            symbol="SOL",
-            side="long",
-            signal_type="trend_continuation",
-            score=77,
-            confidence=0.86,
-            created_at_ms=now_ms,
-            expires_at_ms=future_ms,
-            entry=72.0,
-            stop=69.0,
-            take_profit=78.0,
-            invalidation="below 69",
-            thesis="demo long - opposing",
-            risk_plan={"rr": 2, "exchange_actions": []},
-        )
-        service.signals[long_sig.id] = long_sig
-        from hyperliquid_trading_agent.app.autonomy.discord import format_signal_alert
-        if service.alert_sink is not None and settings.autonomy_alert_channel_id:
-            await service.alert_sink.send(settings.autonomy_alert_channel_id, format_signal_alert(long_sig))
-        # 3) approve the long -> triggers flip request + Discord flip alert
-        result = await service.approve_signal(long_sig.id, actor=actor)
-        return {
-            "short_signal_id": short_sig.id,
-            "long_signal_id": long_sig.id,
-            "flip_required": result.get("flip_required"),
-            "signal_status": result["signal"]["status"],
-            "closed_position_id": (result.get("closed_position") or {}).get("id"),
-            "diagnostics": result.get("diagnostics"),
-        }
+        command = await app.state.repository.enqueue_worker_command(target_role="trader", command_type="admin_debug_seed_flip_demo", payload=(request.model_dump(mode="json") if request else {}), requested_by="api")
+        return _accepted_command(command)
 
     @app.get("/autonomy/portfolio")
     async def autonomy_portfolio(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -946,21 +883,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/autonomy/equity/signals/{signal_id}/approve")
     async def approve_autonomy_equity_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        try:
-            return await app.state.autonomy_service.approve_equity_signal(signal_id, actor=(request.actor if request else "api"))
-        except KeyError:
-            raise HTTPException(status_code=404, detail="equity signal not found") from None
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from None
+        command = await app.state.repository.enqueue_worker_command(target_role="trader", command_type="autonomy_equity_signal_approve", payload={"signal_id": signal_id, **(request.model_dump(mode="json") if request else {})}, requested_by="api")
+        return _accepted_command(command)
 
     @app.post("/autonomy/equity/signals/{signal_id}/reject")
     async def reject_autonomy_equity_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        try:
-            signal = await app.state.autonomy_service.reject_equity_signal(signal_id, actor=(request.actor if request else "api"), reason=(request.reason if request else "api"))
-        except KeyError:
-            raise HTTPException(status_code=404, detail="equity signal not found") from None
-        return signal.model_dump(mode="json")
+        command = await app.state.repository.enqueue_worker_command(target_role="trader", command_type="autonomy_equity_signal_reject", payload={"signal_id": signal_id, **(request.model_dump(mode="json") if request else {})}, requested_by="api")
+        return _accepted_command(command)
 
     @app.get("/autonomy/equity/portfolio")
     async def autonomy_equity_portfolio(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -1023,25 +953,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/autonomy/evaluations/run")
     async def autonomy_evaluations_run(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        now_ms = int(time.time() * 1000)
-        signal_marks = await app.state.evaluation_service.mark_due(now_ms)
-        event_marks = await app.state.event_evaluation_service.mark_due(now_ms)
-        return {
-            "marked": len(signal_marks) + len(event_marks),
-            "signal_marks": [item.model_dump(mode="json") for item in signal_marks],
-            "event_marks": [item.model_dump(mode="json") for item in event_marks],
-        }
+        command = await app.state.repository.enqueue_worker_command(target_role="scheduler", command_type="autonomy_evaluations_run", payload={}, requested_by="api")
+        return _accepted_command(command)
 
     @app.post("/autonomy/evaluations/backfill")
     async def autonomy_evaluations_backfill(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        created = 0
-        for data in await app.state.repository.list_autonomy_trade_signals(limit=500):
-            signal = TradeSignal(**data)
-            evaluation = await app.state.evaluation_service.create_for_signal(signal)
-            if evaluation is not None:
-                created += 1
-        return {"created_or_existing": created}
+        command = await app.state.repository.enqueue_worker_command(target_role="scheduler", command_type="autonomy_evaluations_backfill", payload={}, requested_by="api")
+        return _accepted_command(command)
 
     @app.get("/autonomy/evaluations/events")
     async def autonomy_event_evaluations(status: str | None = None, symbol: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -1068,19 +987,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/autonomy/evaluations/events/backfill")
     async def autonomy_event_evaluations_backfill(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        created = 0
-        try:
-            from hyperliquid_trading_agent.app.newswire.schemas import NewswireEvent
-
-            for data in await app.state.repository.list_newswire_events(limit=500):
-                evaluations = await app.state.event_evaluation_service.create_for_newswire_event(NewswireEvent(**data), market_regime="backfill")
-                created += len(evaluations)
-        except Exception:
-            pass
-        for data in await app.state.repository.list_news_events(limit=500):
-            evaluations = await app.state.event_evaluation_service.create_for_news_event(NewsEvent(**data), market_regime="backfill")
-            created += len(evaluations)
-        return {"created_or_existing": created}
+        command = await app.state.repository.enqueue_worker_command(target_role="scheduler", command_type="autonomy_event_evaluations_backfill", payload={}, requested_by="api")
+        return _accepted_command(command)
 
     @app.get("/autonomy/reports/daily")
     async def autonomy_daily_reports(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -1099,8 +1007,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/autonomy/reports/daily/run")
     async def autonomy_daily_report_run(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        report = await app.state.report_service.generate_daily(post=False)
-        return report.model_dump(mode="json")
+        command = await app.state.repository.enqueue_worker_command(target_role="scheduler", command_type="autonomy_daily_report_run", payload={}, requested_by="api")
+        return _accepted_command(command)
 
     @app.get("/autonomy/reports/weekly")
     async def autonomy_weekly_reports(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -1119,20 +1027,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/autonomy/reports/weekly/run")
     async def autonomy_weekly_report_run(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        report = await app.state.report_service.generate_weekly(post=False)
-        return report.model_dump(mode="json")
+        command = await app.state.repository.enqueue_worker_command(target_role="scheduler", command_type="autonomy_weekly_report_run", payload={}, requested_by="api")
+        return _accepted_command(command)
 
     @app.get("/autonomy/token-capital")
     async def autonomy_token_capital(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
         latest = getattr(app.state.report_service, "latest_token_capital", None)
-        if latest is None:
-            history = await app.state.report_service.token_capital_history(limit=1)
-            if history:
-                return history[0]
-            report = await app.state.report_service.generate_daily(post=False)
-            latest = report.token_capital
-        return latest.model_dump(mode="json")
+        if latest is not None:
+            return latest.model_dump(mode="json")
+        history = await app.state.report_service.token_capital_history(limit=1)
+        if history:
+            return history[0]
+        fallback = app.state.report_service.scorer.compute(
+            window="daily",
+            timestamp_ms=int(time.time() * 1000),
+            evaluations=[],
+            portfolio_snapshot=None,
+            event_evaluations=[],
+            memory_counts={},
+            feedback_items=[],
+            reliability={"no_persisted_report": True},
+        )
+        return fallback.model_dump(mode="json")
 
     @app.get("/autonomy/token-capital/history")
     async def autonomy_token_capital_history(window: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -1269,6 +1186,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
+def _annotate_heartbeats(settings: Settings, heartbeats: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    now_ms = int(time.time() * 1000)
+    stale_after_ms = max(1, int(settings.service_heartbeat_stale_seconds)) * 1000
+    annotated: list[dict[str, Any]] = []
+    for heartbeat in heartbeats:
+        item = dict(heartbeat)
+        updated_at_ms = item.get("updated_at_ms")
+        age_ms: int | None = None
+        stale = False
+        if isinstance(updated_at_ms, int):
+            age_ms = max(0, now_ms - updated_at_ms)
+            stale = age_ms > stale_after_ms and str(item.get("status") or "").lower() not in {"stopping", "stopped"}
+        item["heartbeat_age_ms"] = age_ms
+        item["stale"] = stale
+        annotated.append(item)
+    return annotated
+
+
+def _accepted_command(command: dict[str, Any]) -> dict[str, Any]:
+    command_id = str(command.get("command_id") or "")
+    return {
+        "accepted": True,
+        "command_id": command_id,
+        "status_url": f"/commands/{command_id}",
+        "target_role": command.get("target_role"),
+        "command_type": command.get("command_type"),
+        "status": command.get("status"),
+    }
+
+
 def _root_html(settings: Settings) -> str:
     links = [
         ("Unified trading dashboard", "/dashboard", "Engine readiness, Regime tab, validation, PnL, and governance."),
@@ -1287,7 +1234,7 @@ def _root_html(settings: Settings) -> str:
     return f"""
 <!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Hyperliquid Trading Agent</title>
 <style>:root{{color-scheme:dark;--bg:#0b1020;--panel:#121a2f;--line:#1f2a44;--muted:#94a3b8;--text:#e2e8f0;--accent:#38bdf8}}body{{margin:0;font-family:Inter,ui-sans-serif,system-ui;background:var(--bg);color:var(--text)}}main{{max-width:1100px;margin:0 auto;padding:32px 20px}}h1{{margin:0 0 8px;font-size:34px}}.muted{{color:var(--muted)}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin-top:22px}}.card{{display:flex;flex-direction:column;gap:8px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;color:var(--text);text-decoration:none}}.card:hover{{border-color:var(--accent)}}.card span{{color:var(--muted)}}code{{color:var(--accent);font-size:12px;word-break:break-all}}.pill{{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 10px;margin-right:8px;color:var(--muted)}}</style></head>
-<body><main><h1>Hyperliquid Trading Agent</h1><p class="muted">Informational index for dashboards and operational API surfaces.</p><p><span class="pill">version {__version__}</span><span class="pill">profile {settings.runtime_profile}</span><span class="pill">env {settings.environment}</span></p><section class="grid">{items}</section><p class="muted">Some API links require the configured agent bearer token. The dashboards include a token field in their header.</p></main></body></html>
+<body><main><h1>Hyperliquid Trading Agent</h1><p class="muted">Informational index for dashboards and operational API surfaces.</p><p><span class="pill">version {__version__}</span><span class="pill">role {settings.service_role}</span><span class="pill">profile {settings.runtime_profile}</span><span class="pill">env {settings.environment}</span></p><section class="grid">{items}</section><p class="muted">Some API links require the configured agent bearer token. The dashboards include a token field in their header.</p></main></body></html>
 """.strip()
 
 

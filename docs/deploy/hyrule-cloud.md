@@ -24,14 +24,15 @@ cp .env.example .env
 $EDITOR .env
 
 docker compose up -d --build
-docker compose logs -f bot
+docker compose logs -f api
 ```
 
 Validation:
 
 ```bash
-curl http://127.0.0.1:8080/health
-curl http://127.0.0.1:8080/ready
+curl http://127.0.0.1:8081/health
+curl http://127.0.0.1:8081/ready
+curl http://127.0.0.1:8081/runtime/status
 ```
 
-Keep `/metrics` protected with `METRICS_BEARER_TOKEN` before exposing it.
+Only the `api` service should be exposed publicly, preferably behind TLS/auth. Service-role workers (`newswire`, `world-model`, `trader`, `agent`) expose no dashboard ports. See [service-role-runtime.md](service-role-runtime.md) for role boundaries, command-intent polling, and compatibility aliases. Keep `/metrics` protected with `METRICS_BEARER_TOKEN` before exposing it.
