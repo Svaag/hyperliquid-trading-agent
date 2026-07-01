@@ -9,6 +9,11 @@ from hyperliquid_trading_agent.app.agent.guardrails import UPPERCASE_TICKER_RE, 
 from hyperliquid_trading_agent.app.agent.high_stakes.graph import HighStakesDebateGraph
 from hyperliquid_trading_agent.app.agent.high_stakes.routing import route_high_stakes
 from hyperliquid_trading_agent.app.agent.high_stakes.schemas import TradeProposalRequest
+from hyperliquid_trading_agent.app.agent.identity_guard import (
+    asset_identity_context,
+    guard_unsupported_public_claims,
+    is_non_market_ticker,
+)
 from hyperliquid_trading_agent.app.agent.model_gateway import ModelGateway, ModelGatewayError
 from hyperliquid_trading_agent.app.agent.prompts import DEFAULT_RESPONSE_TEMPLATE, SYSTEM_PROMPT
 from hyperliquid_trading_agent.app.agent.tools import AgentTools, ToolResult
@@ -94,13 +99,15 @@ class TradingAgentRunner:
 
         tool_results: list[ToolResult] = []
         try:
-            high_stakes = await self._maybe_answer_high_stakes(prompt=contextual_prompt, context=context, started=started)
+            high_stakes = await self._maybe_answer_high_stakes(prompt=redacted_prompt, model_prompt=contextual_prompt, context=context, started=started)
             if high_stakes is not None:
                 return high_stakes
-            tool_results = await self._gather_context(contextual_prompt, context)
+            tool_results = await self._gather_context(redacted_prompt, context)
             model_context = {
                 "prompt": contextual_prompt,
+                "current_prompt": redacted_prompt,
                 "tool_results": [result.to_dict() for result in tool_results],
+                "asset_identity": asset_identity_context(tool_results, prompt=redacted_prompt),
                 "response_template": DEFAULT_RESPONSE_TEMPLATE,
                 "mvp_limits": {
                     "mainnet_execution": "disabled",
@@ -111,6 +118,10 @@ class TradingAgentRunner:
             try:
                 model_response = await self.model_gateway.complete(contextual_prompt, SYSTEM_PROMPT, context=model_context)
                 content = _ensure_non_empty(model_response.content, prompt, tool_results)
+                identity_guard = guard_unsupported_public_claims(content, tool_results, prompt=redacted_prompt)
+                if identity_guard.blocked:
+                    content = _fallback_answer(prompt, tool_results, model_error="unsupported_identity_claim")
+                    content = f"{identity_guard.correction}\n\n{content}"
                 await self._audit(
                     "request_answered",
                     context,
@@ -144,7 +155,7 @@ class TradingAgentRunner:
                 fallback_used=True,
             )
 
-    async def _maybe_answer_high_stakes(self, prompt: str, context: AgentContext, started: float) -> AgentResponse | None:
+    async def _maybe_answer_high_stakes(self, prompt: str, model_prompt: str, context: AgentContext, started: float) -> AgentResponse | None:
         if not self.settings or not self.settings.high_stakes_debate_enabled or self.high_stakes_graph is None:
             return None
         route = route_high_stakes(
@@ -155,7 +166,7 @@ class TradingAgentRunner:
         if not route.activate:
             return None
         result = await self.high_stakes_graph.run(
-            TradeProposalRequest(prompt=prompt, force_debate=False),
+            TradeProposalRequest(prompt=model_prompt, force_debate=False),
             agent_context={
                 "source": context.source,
                 "actor": context.discord_user_id or context.source,
@@ -187,15 +198,18 @@ class TradingAgentRunner:
     async def _gather_context(self, prompt: str, context: AgentContext) -> list[ToolResult]:
         lowered = prompt.lower()
         results: list[ToolResult] = []
-        coins = extract_coins(prompt)
+        current_coins = extract_coins(prompt)
+        coins = current_coins or _conversation_context_coins(context)
+        tool_prompt = prompt if current_coins else _with_symbol_hints(prompt, coins)
         addresses = ADDRESS_RE.findall(prompt)
 
         include_l2 = any(term in lowered for term in ["order book", "book", "depth", "bid", "ask", "liquidity"])
-        wants_market = any(term in lowered for term in ["trade", "market", "price", "read", "setup", "long", "short", "funding", "liquidation", "book"])
-        wants_news = any(term in lowered for term in ["news", "macro", "fed", "fomc", "cpi", "ppi", "rates", "headline", "cycle", "economy"])
+        wants_cause = any(term in lowered for term in ["why", "breakout", "breaking out", "ripping", "ripped", "pump", "pumping", "dump", "dumping", "catalyst", "narrative", "mainnet", "staking", "airdrop"])
+        wants_market = wants_cause or any(term in lowered for term in ["trade", "market", "price", "read", "setup", "long", "short", "funding", "liquidation", "book"])
+        wants_news = wants_cause or any(term in lowered for term in ["news", "macro", "fed", "fomc", "cpi", "ppi", "rates", "headline", "cycle", "economy"])
         wants_docs = any(term in lowered for term in ["hyperliquid", "api", "docs", "margin", "order", "tick", "lot", "liquidation"])
-        wants_funding = "funding" in lowered
-        wants_candles = any(term in lowered for term in ["chart", "candle", "trend", "1h", "4h", "daily"])
+        wants_funding = wants_cause or "funding" in lowered
+        wants_candles = wants_cause or any(term in lowered for term in ["chart", "candle", "trend", "1h", "4h", "daily"])
         wants_paper = any(term in lowered for term in ["paper", "simulate", "position size", "risk 1", "risk:"])
         # TradFi / equity signals
         wants_tradfi = any(term in lowered for term in ["stock", "equity", "option", "call", "put", "earnings", "dividend", "split", "sector", "heatmap", "screen", "comp", "compare", "flow", "greeks", "iv", "implied volatility"])
@@ -208,7 +222,7 @@ class TradingAgentRunner:
         tradfi_symbols = stock_tickers if wants_equity else []
         should_resolve = bool(wants_market or wants_tradfi or wants_funding or wants_candles or coins or stock_tickers)
         if should_resolve and callable(getattr(self.tools, "resolve_market_intent", None)):
-            resolution = await self.tools.resolve_market_intent(prompt)
+            resolution = await self.tools.resolve_market_intent(tool_prompt)
             results.append(resolution)
             if isinstance(resolution.data, dict):
                 resolution_data = resolution.data
@@ -237,9 +251,9 @@ class TradingAgentRunner:
                 if any(term in lowered for term in ["fill", "trade history", "recent trades"]):
                     results.append(await self.tools.get_recent_fills(address, lookback_hours=48))
         if wants_news:
-            results.append(await self.tools.search_market_news(prompt, lookback_hours=24))
+            results.append(await self.tools.search_market_news(tool_prompt, lookback_hours=24))
         if wants_docs:
-            results.append(await self.tools.search_hyperliquid_docs(prompt))
+            results.append(await self.tools.search_hyperliquid_docs(tool_prompt))
         if wants_paper:
             request = _parse_paper_trade(prompt, coins=coins)
             if request is not None:
@@ -304,8 +318,8 @@ def extract_coins(text: str) -> list[str]:
     # is not in our explicit common-coin list. This lets prompts like
     # "read on HYPE?" or "thoughts on XYZ?" pass through to Hyperliquid's
     # resolver instead of being blocked by stale allowlists.
-    uppercase_tickers = {match.group(0).upper() for match in UPPERCASE_TICKER_RE.finditer(text)}
-    candidates = set(re.findall(r"\b[A-Z][A-Z0-9]{1,12}\b", text.upper()))
+    uppercase_tickers = {match.group(0).upper() for match in UPPERCASE_TICKER_RE.finditer(text) if not is_non_market_ticker(match.group(0))}
+    candidates = {coin for coin in re.findall(r"\b[A-Z][A-Z0-9]{1,12}\b", text.upper()) if not is_non_market_ticker(coin)}
     coins = list(uppercase_tickers | {coin for coin in candidates if coin in COMMON_COINS or coin.startswith("@")})
     # Also catch bitcoin/ethereum spelled out.
     lowered = text.lower()
@@ -328,7 +342,7 @@ def _extract_stock_tickers(text: str) -> list[str]:
     for match in re.finditer(r"\$?\b([A-Z]{1,5})\b", text):
         token = match.group(1).upper()
         # Skip known crypto coins
-        if token in COMMON_COINS:
+        if token in COMMON_COINS or is_non_market_ticker(token):
             continue
         # Skip common words that look like tickers
         if token in {"THE", "AND", "FOR", "ALL", "NEW", "NOW", "TOP", "LOW", "HIGH", "BIG", "BUY", "SELL", "LONG", "SHORT", "RISK", "NOTE", "CALL", "PUT"}:
@@ -343,6 +357,18 @@ def _extract_stock_tickers(text: str) -> list[str]:
         if name in lowered:
             tickers.add(ticker)
     return sorted(tickers)[:15]
+
+
+def _conversation_context_coins(context: AgentContext) -> list[str]:
+    if not context.conversation_context:
+        return []
+    return extract_coins(context.conversation_context)[:3]
+
+
+def _with_symbol_hints(prompt: str, coins: list[str]) -> str:
+    if not coins:
+        return prompt
+    return f"{prompt}\n\nPrior resolved symbols for reference only: {', '.join(coins)}"
 
 
 def _parse_paper_trade(prompt: str, coins: list[str]) -> PaperTradeRequest | None:
@@ -401,7 +427,6 @@ def _ensure_non_empty(content: str, prompt: str, tool_results: list[ToolResult])
 
 def _fallback_answer(prompt: str, tool_results: list[ToolResult], model_error: str = "") -> str:
     """Concise data-only response when model providers are unavailable."""
-    del model_error
     market_lines: list[str] = []
     paper_lines: list[str] = []
     other_tools: list[str] = []
@@ -473,5 +498,8 @@ def _fallback_answer(prompt: str, tool_results: list[ToolResult], model_error: s
         lines.append("- Additional checks: " + ", ".join(sorted(set(other_tools))) + ".")
     if trade_intent:
         lines.append("- Execution note: no trade was placed; this is analysis only.")
-    lines.append("- Model note: no model returned usable text, so this is a deterministic data read.")
+    if model_error == "unsupported_identity_claim":
+        lines.append("- Model note: model text was discarded because it made an unsupported identity/catalyst claim.")
+    else:
+        lines.append("- Model note: no model returned usable text, so this is a deterministic data read.")
     return "\n".join(lines)[:4000]

@@ -8,6 +8,8 @@ ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 TOKEN_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,12}\b")
 NON_MARKET_TOKENS = {
     "API",
+    "APP",
+    "DEX",
     "EOF",
     "ERROR",
     "HTTP",

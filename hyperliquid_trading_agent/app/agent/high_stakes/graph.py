@@ -31,6 +31,7 @@ from hyperliquid_trading_agent.app.agent.high_stakes.schemas import (
     TradeProposalResponse,
     TradeSetupDraft,
 )
+from hyperliquid_trading_agent.app.agent.identity_guard import guard_unsupported_public_claims
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.hyperliquid.validation import asset_validation_summary
@@ -164,7 +165,8 @@ class HighStakesDebateGraph:
         state["role_outputs"] = role_outputs
         judge = fallback_judge(dict(state), reason=reason).model_copy(update={"call_status": "fallback", "data_coverage": state["data_coverage"]})
         state["judge_decision"] = judge
-        proposal = self._apply_final_policy(state, _build_proposal(state))
+        proposal = self._apply_identity_guard(state, _build_proposal(state))
+        proposal = self._apply_final_policy(state, proposal)
         proposal = await self._attach_decision_context(state, proposal)
         proposal = await self._auto_arm_tracking(state, proposal, proposal_id=None)
 
@@ -365,6 +367,7 @@ class HighStakesDebateGraph:
 
     async def _finalize(self, state: HighStakesGraphState) -> dict[str, Any]:
         proposal = _build_proposal(state)
+        proposal = self._apply_identity_guard(state, proposal)
         proposal = self._apply_final_policy(state, proposal)
         proposal = await self._attach_decision_context(state, proposal)
         proposal_id = None
@@ -472,6 +475,46 @@ class HighStakesDebateGraph:
             warnings.append("Paper-ready status downgraded because Judge/roles still requested unresolved data after escalation cap.")
             return proposal.model_copy(update={"status": "needs_more_data", "warnings": warnings})
         return proposal
+
+    def _apply_identity_guard(self, state: HighStakesGraphState, proposal: TradeProposal) -> TradeProposal:
+        context = state.get("context")
+        tool_results = context.tool_results if context else []
+        prompt = str(state.get("prompt") or "")
+        public_text = "\n".join(
+            [
+                proposal.judge_summary,
+                proposal.thesis,
+                proposal.invalidation,
+                *proposal.rationale,
+                *proposal.risks,
+            ]
+        )
+        verdict = guard_unsupported_public_claims(public_text, tool_results, prompt=prompt)
+        if not verdict.blocked:
+            return proposal
+        safe_rationale = [
+            item
+            for item in proposal.rationale
+            if not guard_unsupported_public_claims(str(item), tool_results, prompt=prompt).blocked
+        ]
+        safe_risks = [
+            item
+            for item in proposal.risks
+            if not guard_unsupported_public_claims(str(item), tool_results, prompt=prompt).blocked
+        ]
+        warnings = list(proposal.warnings)
+        warnings.append(verdict.warning)
+        status: ProposalStatus = "manual_review_required" if proposal.status == "paper_ready" else proposal.status
+        return proposal.model_copy(
+            update={
+                "status": status,
+                "thesis": verdict.correction,
+                "judge_summary": "Unsupported token-identity or catalyst claim removed; manual review required.",
+                "rationale": [verdict.correction, *safe_rationale],
+                "risks": safe_risks,
+                "warnings": warnings,
+            }
+        )
 
     async def _record_role(
         self,

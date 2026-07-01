@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hyperliquid_trading_agent.app.agent.guardrails import classify_request
-from hyperliquid_trading_agent.app.agent.model_gateway import ModelGateway
+from hyperliquid_trading_agent.app.agent.model_gateway import ModelGateway, ModelResponse
 from hyperliquid_trading_agent.app.agent.runner import AgentContext, TradingAgentRunner, extract_coins
 from hyperliquid_trading_agent.app.agent.tools import ToolResult
 from hyperliquid_trading_agent.app.config import Settings
@@ -61,12 +61,45 @@ class FakeTools:
     async def get_funding_context(self, coin):
         return ToolResult(tool="get_funding_context", data={"coin": coin}, source="fake", timestamp_ms=1, freshness="live")
 
+    async def get_candles(self, coin, interval="1h", lookback_hours=24):
+        return ToolResult(
+            tool="get_candles",
+            data=[
+                {"s": coin, "o": "1.80", "h": "2.12", "l": "1.78", "c": "2.09"},
+                {"s": coin, "o": "2.09", "h": "2.14", "l": "2.01", "c": "2.07"},
+            ],
+            source="fake",
+            timestamp_ms=1,
+            freshness="live",
+        )
+
+    async def search_market_news(self, query, lookback_hours=24):
+        return ToolResult(tool="search_market_news", data={"rss": [], "search": [], "x": []}, source="fake-news", timestamp_ms=1, freshness="live")
+
 
 class FailingModelGateway:
     async def complete(self, *args, **kwargs):
         from hyperliquid_trading_agent.app.agent.model_gateway import ModelGatewayError
 
         raise ModelGatewayError("no configured credentials")
+
+
+class BadIdentityGateway:
+    def __init__(self):
+        self.contexts = []
+
+    async def complete(self, *args, **kwargs):
+        self.contexts.append(kwargs.get("context") or {})
+        return ModelResponse(
+            content=(
+                "My read:\n"
+                "LIT is ripping because it's the native token of the Hyperliquid ecosystem. "
+                "Hyperliquid mainnet and staking utility are driving the breakout."
+            ),
+            model="fake-model",
+            provider="fake",
+            attempts=[],
+        )
 
 
 class FakeMessage:
@@ -329,9 +362,52 @@ async def test_runner_uses_fallback_when_model_missing():
 def test_extract_coins_guardrails_and_discord_helpers():
     assert extract_coins("Compare BTC ETH and random ABC") == ["ABC", "BTC", "ETH"]
     assert extract_coins("read on HYPE?") == ["HYPE"]
+    assert extract_coins("APP Hunter says DEX/LIT has data") == ["LIT"]
     assert classify_request("read on FOOBAR?").allowed is True
     assert _message_prompt_without_mentions("<@123> BTC plan") == "BTC plan"
     assert len(_chunk("a" * 5000, 1800)) == 3
+
+
+@pytest.mark.asyncio
+async def test_runner_blocks_unsupported_lit_hyperliquid_native_claim():
+    gateway = BadIdentityGateway()
+    runner = TradingAgentRunner(tools=FakeTools(), model_gateway=gateway)  # type: ignore[arg-type]
+
+    response = await runner.answer("why is Lighter (LIT) breaking out?", context=AgentContext(source="test"))
+
+    tool_names = [item.tool for item in response.tool_results]
+    assert tool_names.count("get_market_snapshot") == 1
+    assert "get_funding_context" in tool_names
+    assert "get_candles" in tool_names
+    assert "search_market_news" in tool_names
+    assert "native token of the Hyperliquid ecosystem" not in response.content
+    assert "HYPE is Hyperliquid's native token" in response.content
+    assert "model text was discarded" in response.content
+    identity = gateway.contexts[0]["asset_identity"]
+    lit_identity = next(item for item in identity["symbols"] if item["symbol"] == "LIT")
+    assert lit_identity["hyperliquid_identity"] == "listed_market_only"
+
+
+@pytest.mark.asyncio
+async def test_runner_uses_current_prompt_for_symbols_before_thread_context():
+    class CallTrackingTools(FakeTools):
+        def __init__(self):
+            self.calls = []
+
+        async def get_market_snapshot(self, coins, intervals=None, include_l2=False):
+            self.calls.append(f"get_market_snapshot:{','.join(coins)}")
+            return await super().get_market_snapshot(coins, intervals=intervals, include_l2=include_l2)
+
+    tools = CallTrackingTools()
+    runner = TradingAgentRunner(tools=tools, model_gateway=FailingModelGateway())  # type: ignore[arg-type]
+
+    await runner.answer(
+        "what gave you the idea that Lighter's LIT token is the native token of Hyperliquid?",
+        context=AgentContext(source="test", conversation_context="APP Hunter: Coin/side: DEX long\nPrior bad response mentioned DEX/LIT."),
+    )
+
+    assert "get_market_snapshot:LIT" in tools.calls
+    assert all("DEX" not in call for call in tools.calls)
 
 
 def test_discord_authorization_channel_and_role():

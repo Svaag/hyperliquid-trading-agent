@@ -246,6 +246,43 @@ class StructuredFakeGateway:
         return StructuredModelResponse(parsed=parsed, raw_content=parsed.model_dump_json(), model="fake-model", provider="fake", attempts=[])
 
 
+class BadIdentityStructuredGateway:
+    async def complete_structured(self, prompt, system_prompt, response_model, **kwargs):
+        if response_model is TradeSetupDraft:
+            parsed = TradeSetupDraft(
+                coin="LIT",
+                side="long",
+                entry=2.0,
+                stop=1.8,
+                take_profit=2.5,
+                timeframe="1h",
+                thesis="LIT is the native token of the Hyperliquid ecosystem, with mainnet and staking utility driving demand.",
+                confidence=0.8,
+                risk_pct=1,
+                account_equity_usd=10_000,
+                invalidation="Stop at 1.8",
+            )
+        elif response_model is RoleOpinion:
+            parsed = RoleOpinion(
+                role="review",
+                stance="support",
+                confidence=0.7,
+                summary="LIT is the native token of the Hyperliquid ecosystem.",
+                scorecard=RoleScorecard(evidence_quality=3, directional_edge=4, risk_asymmetry=3, liquidity_quality=3, execution_feasibility=3, invalidation_quality=3, final_score=19),
+            )
+        elif response_model is JudgeDecision:
+            parsed = JudgeDecision(
+                status="paper_ready",
+                converged=True,
+                confidence=0.72,
+                summary="Approve because LIT is the native token of the Hyperliquid ecosystem.",
+                final_rationale=["LIT native-token demand supports the long."],
+            )
+        else:  # pragma: no cover - defensive for future schemas
+            parsed = response_model()
+        return StructuredModelResponse(parsed=parsed, raw_content=parsed.model_dump_json(), model="fake-model", provider="fake", attempts=[])
+
+
 def test_institutional_prompt_pack_has_rubrics_and_safety():
     for role in ROLES:
         prompt = role_system_prompt(role, "standard")
@@ -408,6 +445,25 @@ async def test_high_stakes_graph_auto_arms_tracking_plan():
     assert tracking.calls
     assert response.proposal["tracking_plan"]["metadata"]["auto_arm_status"] == "armed"
     assert response.proposal["tracking_plan"]["metadata"]["tracker_id"] == "tracker-1"
+
+
+@pytest.mark.asyncio
+async def test_high_stakes_graph_sanitizes_unsupported_lit_native_thesis():
+    settings = Settings(high_stakes_debate_enabled=True, high_stakes_max_rounds=1, agent_model_chain="openai:gpt-test")
+    graph = HighStakesDebateGraph(
+        settings=settings,
+        context_builder=HighStakesContextBuilder(HighStakesFakeTools(), settings),  # type: ignore[arg-type]
+        role_runner=HighStakesRoleRunner(BadIdentityStructuredGateway(), settings),  # type: ignore[arg-type]
+        repository=None,
+    )
+
+    response = await graph.run(TradeProposalRequest(prompt="Long LIT entry 2 stop 1.8 tp 2.5 equity 10000 risk 1"))
+
+    assert response.status == "manual_review_required"
+    assert response.proposal["status"] == "manual_review_required"
+    assert "native token of the Hyperliquid ecosystem" not in response.content
+    assert "HYPE is Hyperliquid's native token" in response.content
+    assert any("unsupported_identity_or_catalyst_claim_removed" in warning for warning in response.warnings)
 
 
 @pytest.mark.asyncio
