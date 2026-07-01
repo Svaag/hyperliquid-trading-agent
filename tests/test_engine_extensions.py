@@ -304,6 +304,11 @@ def test_unified_dashboard_routes_registered():
     app.state.engine_service = FakeReadinessService(now_ms=now_ms)
     client = TestClient(app)
 
+    root = client.get("/")
+    assert root.status_code == 200
+    assert "Hyperliquid Trading Agent" in root.text
+    assert "/world-model/dashboard" in root.text
+    assert "/dashboard" in root.text
     assert "Trading Agent Dashboard" in client.get("/dashboard").text
     data = client.get("/dashboard/data").json()
     assert "engine" in data

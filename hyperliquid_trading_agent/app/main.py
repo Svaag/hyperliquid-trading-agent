@@ -10,6 +10,7 @@ from uuid import uuid4
 import uvicorn
 from alpaca.data.enums import DataFeed
 from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi.responses import HTMLResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
 
@@ -431,6 +432,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_dashboard_routes(app, settings, _require_agent_api)
     register_world_model_routes(app, settings, _require_agent_api)
     register_liquidation_routes(app, settings, _require_agent_api)
+
+    @app.get("/", response_class=HTMLResponse)
+    async def root() -> HTMLResponse:
+        return HTMLResponse(_root_html(settings))
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -1262,6 +1267,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_hip4_routes(app, settings, _require_agent_api)
     register_newswire_routes(app)
     return app
+
+
+def _root_html(settings: Settings) -> str:
+    links = [
+        ("Unified trading dashboard", "/dashboard", "Engine readiness, Regime tab, validation, PnL, and governance."),
+        ("World Model dashboard", "/world-model/dashboard", "Beliefs, events, prediction-market signals, memory, and supervision."),
+        ("Health", "/health", "Liveness probe."),
+        ("Readiness", "/ready", "Runtime readiness checks."),
+        ("Config health", "/health/config", "Redacted subsystem configuration and warnings."),
+        ("Newswire status", "/newswire/status", "Newswire adapter and bus status."),
+        ("Newswire events", "/newswire/events", "Recent normalized newsfeed events."),
+        ("Engine status", "/engine/status", "Institutional engine runtime status."),
+        ("Latest BTC regime", "/engine/regime/latest?primary_asset=BTC", "Most recent engine RegimeVector snapshot."),
+        ("BTC regime history", "/engine/regime/history?primary_asset=BTC&limit=500", "Time-series regime snapshots for dashboard charting."),
+        ("OpenAPI docs", "/docs", "Interactive FastAPI documentation."),
+    ]
+    items = "".join(f'<a class="card" href="{href}"><b>{title}</b><span>{description}</span><code>{href}</code></a>' for title, href, description in links)
+    return f"""
+<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Hyperliquid Trading Agent</title>
+<style>:root{{color-scheme:dark;--bg:#0b1020;--panel:#121a2f;--line:#1f2a44;--muted:#94a3b8;--text:#e2e8f0;--accent:#38bdf8}}body{{margin:0;font-family:Inter,ui-sans-serif,system-ui;background:var(--bg);color:var(--text)}}main{{max-width:1100px;margin:0 auto;padding:32px 20px}}h1{{margin:0 0 8px;font-size:34px}}.muted{{color:var(--muted)}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin-top:22px}}.card{{display:flex;flex-direction:column;gap:8px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;color:var(--text);text-decoration:none}}.card:hover{{border-color:var(--accent)}}.card span{{color:var(--muted)}}code{{color:var(--accent);font-size:12px;word-break:break-all}}.pill{{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 10px;margin-right:8px;color:var(--muted)}}</style></head>
+<body><main><h1>Hyperliquid Trading Agent</h1><p class="muted">Informational index for dashboards and operational API surfaces.</p><p><span class="pill">version {__version__}</span><span class="pill">profile {settings.runtime_profile}</span><span class="pill">env {settings.environment}</span></p><section class="grid">{items}</section><p class="muted">Some API links require the configured agent bearer token. The dashboards include a token field in their header.</p></main></body></html>
+""".strip()
 
 
 def _autonomy_learning_degraded(autonomy_status: dict[str, Any], now_ms: int) -> bool:
