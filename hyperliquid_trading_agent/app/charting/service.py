@@ -9,6 +9,7 @@ from itertools import pairwise
 from typing import Any, Literal
 
 from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.hyperliquid.asset_resolver import AssetResolver
 from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
 from hyperliquid_trading_agent.app.markets.resolution import KNOWN_CRYPTO_SYMBOLS
 from hyperliquid_trading_agent.app.tradfi.client import TradFiClient
@@ -90,6 +91,7 @@ class ChartingService:
         self.settings = settings
         self.hyperliquid = hyperliquid
         self.tradfi = tradfi
+        self._hip3_symbol_cache: dict[str, str | None] = {}
 
     async def render(self, command: ChartCommand) -> ChartResult:
         config = _HORIZONS[command.horizon]
@@ -101,8 +103,10 @@ class ChartingService:
         if not bars and self.tradfi is not None and ":" not in command.symbol:
             bars = await self.tradfi.get_bars(command.symbol, timeframe=config.tradfi_timeframe, lookback_hours=config.lookback_hours, limit=config.limit)
             source = f"tradfi:{self.tradfi.provider.name}"
-        if not bars and prefer_hyperliquid and self.hyperliquid is not None:
-            bars, source = await self._hyperliquid_bars(command.symbol, config)
+        if not bars and self.hyperliquid is not None and not prefer_hyperliquid:
+            resolved = await self._resolve_hip3_symbol(command.symbol)
+            if resolved is not None:
+                bars, source = await self._hyperliquid_bars(resolved, config)
         bars = _dedupe_sort_bars(bars)
         if command.horizon == "y":
             bars = _resample_yearly(bars)
@@ -131,6 +135,52 @@ class ChartingService:
         except Exception:
             return [], "hyperliquid"
         return _parse_hyperliquid_bars(symbol, config.hyperliquid_interval, payload), "hyperliquid"
+
+    async def _resolve_hip3_symbol(self, symbol: str) -> str | None:
+        if self.hyperliquid is None or ":" in symbol:
+            return None
+        target = symbol.strip().upper()
+        if not target:
+            return None
+        if target in self._hip3_symbol_cache:
+            return self._hip3_symbol_cache[target]
+        for dex in await self._candidate_hip3_dexs(target):
+            try:
+                meta_ctxs = await self.hyperliquid.meta_and_asset_ctxs(dex=dex)
+            except Exception:
+                continue
+            resolved = AssetResolver.from_meta_and_contexts(meta_ctxs, dex=dex).resolve(target)
+            if resolved is not None:
+                self._hip3_symbol_cache[target] = resolved.coin
+                return resolved.coin
+        self._hip3_symbol_cache[target] = None
+        return None
+
+    async def _candidate_hip3_dexs(self, symbol: str) -> list[str]:
+        candidates = [str(dex).strip().lower() for dex in getattr(self.settings, "autonomy_hip3_dex_names", []) if str(dex).strip()]
+        try:
+            dexs = await self.hyperliquid.perp_dexs() if self.hyperliquid is not None else []
+        except Exception:
+            dexs = []
+        if isinstance(dexs, list):
+            for dex_info in dexs:
+                if not isinstance(dex_info, dict):
+                    continue
+                dex_name = str(dex_info.get("name") or "").strip().lower()
+                if not dex_name:
+                    continue
+                assets = dex_info.get("assetToStreamingOiCap") or []
+                for item in assets:
+                    asset_name = str(item[0] if isinstance(item, (list, tuple)) and item else "").upper()
+                    if asset_name == symbol or asset_name.endswith(f":{symbol}"):
+                        candidates.append(dex_name)
+                        break
+        candidates.append("xyz")
+        out: list[str] = []
+        for dex in candidates:
+            if dex and dex not in out:
+                out.append(dex)
+        return out
 
 
 def _technical_summary(bars: list[Bar]) -> _TechnicalSummary:

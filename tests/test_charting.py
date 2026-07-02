@@ -38,12 +38,36 @@ class _FakeTradFi:
 
 
 class _FakeHyperliquid:
-    def __init__(self):
+    def __init__(self, hip3_symbols: list[str] | None = None):
+        self.hip3_symbols = [symbol.upper() for symbol in (hip3_symbols or [])]
         self.calls: list[tuple[str, str, int, int]] = []
+
+    async def perp_dexs(self) -> list[Any]:
+        return [
+            None,
+            {
+                "name": "xyz",
+                "fullName": "XYZ",
+                "assetToStreamingOiCap": [[f"xyz:{symbol}", "100000000"] for symbol in self.hip3_symbols],
+            },
+        ]
+
+    async def meta_and_asset_ctxs(self, dex: str = "") -> list[Any]:
+        if dex != "xyz":
+            return [{"universe": []}, []]
+        universe = [{"name": f"xyz:{symbol}", "szDecimals": 2, "maxLeverage": 10} for symbol in self.hip3_symbols]
+        ctxs = [{"coin": item["name"], "markPx": "101", "dayNtlVlm": "100000000"} for item in universe]
+        return [{"universe": universe}, ctxs]
 
     async def candle_snapshot(self, coin: str, interval: str, start_time: int, end_time: int) -> list[dict[str, Any]]:
         self.calls.append((coin, interval, start_time, end_time))
-        return []
+        if coin.upper() not in {f"XYZ:{symbol}" for symbol in self.hip3_symbols}:
+            return []
+        return [
+            {"t": start_time, "o": "100", "h": "102", "l": "99", "c": "101", "v": "1000"},
+            {"t": end_time - 60_000, "o": "101", "h": "103", "l": "100", "c": "102", "v": "1200"},
+            {"t": end_time, "o": "102", "h": "104", "l": "101", "c": "103", "v": "1400"},
+        ]
 
 
 def _bars(count: int = 80) -> list[Bar]:
@@ -104,7 +128,19 @@ async def test_charting_service_no_data_returns_no_trade_message():
 
 
 @pytest.mark.asyncio
-async def test_charting_service_does_not_fallback_to_hyperliquid_for_equities():
+async def test_charting_service_falls_back_to_resolved_hip3_symbol():
+    hyperliquid = _FakeHyperliquid(hip3_symbols=["SPCX"])
+    service = ChartingService(settings=Settings(), hyperliquid=hyperliquid, tradfi=_FakeTradFi([]))  # type: ignore[arg-type]
+
+    result = await service.render(ChartCommand(symbol="SPCX", horizon="h"))
+
+    assert result.image_png.startswith(b"\x89PNG")
+    assert hyperliquid.calls[0][0] == "xyz:SPCX"
+    assert "SPCX hourly chart" in result.content
+
+
+@pytest.mark.asyncio
+async def test_charting_service_does_not_call_raw_hyperliquid_for_unknown_equity():
     hyperliquid = _FakeHyperliquid()
     service = ChartingService(settings=Settings(), hyperliquid=hyperliquid, tradfi=_FakeTradFi([]))  # type: ignore[arg-type]
 
