@@ -236,6 +236,7 @@ def _render_png(symbol: str, label: str, bars: list[Bar], summary: _TechnicalSum
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
     import mplfinance as mpf
     import pandas as pd
 
@@ -288,7 +289,7 @@ def _render_png(symbol: str, label: str, bars: list[Bar], summary: _TechnicalSum
             "ytick.color": _HL_MUTED,
         },
     )
-    fig, _axes = mpf.plot(
+    fig, axes = mpf.plot(
         frame,
         type="candle",
         style=style,
@@ -298,9 +299,21 @@ def _render_png(symbol: str, label: str, bars: list[Bar], summary: _TechnicalSum
         ylabel_lower="Volume",
         returnfig=True,
         figsize=(11, 7),
-        tight_layout=True,
+        tight_layout=False,
         **plot_kwargs,
     )
+    for axis in axes:
+        axis.xaxis.get_offset_text().set_visible(False)
+        axis.yaxis.get_offset_text().set_visible(False)
+    if axes:
+        axes[0].set_ylabel("Price")
+        axes[0].yaxis.set_major_formatter(mticker.FuncFormatter(_format_price_tick))
+        axes[0].tick_params(axis="y", pad=10)
+    if len(axes) >= 3:
+        axes[2].set_ylabel("Volume")
+        axes[2].yaxis.set_major_formatter(mticker.FuncFormatter(_format_volume_tick))
+        axes[2].tick_params(axis="y", pad=10)
+    fig.subplots_adjust(left=0.06, right=0.91, top=0.90, bottom=0.18, hspace=0.04)
     out = io.BytesIO()
     fig.savefig(out, format="png", dpi=140, facecolor=_HL_BG, edgecolor=_HL_BG)
     plt.close(fig)
@@ -476,3 +489,22 @@ def _format_price(value: float) -> str:
     if abs(value) >= 1:
         return f"{value:.2f}"
     return f"{value:.6f}"
+
+
+def _format_price_tick(value: float, _position: int) -> str:
+    if abs(value) >= 100:
+        return f"{value:,.0f}"
+    if abs(value) >= 1:
+        return f"{value:,.2f}"
+    return f"{value:.6f}"
+
+
+def _format_volume_tick(value: float, _position: int) -> str:
+    abs_value = abs(value)
+    if abs_value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}B"
+    if abs_value >= 1_000_000:
+        return f"{value / 1_000_000:.0f}M"
+    if abs_value >= 1_000:
+        return f"{value / 1_000:.0f}K"
+    return f"{value:.0f}"

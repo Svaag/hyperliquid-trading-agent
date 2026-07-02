@@ -8,6 +8,7 @@ import pytest
 from PIL import Image
 
 from hyperliquid_trading_agent.app.charting import ChartCommand, ChartingService, ChartResult, parse_chart_command
+from hyperliquid_trading_agent.app.charting import service as chart_service
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.discord_bot import DiscordContext, DiscordTradingBot
 from hyperliquid_trading_agent.app.tradfi.schemas import Bar
@@ -114,6 +115,14 @@ async def test_charting_service_uses_hyperliquid_dark_theme():
 
     assert image.getpixel((5, 5)) == (7, 16, 14)
     assert image.getpixel((image.width // 2, image.height // 2)) == (12, 26, 23)
+
+
+def test_chart_axis_tick_formatters_show_price_and_volume_units():
+    assert chart_service._format_price_tick(390, 0) == "390"
+    assert chart_service._format_price_tick(1234, 0) == "1,234"
+    assert chart_service._format_price_tick(12.5, 0) == "12.50"
+    assert chart_service._format_volume_tick(20_000_000, 0) == "20M"
+    assert chart_service._format_volume_tick(12_500, 0) == "12K"
 
 
 @pytest.mark.asyncio
