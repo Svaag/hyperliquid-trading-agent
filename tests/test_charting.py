@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from typing import Any
 
 import pytest
+from PIL import Image
 
 from hyperliquid_trading_agent.app.charting import ChartCommand, ChartingService, ChartResult, parse_chart_command
 from hyperliquid_trading_agent.app.config import Settings
@@ -67,6 +69,18 @@ async def test_charting_service_renders_png_from_tradfi_bars():
     assert "TSLA daily chart" in result.content
     assert "Informational only; no trade was placed." in result.content
     assert tradfi.calls[0][1] == "1d"
+
+
+@pytest.mark.asyncio
+async def test_charting_service_uses_hyperliquid_dark_theme():
+    tradfi = _FakeTradFi(_bars())
+    service = ChartingService(settings=Settings(), tradfi=tradfi)  # type: ignore[arg-type]
+
+    result = await service.render(ChartCommand(symbol="TSLA", horizon="d"))
+    image = Image.open(BytesIO(result.image_png)).convert("RGB")
+
+    assert image.getpixel((5, 5)) == (7, 16, 14)
+    assert image.getpixel((image.width // 2, image.height // 2)) == (12, 26, 23)
 
 
 @pytest.mark.asyncio

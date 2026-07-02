@@ -61,6 +61,16 @@ _HORIZONS: dict[ChartHorizon, _HorizonConfig] = {
     "y": _HorizonConfig("yearly", "1M", "1M", 24 * 365 * 12, 160),
 }
 
+_HL_BG = "#07100e"
+_HL_PANEL = "#0c1a17"
+_HL_LINE = "#163029"
+_HL_MUTED = "#6b8a82"
+_HL_TEXT = "#d7f4ec"
+_HL_ACCENT = "#4fe0c0"
+_HL_UP = "#2ee6a6"
+_HL_DOWN = "#f1556c"
+_HL_WARN = "#f5b34a"
+
 
 def parse_chart_command(content: str) -> ChartCommand | None:
     match = _CHART_COMMAND_RE.match(str(content or "").strip())
@@ -192,17 +202,45 @@ def _render_png(symbol: str, label: str, bars: list[Bar], summary: _TechnicalSum
     ema20 = _ema([bar.close for bar in bars], 20)
     ema50 = _ema([bar.close for bar in bars], 50)
     if ema20:
-        addplots.append(mpf.make_addplot(_pad_series(ema20, len(frame)), color="#2563eb", width=1.0))
+        addplots.append(mpf.make_addplot(_pad_series(ema20, len(frame)), color=_HL_ACCENT, width=1.1))
     if ema50:
-        addplots.append(mpf.make_addplot(_pad_series(ema50, len(frame)), color="#dc2626", width=1.0))
+        addplots.append(mpf.make_addplot(_pad_series(ema50, len(frame)), color=_HL_WARN, width=1.1))
     title = f"{symbol} {label} candles | {source} | {summary.trend} | RSI14 {_format_optional(summary.rsi14)}"
     plot_kwargs: dict[str, Any] = {}
     if addplots:
         plot_kwargs["addplot"] = addplots
+    market_colors = mpf.make_marketcolors(
+        up=_HL_UP,
+        down=_HL_DOWN,
+        edge={"up": _HL_UP, "down": _HL_DOWN},
+        wick={"up": _HL_UP, "down": _HL_DOWN},
+        volume={"up": "#1f8f6d", "down": "#8f3342"},
+    )
+    style = mpf.make_mpf_style(
+        marketcolors=market_colors,
+        figcolor=_HL_BG,
+        facecolor=_HL_PANEL,
+        edgecolor=_HL_LINE,
+        gridcolor=_HL_LINE,
+        gridstyle="-",
+        y_on_right=True,
+        rc={
+            "axes.edgecolor": _HL_LINE,
+            "axes.labelcolor": _HL_TEXT,
+            "axes.titlecolor": _HL_TEXT,
+            "figure.facecolor": _HL_BG,
+            "font.family": "DejaVu Sans Mono",
+            "grid.alpha": 0.55,
+            "savefig.facecolor": _HL_BG,
+            "text.color": _HL_TEXT,
+            "xtick.color": _HL_MUTED,
+            "ytick.color": _HL_MUTED,
+        },
+    )
     fig, _axes = mpf.plot(
         frame,
         type="candle",
-        style="yahoo",
+        style=style,
         volume=True,
         title=title,
         ylabel="Price",
@@ -213,7 +251,7 @@ def _render_png(symbol: str, label: str, bars: list[Bar], summary: _TechnicalSum
         **plot_kwargs,
     )
     out = io.BytesIO()
-    fig.savefig(out, format="png", dpi=140)
+    fig.savefig(out, format="png", dpi=140, facecolor=_HL_BG, edgecolor=_HL_BG)
     plt.close(fig)
     return out.getvalue()
 
