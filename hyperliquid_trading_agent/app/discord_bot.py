@@ -7,7 +7,12 @@ from typing import Any
 
 from hyperliquid_trading_agent.app.agent.runner import AgentContext
 from hyperliquid_trading_agent.app.autonomy.discord import parse_autonomy_command
-from hyperliquid_trading_agent.app.charting import ChartCommand, ChartingService, parse_chart_command
+from hyperliquid_trading_agent.app.charting import (
+    ChartCommand,
+    ChartingService,
+    parse_chart_command,
+    parse_chart_prompt,
+)
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.metrics import DISCORD_MESSAGES
@@ -131,6 +136,11 @@ class DiscordTradingBot:
             if not prompt:
                 await message.reply("Mention me with a trading, Hyperliquid, market, macro, or news question.", mention_author=False)
                 return
+            natural_chart_command = parse_chart_prompt(prompt)
+            if natural_chart_command is not None:
+                handled = await self._handle_chart_command(message, natural_chart_command, context=context, role_ids=role_ids)
+                if handled:
+                    return
             tracking_command = parse_tracking_command(prompt)
             try:
                 async with message.channel.typing():

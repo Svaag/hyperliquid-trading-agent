@@ -7,7 +7,13 @@ from typing import Any
 import pytest
 from PIL import Image
 
-from hyperliquid_trading_agent.app.charting import ChartCommand, ChartingService, ChartResult, parse_chart_command
+from hyperliquid_trading_agent.app.charting import (
+    ChartCommand,
+    ChartingService,
+    ChartResult,
+    parse_chart_command,
+    parse_chart_prompt,
+)
 from hyperliquid_trading_agent.app.charting import service as chart_service
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.discord_bot import DiscordContext, DiscordTradingBot
@@ -21,6 +27,18 @@ def test_parse_chart_command_exact_prefix():
     assert parse_chart_command(";;TSLA q") is None
     assert parse_chart_command(";;help") is None
     assert parse_chart_command("<@123> ;;TSLA h") is None
+
+
+def test_parse_chart_prompt_accepts_natural_language_chart_intent():
+    assert parse_chart_prompt("spacex daily chart") == ChartCommand(symbol="SPCX", horizon="d")
+    assert parse_chart_prompt("show me TSLA hourly candles") == ChartCommand(symbol="TSLA", horizon="h")
+    assert parse_chart_prompt("plot xyz:spcx monthly") == ChartCommand(symbol="xyz:SPCX", horizon="m")
+
+
+def test_parse_chart_prompt_rejects_missing_or_ambiguous_chart_intent():
+    assert parse_chart_prompt("spacex daily news") is None
+    assert parse_chart_prompt("spacex chart") is None
+    assert parse_chart_prompt("compare TSLA NVDA daily chart") is None
 
 
 class _FakeTradFi:

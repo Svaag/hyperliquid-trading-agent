@@ -11,13 +11,20 @@ from typing import Any, Literal
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.hyperliquid.asset_resolver import AssetResolver
 from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
-from hyperliquid_trading_agent.app.markets.resolution import KNOWN_CRYPTO_SYMBOLS
+from hyperliquid_trading_agent.app.markets.resolution import KNOWN_CRYPTO_SYMBOLS, parse_market_intent
 from hyperliquid_trading_agent.app.tradfi.client import TradFiClient
 from hyperliquid_trading_agent.app.tradfi.schemas import Bar
 
 ChartHorizon = Literal["h", "d", "m", "y"]
 
 _CHART_COMMAND_RE = re.compile(r"^;;\s*([A-Za-z][A-Za-z0-9._:-]{0,24})\s+([hHdDmMyY])\s*$")
+_CHART_INTENT_RE = re.compile(r"\b(chart|charts|candle|candles|candlestick|candlesticks|plot|graph)\b", re.IGNORECASE)
+_NATURAL_HORIZON_PATTERNS: tuple[tuple[ChartHorizon, re.Pattern[str]], ...] = (
+    ("h", re.compile(r"\b(hourly|hour|1h|60m)\b", re.IGNORECASE)),
+    ("d", re.compile(r"\b(daily|day|1d)\b", re.IGNORECASE)),
+    ("m", re.compile(r"\b(monthly|month|1mo)\b", re.IGNORECASE)),
+    ("y", re.compile(r"\b(yearly|annual|annually|year|1y)\b", re.IGNORECASE)),
+)
 
 
 @dataclass(frozen=True)
@@ -78,6 +85,19 @@ def parse_chart_command(content: str) -> ChartCommand | None:
     if match is None:
         return None
     return ChartCommand(symbol=_canonical_chart_symbol(match.group(1)), horizon=match.group(2).lower())  # type: ignore[arg-type]
+
+
+def parse_chart_prompt(content: str) -> ChartCommand | None:
+    text = str(content or "").strip()
+    if not text or _CHART_INTENT_RE.search(text) is None:
+        return None
+    horizon = _infer_natural_chart_horizon(text)
+    if horizon is None:
+        return None
+    intent = parse_market_intent(text)
+    if len(intent.symbols) != 1:
+        return None
+    return ChartCommand(symbol=_canonical_chart_symbol(intent.symbols[0]), horizon=horizon)
 
 
 class ChartingService:
@@ -457,6 +477,13 @@ def _canonical_hyperliquid_symbol(symbol: str) -> str:
         dex, base = symbol.split(":", 1)
         return f"{dex.lower()}:{base.upper()}"
     return symbol.upper()
+
+
+def _infer_natural_chart_horizon(text: str) -> ChartHorizon | None:
+    for horizon, pattern in _NATURAL_HORIZON_PATTERNS:
+        if pattern.search(text):
+            return horizon
+    return None
 
 
 def _safe_filename(symbol: str) -> str:
