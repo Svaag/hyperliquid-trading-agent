@@ -13,6 +13,7 @@ from hyperliquid_trading_agent.app.tradfi.schemas import Bar
 
 def test_parse_chart_command_exact_prefix():
     assert parse_chart_command(";;TSLA h") == ChartCommand(symbol="TSLA", horizon="h")
+    assert parse_chart_command(";;spcx d") == ChartCommand(symbol="SPCX", horizon="d")
     assert parse_chart_command(";; xyz:msft D") == ChartCommand(symbol="xyz:MSFT", horizon="d")
     assert parse_chart_command(";;TSLA q") is None
     assert parse_chart_command(";;help") is None
@@ -140,3 +141,25 @@ async def test_discord_chart_handler_uses_existing_authorization():
     assert handled is True
     assert charting.commands == []
     assert message.replies[0]["args"][0] == "Not authorized for this bot/channel."
+
+
+@pytest.mark.asyncio
+async def test_discord_chart_handler_acknowledges_disabled_charting():
+    charting = _FakeChartingService()
+    bot = DiscordTradingBot(
+        settings=Settings(discord_chart_command_enabled=False, discord_allowed_channel_ids="42"),
+        runner=None,
+        charting_service=charting,  # type: ignore[arg-type]
+    )
+    message = _FakeMessage()
+
+    handled = await bot._handle_chart_command(
+        message,
+        ChartCommand(symbol="SPCX", horizon="d"),
+        context=DiscordContext(guild_id=1, channel_id=42, author_id=7),
+        role_ids=set(),
+    )
+
+    assert handled is True
+    assert charting.commands == []
+    assert "DISCORD_CHART_COMMAND_ENABLED=true" in message.replies[0]["args"][0]

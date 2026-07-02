@@ -104,7 +104,7 @@ class DiscordTradingBot:
             if message.author.bot or self.client.user is None:
                 return
             raw_content = str(getattr(message, "content", "") or "")
-            chart_command = parse_chart_command(raw_content) if self.settings.discord_chart_command_enabled else None
+            chart_command = parse_chart_command(raw_content)
             channel_id = _authorized_channel_id(message)
             role_ids = {int(getattr(role, "id", 0)) for role in getattr(message.author, "roles", [])}
             context = DiscordContext(
@@ -196,11 +196,16 @@ class DiscordTradingBot:
         context: DiscordContext,
         role_ids: set[int],
     ) -> bool:
-        if not self.settings.discord_chart_command_enabled:
-            return False
         if not self.is_authorized(context, role_ids=role_ids):
             DISCORD_MESSAGES.labels(result="unauthorized").inc()
             await message.reply("Not authorized for this bot/channel.", mention_author=False)
+            return True
+        if not self.settings.discord_chart_command_enabled:
+            DISCORD_MESSAGES.labels(result="chart_disabled").inc()
+            await message.reply(
+                "Chart commands are disabled for this Discord worker. Set DISCORD_CHART_COMMAND_ENABLED=true and restart the worker. No trade was placed.",
+                mention_author=False,
+            )
             return True
         if self.charting_service is None:
             DISCORD_MESSAGES.labels(result="chart_unavailable").inc()

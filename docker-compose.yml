@@ -172,6 +172,9 @@ services:
       SERVICE_ROLE: discord_bot
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-hlagent}:${POSTGRES_PASSWORD:-hlagent}@postgres:5432/${POSTGRES_DB:-hlagent}
       DISCORD_BOT_ENABLED: "true"
+      DISCORD_CHART_COMMAND_ENABLED: "true"
+      TRADFI_ENABLED: "true"
+      ALPHA_VANTAGE_ENABLED: "true"
       NEWSWIRE_ENABLED: "false"
       ENGINE_ENABLED: "false"
       AUTONOMY_ENABLED: "false"
