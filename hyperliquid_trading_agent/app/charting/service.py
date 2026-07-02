@@ -95,12 +95,13 @@ class ChartingService:
         config = _HORIZONS[command.horizon]
         source = ""
         bars: list[Bar] = []
-        if _prefer_hyperliquid(command.symbol):
+        prefer_hyperliquid = _prefer_hyperliquid(command.symbol)
+        if prefer_hyperliquid:
             bars, source = await self._hyperliquid_bars(command.symbol, config)
         if not bars and self.tradfi is not None and ":" not in command.symbol:
             bars = await self.tradfi.get_bars(command.symbol, timeframe=config.tradfi_timeframe, lookback_hours=config.lookback_hours, limit=config.limit)
             source = f"tradfi:{self.tradfi.provider.name}"
-        if not bars and self.hyperliquid is not None:
+        if not bars and prefer_hyperliquid and self.hyperliquid is not None:
             bars, source = await self._hyperliquid_bars(command.symbol, config)
         bars = _dedupe_sort_bars(bars)
         if command.horizon == "y":

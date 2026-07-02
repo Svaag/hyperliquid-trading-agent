@@ -37,6 +37,15 @@ class _FakeTradFi:
         return self.bars[-limit:] if limit else self.bars
 
 
+class _FakeHyperliquid:
+    def __init__(self):
+        self.calls: list[tuple[str, str, int, int]] = []
+
+    async def candle_snapshot(self, coin: str, interval: str, start_time: int, end_time: int) -> list[dict[str, Any]]:
+        self.calls.append((coin, interval, start_time, end_time))
+        return []
+
+
 def _bars(count: int = 80) -> list[Bar]:
     start = datetime(2026, 1, 1, tzinfo=UTC)
     out = []
@@ -92,6 +101,17 @@ async def test_charting_service_no_data_returns_no_trade_message():
     assert result.image_png == b""
     assert "No usable candle data" in result.content
     assert "No trade was placed" in result.content
+
+
+@pytest.mark.asyncio
+async def test_charting_service_does_not_fallback_to_hyperliquid_for_equities():
+    hyperliquid = _FakeHyperliquid()
+    service = ChartingService(settings=Settings(), hyperliquid=hyperliquid, tradfi=_FakeTradFi([]))  # type: ignore[arg-type]
+
+    result = await service.render(ChartCommand(symbol="TSLA", horizon="h"))
+
+    assert result.image_png == b""
+    assert hyperliquid.calls == []
 
 
 class _FakeChartingService:

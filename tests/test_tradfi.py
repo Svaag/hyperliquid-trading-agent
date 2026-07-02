@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from hyperliquid_trading_agent.app.autonomy.equity_features import detect_technical_breakout_equity
+from hyperliquid_trading_agent.app.tradfi.alpaca_provider import AlpacaTradFiProvider
 from hyperliquid_trading_agent.app.tradfi.alpha_vantage_provider import AlphaVantageTradFiProvider
 from hyperliquid_trading_agent.app.tradfi.base import TradFiProvider
 from hyperliquid_trading_agent.app.tradfi.client import TradFiClient
@@ -209,6 +210,44 @@ def test_composite_provider_falls_back_when_alpha_has_no_bars():
 
         assert len(bars) == 1
         assert bars[0].symbol == "TSLA"
+
+    import anyio
+
+    anyio.run(run)
+
+
+class _FakeAlpacaBar:
+    timestamp = datetime(2026, 7, 2, 14, 30, tzinfo=timezone.utc)
+    open = 100.0
+    high = 102.0
+    low = 99.0
+    close = 101.0
+    volume = 123456.0
+    trade_count = 42
+    vwap = 100.5
+
+
+class _FakeAlpacaBarSet:
+    def __init__(self):
+        self.data = {"TSLA": [_FakeAlpacaBar()]}
+
+
+class _FakeAlpacaStockClient:
+    def get_stock_bars(self, request):
+        return _FakeAlpacaBarSet()
+
+
+def test_alpaca_provider_parses_barset_response():
+    async def run():
+        provider = AlpacaTradFiProvider(api_key="key", api_secret="secret")
+        provider._stock = _FakeAlpacaStockClient()  # type: ignore[assignment]
+
+        bars = await provider.get_bars("TSLA", "1Hour", datetime(2026, 7, 1, tzinfo=timezone.utc), datetime(2026, 7, 2, tzinfo=timezone.utc))
+
+        assert len(bars) == 1
+        assert bars[0].symbol == "TSLA"
+        assert bars[0].close == 101.0
+        assert bars[0].trade_count == 42
 
     import anyio
 

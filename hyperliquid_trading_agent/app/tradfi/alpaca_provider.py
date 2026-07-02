@@ -78,6 +78,21 @@ def _to_timeframe(tf: str) -> TimeFrame:
     return TimeFrame.Day
 
 
+def _bars_from_response(response: Any, symbol: str) -> list[Any]:
+    symbol_upper = symbol.upper()
+    if response is None:
+        return []
+    if isinstance(response, dict):
+        return list(response.get(symbol_upper) or response.get(symbol) or [])
+    data = getattr(response, "data", None)
+    if isinstance(data, dict):
+        return list(data.get(symbol_upper) or data.get(symbol) or [])
+    try:
+        return list(response[symbol_upper] or [])
+    except (KeyError, TypeError, AttributeError):
+        return []
+
+
 class AlpacaTradFiProvider(TradFiProvider):
     """TradFiProvider implementation using the Alpaca Data API v2.
 
@@ -180,7 +195,7 @@ class AlpacaTradFiProvider(TradFiProvider):
                 feed=self.feed,
             )
             response = cast(Any, await asyncio.to_thread(client.get_stock_bars, request))
-            bars = response.get(symbol.upper(), [])
+            bars = _bars_from_response(response, symbol)
             return [
                 Bar(
                     symbol=symbol.upper(),
