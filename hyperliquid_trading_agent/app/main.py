@@ -8,7 +8,6 @@ from typing import Any, cast
 from uuid import uuid4
 
 import uvicorn
-from alpaca.data.enums import DataFeed
 from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.responses import HTMLResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -31,6 +30,7 @@ from hyperliquid_trading_agent.app.autonomy.reports import AutonomyReportService
 from hyperliquid_trading_agent.app.autonomy.schemas import OperatorFeedback
 from hyperliquid_trading_agent.app.autonomy.service import AutonomousTradingLoopService
 from hyperliquid_trading_agent.app.autonomy.tuning import TuningProposalService
+from hyperliquid_trading_agent.app.charting import ChartingService
 from hyperliquid_trading_agent.app.config import ServiceRole, Settings, load_settings
 from hyperliquid_trading_agent.app.dashboard import register_dashboard_routes
 from hyperliquid_trading_agent.app.db.repository import Repository
@@ -68,8 +68,8 @@ from hyperliquid_trading_agent.app.orchestration.wave_supervisor import WaveSupe
 from hyperliquid_trading_agent.app.runtime_commands import COMMAND_REGISTRY, command_registry_json
 from hyperliquid_trading_agent.app.tracking.alerts import DiscordAlertSink
 from hyperliquid_trading_agent.app.tracking.service import PositionTrackingService
-from hyperliquid_trading_agent.app.tradfi.alpaca_provider import AlpacaTradFiProvider
 from hyperliquid_trading_agent.app.tradfi.client import TradFiClient
+from hyperliquid_trading_agent.app.tradfi.factory import build_tradfi_client
 from hyperliquid_trading_agent.app.tradfi.options_flow import FlowEnricher, OptionsFlowDetector
 from hyperliquid_trading_agent.app.tradfi.paper.simulator import EquityPaperSimulator
 from hyperliquid_trading_agent.app.world_model.adapters import WorldModelAdapterService
@@ -147,21 +147,11 @@ async def lifespan(app: FastAPI):
     flow_enricher: FlowEnricher | None = None
     equity_paper: EquityPaperSimulator | None = None
     equity_signal_generator: EquitySignalGenerator | None = None
-    if settings.tradfi_enabled and not restricted_runtime:
-        if settings.alpaca_api_key and settings.alpaca_api_secret:
-            try:
-                provider = AlpacaTradFiProvider(
-                    api_key=settings.alpaca_api_key,
-                    api_secret=settings.alpaca_api_secret,
-                    feed=DataFeed(settings.alpaca_data_feed),
-                )
-                tradfi_client = TradFiClient(provider)
-                await tradfi_client.start()
-                log.info("tradfi_client_started", provider=provider.name, feed=settings.alpaca_data_feed)
-            except Exception as exc:
-                log.warning("tradfi_client_start_failed", error=type(exc).__name__)
-        else:
-            log.warning("tradfi_disabled_missing_alpaca_keys")
+    if settings.tradfi_enabled and (not restricted_runtime or settings.environment.lower() in {"dev", "local", "test"}):
+        try:
+            tradfi_client = await build_tradfi_client(settings)
+        except Exception as exc:
+            log.warning("tradfi_client_start_failed", error=type(exc).__name__)
     if tradfi_client is not None:
         options_flow_detector = OptionsFlowDetector(
             min_volume_oi_ratio=settings.options_flow_min_volume_oi_ratio,
@@ -263,7 +253,18 @@ async def lifespan(app: FastAPI):
         settings=settings,
         high_stakes_graph=high_stakes_graph,
     )
-    bot = DiscordTradingBot(settings=settings, runner=runner, tracking_service=tracking_service, autonomy_service=autonomy_service)
+    charting_service = (
+        ChartingService(settings=settings, hyperliquid=hyperliquid, tradfi=tradfi_client)
+        if settings.discord_chart_command_enabled
+        else None
+    )
+    bot = DiscordTradingBot(
+        settings=settings,
+        runner=runner,
+        tracking_service=tracking_service,
+        autonomy_service=autonomy_service,
+        charting_service=charting_service,
+    )
     tracking_service.alert_sink = DiscordAlertSink(bot)
     autonomy_alert_sink = DiscordAutonomyAlertSink(bot)
     hip4_service.alert_sink = autonomy_alert_sink
@@ -306,6 +307,7 @@ async def lifespan(app: FastAPI):
     app.state.agent_runner = runner
     app.state.high_stakes_graph = high_stakes_graph
     app.state.discord_bot = bot
+    app.state.charting_service = charting_service
     app.state.ws_worker = ws_worker
     app.state.tracking_service = tracking_service
     app.state.hip4_service = hip4_service
@@ -1562,9 +1564,16 @@ def _tradfi_config_status(app: FastAPI) -> dict[str, Any]:
     equity_paper = getattr(app.state, "equity_paper", None)
     return {
         "enabled": settings.tradfi_enabled,
-        "provider": "alpaca",
+        "provider_order": settings.tradfi_provider_names,
+        "provider": tradfi_client.provider.name if tradfi_client is not None else None,
         "data_feed": settings.alpaca_data_feed,
         "client": tradfi_client.status() if tradfi_client is not None else {},
+        "alpha_vantage": {
+            "enabled": settings.alpha_vantage_enabled,
+            "transport": settings.alpha_vantage_transport,
+            "mcp_configured": bool(settings.alpha_vantage_mcp_url),
+            "api_key_configured": bool(settings.alpha_vantage_api_key),
+        },
         "alpaca_news_enabled": settings.alpaca_news_enabled,
         "alpaca_trading_enabled": settings.alpaca_trading_enabled,
         "paper_only": True,

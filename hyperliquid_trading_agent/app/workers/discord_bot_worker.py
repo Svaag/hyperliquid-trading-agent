@@ -6,10 +6,14 @@ from typing import Any
 from uuid import uuid4
 
 from hyperliquid_trading_agent.app.agent.runner import AgentContext, AgentResponse
+from hyperliquid_trading_agent.app.charting import ChartingService
 from hyperliquid_trading_agent.app.config import ServiceRole, Settings
 from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.discord_bot import DiscordTradingBot
+from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
 from hyperliquid_trading_agent.app.logging import get_logger
+from hyperliquid_trading_agent.app.tradfi.client import TradFiClient
+from hyperliquid_trading_agent.app.tradfi.factory import build_tradfi_client
 from hyperliquid_trading_agent.app.workers.base import BaseWorker
 
 log = get_logger(__name__)
@@ -74,6 +78,8 @@ class DiscordBotWorker(BaseWorker):
         super().__init__(settings)
         self.runner: CommandBackedAgentRunner | None = None
         self.bot: DiscordTradingBot | None = None
+        self.hyperliquid: HyperliquidClient | None = None
+        self.tradfi: TradFiClient | None = None
         self._bot_task: asyncio.Task | None = None
         self._last_error: str | None = None
 
@@ -82,7 +88,12 @@ class DiscordBotWorker(BaseWorker):
             await self.wait_until_stopped()
             return
         self.runner = CommandBackedAgentRunner(repository=self.repository, settings=self.settings)
-        self.bot = DiscordTradingBot(settings=self.settings, runner=self.runner)
+        charting_service = None
+        if self.settings.discord_chart_command_enabled:
+            self.hyperliquid = HyperliquidClient(settings=self.settings)
+            self.tradfi = await build_tradfi_client(self.settings)
+            charting_service = ChartingService(settings=self.settings, hyperliquid=self.hyperliquid, tradfi=self.tradfi)
+        self.bot = DiscordTradingBot(settings=self.settings, runner=self.runner, charting_service=charting_service)
         self._bot_task = asyncio.create_task(self.bot.start(), name="discord-command-bot")
         stop_task = asyncio.create_task(self.wait_until_stopped(), name="discord-command-bot-stop")
         try:
@@ -100,6 +111,12 @@ class DiscordBotWorker(BaseWorker):
             except asyncio.CancelledError:
                 pass
             await self._stop_bot()
+            if self.tradfi is not None:
+                await self.tradfi.close()
+                self.tradfi = None
+            if self.hyperliquid is not None:
+                await self.hyperliquid.close()
+                self.hyperliquid = None
 
     async def _stop_bot(self) -> None:
         if self.bot is not None:
@@ -127,6 +144,11 @@ class DiscordBotWorker(BaseWorker):
                 "ready": bool(client is not None and callable(getattr(client, "is_ready", None)) and client.is_ready()),
                 "message_content_intent": bool(getattr(getattr(client, "intents", None), "message_content", False)) if client is not None else False,
                 "runner": "agent_worker_command_proxy" if self.runner is not None else None,
+                "charting": {
+                    "enabled": self.settings.discord_chart_command_enabled,
+                    "configured": self.bot is not None and getattr(self.bot, "charting_service", None) is not None,
+                    "tradfi": self.tradfi.status() if self.tradfi is not None else {},
+                },
                 "last_error": self._last_error,
             }
         }

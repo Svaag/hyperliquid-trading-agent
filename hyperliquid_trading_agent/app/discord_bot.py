@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Any
 
-from hyperliquid_trading_agent.app.agent.runner import AgentContext, TradingAgentRunner
+from hyperliquid_trading_agent.app.agent.runner import AgentContext
 from hyperliquid_trading_agent.app.autonomy.discord import parse_autonomy_command
+from hyperliquid_trading_agent.app.charting import ChartCommand, ChartingService, parse_chart_command
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.metrics import DISCORD_MESSAGES
@@ -35,14 +37,16 @@ class DiscordTradingBot:
     def __init__(
         self,
         settings: Settings,
-        runner: TradingAgentRunner | None = None,
+        runner: Any | None = None,
         tracking_service: PositionTrackingService | None = None,
         autonomy_service: Any | None = None,
+        charting_service: ChartingService | None = None,
     ):
         self.settings = settings
         self.runner = runner
         self.tracking_service = tracking_service
         self.autonomy_service = autonomy_service
+        self.charting_service = charting_service
         self.client = None
         if discord is not None:
             intents = discord.Intents.default()
@@ -99,21 +103,27 @@ class DiscordTradingBot:
         async def on_message(message):
             if message.author.bot or self.client.user is None:
                 return
-            mentioned = self.client.user in message.mentions
-            thread_continuation = _is_bot_thread(getattr(message, "channel", None), self.client.user)
-            prompt = _message_prompt_without_mentions(message.content)
+            raw_content = str(getattr(message, "content", "") or "")
+            chart_command = parse_chart_command(raw_content) if self.settings.discord_chart_command_enabled else None
             channel_id = _authorized_channel_id(message)
-            referenced_message = await _resolve_referenced_message(message)
-            autonomy_command = parse_autonomy_command(prompt, referenced_message=referenced_message) if (prompt or referenced_message is not None) else None
-            autonomy_alert_channel = bool(self.settings.autonomy_alert_channel_id and str(channel_id) == str(self.settings.autonomy_alert_channel_id))
-            if not mentioned and not thread_continuation and not (autonomy_command is not None and autonomy_alert_channel):
-                return
             role_ids = {int(getattr(role, "id", 0)) for role in getattr(message.author, "roles", [])}
             context = DiscordContext(
                 guild_id=getattr(getattr(message, "guild", None), "id", None),
                 channel_id=channel_id,
                 author_id=getattr(getattr(message, "author", None), "id", None),
             )
+            if chart_command is not None:
+                handled = await self._handle_chart_command(message, chart_command, context=context, role_ids=role_ids)
+                if handled:
+                    return
+            mentioned = self.client.user in message.mentions
+            thread_continuation = _is_bot_thread(getattr(message, "channel", None), self.client.user)
+            prompt = _message_prompt_without_mentions(message.content)
+            referenced_message = await _resolve_referenced_message(message)
+            autonomy_command = parse_autonomy_command(prompt, referenced_message=referenced_message) if (prompt or referenced_message is not None) else None
+            autonomy_alert_channel = bool(self.settings.autonomy_alert_channel_id and str(channel_id) == str(self.settings.autonomy_alert_channel_id))
+            if not mentioned and not thread_continuation and not (autonomy_command is not None and autonomy_alert_channel):
+                return
             if not self.is_authorized(context, role_ids=role_ids) and not (autonomy_command is not None and autonomy_alert_channel):
                 DISCORD_MESSAGES.labels(result="unauthorized").inc()
                 await message.reply("Not authorized for this bot/channel.", mention_author=False)
@@ -177,6 +187,40 @@ class DiscordTradingBot:
                 DISCORD_MESSAGES.labels(result="error").inc()
                 log.exception("discord_message_failed", error=type(exc).__name__)
                 await message.reply("I hit an internal error while answering. No trade was placed.", mention_author=False)
+
+    async def _handle_chart_command(
+        self,
+        message: Any,
+        command: ChartCommand,
+        *,
+        context: DiscordContext,
+        role_ids: set[int],
+    ) -> bool:
+        if not self.settings.discord_chart_command_enabled:
+            return False
+        if not self.is_authorized(context, role_ids=role_ids):
+            DISCORD_MESSAGES.labels(result="unauthorized").inc()
+            await message.reply("Not authorized for this bot/channel.", mention_author=False)
+            return True
+        if self.charting_service is None:
+            DISCORD_MESSAGES.labels(result="chart_unavailable").inc()
+            await message.reply("Charting is not configured for this Discord worker. No trade was placed.", mention_author=False)
+            return True
+        try:
+            typing = getattr(getattr(message, "channel", None), "typing", None)
+            if callable(typing):
+                async with typing():
+                    result = await self.charting_service.render(command)
+                    await _reply_chart(message, result)
+            else:
+                result = await self.charting_service.render(command)
+                await _reply_chart(message, result)
+            DISCORD_MESSAGES.labels(result="chart_command").inc()
+        except Exception as exc:  # pragma: no cover - Discord runtime behavior
+            DISCORD_MESSAGES.labels(result="error").inc()
+            log.exception("discord_chart_command_failed", error=type(exc).__name__)
+            await message.reply("I hit an internal error while rendering the chart. No trade was placed.", mention_author=False)
+        return True
 
 
 async def _referenced_message_content(message, bot_user) -> str:
@@ -338,6 +382,20 @@ def _build_embeds(items: list[dict[str, Any]] | None):
     if not items or discord is None:
         return None
     return [discord.Embed.from_dict(item) for item in items]
+
+
+def _build_file(filename: str, data: bytes):
+    if not data or discord is None:
+        return None
+    return discord.File(BytesIO(data), filename=filename)
+
+
+async def _reply_chart(message: Any, result) -> None:
+    file = _build_file(result.filename, result.image_png)
+    if file is not None:
+        await message.reply(content=result.content, file=file, mention_author=False)
+    else:
+        await message.reply(result.content, mention_author=False)
 
 
 def _maybe_str(value) -> str | None:

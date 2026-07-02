@@ -8,8 +8,10 @@ import pytest
 from pydantic import ValidationError
 
 from hyperliquid_trading_agent.app.autonomy.equity_features import detect_technical_breakout_equity
+from hyperliquid_trading_agent.app.tradfi.alpha_vantage_provider import AlphaVantageTradFiProvider
 from hyperliquid_trading_agent.app.tradfi.base import TradFiProvider
 from hyperliquid_trading_agent.app.tradfi.client import TradFiClient
+from hyperliquid_trading_agent.app.tradfi.composite_provider import CompositeTradFiProvider
 from hyperliquid_trading_agent.app.tradfi.options_flow import FlowEnricher, OptionsFlowDetector
 from hyperliquid_trading_agent.app.tradfi.paper.schemas import (
     EquityPaperPortfolio,
@@ -148,6 +150,68 @@ def test_tradfi_client_calendar():
         assert len(events) == 1
         assert events[0].event_type == "trading_day"
     import anyio
+    anyio.run(run)
+
+
+class _FakeAlphaResponse:
+    def __init__(self, data):
+        self._data = data
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._data
+
+
+class _FakeAlphaHttp:
+    def __init__(self, payloads):
+        self.payloads = list(payloads)
+        self.calls = []
+
+    async def get(self, url, params):
+        self.calls.append((url, params))
+        return _FakeAlphaResponse(self.payloads.pop(0))
+
+    async def aclose(self):
+        return None
+
+
+def test_alpha_vantage_provider_parses_daily_bars():
+    async def run():
+        payload = {
+            "Time Series (Daily)": {
+                "2026-07-01": {"1. open": "100", "2. high": "105", "3. low": "99", "4. close": "104", "5. volume": "1000000"},
+                "2026-06-30": {"1. open": "98", "2. high": "101", "3. low": "97", "4. close": "100", "5. volume": "900000"},
+            }
+        }
+        http = _FakeAlphaHttp([payload])
+        provider = AlphaVantageTradFiProvider(api_key="key", transport="rest", http_client=http)  # type: ignore[arg-type]
+
+        bars = await provider.get_bars("TSLA", "1Day", datetime(2026, 6, 1, tzinfo=timezone.utc), datetime(2026, 7, 2, tzinfo=timezone.utc))
+
+        assert [bar.close for bar in bars] == [100.0, 104.0]
+        assert http.calls[0][1]["function"] == "TIME_SERIES_DAILY"
+        assert http.calls[0][1]["symbol"] == "TSLA"
+
+    import anyio
+
+    anyio.run(run)
+
+
+def test_composite_provider_falls_back_when_alpha_has_no_bars():
+    async def run():
+        alpha_http = _FakeAlphaHttp([{"Note": "rate limit"}])
+        alpha = AlphaVantageTradFiProvider(api_key="key", transport="rest", http_client=alpha_http)  # type: ignore[arg-type]
+        provider = CompositeTradFiProvider([alpha, _FakeProvider()])
+
+        bars = await provider.get_bars("TSLA", "1Day", datetime(2026, 6, 1, tzinfo=timezone.utc), datetime(2026, 7, 2, tzinfo=timezone.utc))
+
+        assert len(bars) == 1
+        assert bars[0].symbol == "TSLA"
+
+    import anyio
+
     anyio.run(run)
 
 

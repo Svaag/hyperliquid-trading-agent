@@ -25,6 +25,9 @@ dependencies = [
     "langgraph>=1.2.5,<2.0.0",
     "alpaca-py>=0.40.0",
     "joblib>=1.4",
+    "matplotlib>=3.9",
+    "mcp>=1.27,<2",
+    "mplfinance>=0.12.10b0",
     "pandas>=2.2",
     "scikit-learn>=1.5",
 ]

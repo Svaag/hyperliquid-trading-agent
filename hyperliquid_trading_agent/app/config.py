@@ -200,6 +200,7 @@ class Settings(BaseSettings):
     discord_allowed_role_ids: str = ""
     discord_admin_user_ids: str = ""
     discord_max_response_chars: int = 1900
+    discord_chart_command_enabled: bool = False
 
     agent_model_chain: str = Field(default=DEFAULT_MODEL_CHAIN, validation_alias="AGENT_MODEL_CHAIN")
     openrouter_api_key: str = ""
@@ -544,6 +545,15 @@ class Settings(BaseSettings):
 
     # --- TradFi (equities & options via Alpaca Data API) -----------------------
     tradfi_enabled: bool = False
+    tradfi_provider_order: str = "alpha_vantage,alpaca"
+    alpha_vantage_enabled: bool = False
+    alpha_vantage_api_key: str = ""
+    alpha_vantage_base_url: str = "https://www.alphavantage.co/query"
+    alpha_vantage_mcp_url: str = "https://mcp.alphavantage.co/mcp"
+    alpha_vantage_mcp_auth_header: str = "Authorization"
+    alpha_vantage_mcp_auth_scheme: str = "Bearer"
+    alpha_vantage_transport: Literal["auto", "mcp", "rest"] = "auto"
+    alpha_vantage_timeout_seconds: float = 10.0
     alpaca_trading_enabled: bool = False  # gated like HYPERLIQUID_EXCHANGE_ENABLED
     alpaca_data_feed: Literal["iex", "sip", "delayed_sip"] = "iex"  # IEX = free
 
@@ -987,6 +997,10 @@ class Settings(BaseSettings):
         return [s.upper() for s in _csv(self.autonomy_equity_universe)]
 
     @property
+    def tradfi_provider_names(self) -> list[str]:
+        return [provider.lower() for provider in _csv(self.tradfi_provider_order)]
+
+    @property
     def autonomy_equity_effective_enabled(self) -> bool:
         return self.tradfi_enabled and self.autonomy_equity_enabled
 
@@ -996,8 +1010,18 @@ class Settings(BaseSettings):
 
     def tradfi_config_warnings(self) -> list[str]:
         warnings: list[str] = []
-        if self.tradfi_enabled and not (self.alpaca_api_key and self.alpaca_api_secret):
-            warnings.append("TRADFI_ENABLED requires ALPACA_API_KEY and ALPACA_API_SECRET")
+        if self.tradfi_enabled:
+            provider_names = set(self.tradfi_provider_names)
+            alpha_configured = self.alpha_vantage_enabled and bool(self.alpha_vantage_api_key)
+            alpaca_configured = bool(self.alpaca_api_key and self.alpaca_api_secret)
+            if "alpha_vantage" in provider_names and self.alpha_vantage_enabled and not self.alpha_vantage_api_key:
+                warnings.append("ALPHA_VANTAGE_ENABLED requires ALPHA_VANTAGE_API_KEY")
+            if "alpaca" in provider_names and not alpaca_configured and not alpha_configured:
+                warnings.append("TRADFI_ENABLED requires ALPACA_API_KEY and ALPACA_API_SECRET or a configured Alpha Vantage provider")
+            if "alpha_vantage" in provider_names and not self.alpha_vantage_enabled and not alpaca_configured:
+                warnings.append("TRADFI_PROVIDER_ORDER includes alpha_vantage but ALPHA_VANTAGE_ENABLED is false")
+            if not provider_names:
+                warnings.append("TRADFI_PROVIDER_ORDER is empty")
         if self.autonomy_equity_enabled and not self.tradfi_enabled:
             warnings.append("AUTONOMY_EQUITY_ENABLED requires TRADFI_ENABLED=true")
         if self.autonomy_equity_enabled and not self.autonomy_equity_symbols:

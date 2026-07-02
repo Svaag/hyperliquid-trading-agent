@@ -13,7 +13,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-Provider = Literal["hyperliquid", "alpaca", "static"]
+Provider = Literal["hyperliquid", "alpaca", "alpha_vantage", "tradfi", "static"]
+TRADFI_PROVIDERS: set[str] = {"alpaca", "alpha_vantage", "tradfi"}
 AssetClass = Literal[
     "crypto_perp",
     "spot",
@@ -237,7 +238,7 @@ class AssetCandidate(BaseModel):
 
     @property
     def is_tradfi(self) -> bool:
-        return self.provider == "alpaca"
+        return self.provider in TRADFI_PROVIDERS
 
 
 class RoutedSymbol(BaseModel):
@@ -353,7 +354,7 @@ def route_market_intent(
         for candidate in selected:
             if candidate.provider == "hyperliquid":
                 _append_unique(hyperliquid_symbols, candidate.canonical_symbol)
-            elif candidate.provider == "alpaca":
+            elif candidate.is_tradfi:
                 _append_unique(tradfi_symbols, candidate.canonical_symbol)
 
     if ambiguous_queries:
@@ -412,7 +413,7 @@ def _score_candidate(candidate: AssetCandidate, intent: MarketIntent, query: str
         elif c.asset_class == "spot":
             score += 35
             reasons.append("hyperliquid_spot")
-    elif c.provider == "alpaca":
+    elif c.is_tradfi:
         if intent.wants_tradfi or intent.wants_equity or intent.wants_options or intent.wants_etf:
             score += 105
             reasons.append("tradfi_intent")
@@ -439,12 +440,12 @@ def _score_candidate(candidate: AssetCandidate, intent: MarketIntent, query: str
         if query_upper in COMMODITY_SYMBOLS:
             score += 35
             reasons.append("commodity_symbol")
-    elif intent.wants_commodity and c.provider == "alpaca" and c.asset_class in {"etf", "equity"}:
+    elif intent.wants_commodity and c.is_tradfi and c.asset_class in {"etf", "equity"}:
         score += 20
         reasons.append("commodity_related_tradfi_candidate")
 
     if not intent.has_explicit_asset_class:
-        if c.provider == "alpaca" and c.active is not False and c.tradable is not False:
+        if c.is_tradfi and c.active is not False and c.tradable is not False:
             score += 25
             reasons.append("no_explicit_intent_active_tradfi")
         if c.provider == "hyperliquid" and c.asset_class in {"hip3_perp", "commodity"}:
@@ -469,7 +470,7 @@ def _select_candidates(query: str, candidates: list[AssetCandidate], intent: Mar
     top = candidates[0]
     if ":" in query:
         return [top], False, "explicit_namespace"
-    if intent.wants_tradfi and top.provider == "alpaca" and not intent.wants_hyperliquid:
+    if intent.wants_tradfi and top.is_tradfi and not intent.wants_hyperliquid:
         return [top], False, "tradfi_intent"
     if intent.wants_hyperliquid and top.provider == "hyperliquid":
         return [top], False, "hyperliquid_intent"

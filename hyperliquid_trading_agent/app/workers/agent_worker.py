@@ -17,6 +17,9 @@ from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
 from hyperliquid_trading_agent.app.hyperliquid.ws_worker import HyperliquidWebSocketWorker
 from hyperliquid_trading_agent.app.news.service import NewsService
 from hyperliquid_trading_agent.app.tracking.service import PositionTrackingService
+from hyperliquid_trading_agent.app.tradfi.client import TradFiClient
+from hyperliquid_trading_agent.app.tradfi.factory import build_tradfi_client
+from hyperliquid_trading_agent.app.tradfi.options_flow import OptionsFlowDetector
 from hyperliquid_trading_agent.app.workers.base import BaseWorker
 from hyperliquid_trading_agent.app.world_model.service import WorldModelService
 
@@ -30,12 +33,20 @@ class AgentWorker(BaseWorker):
         self.hyperliquid: HyperliquidClient | None = None
         self.runner: TradingAgentRunner | None = None
         self.graph: HighStakesDebateGraph | None = None
+        self.tradfi: TradFiClient | None = None
 
     async def run(self) -> None:
         self.hyperliquid = HyperliquidClient(settings=self.settings)
+        self.tradfi = await build_tradfi_client(self.settings)
+        options_flow = None
+        if self.tradfi is not None and self.settings.options_flow_effective_enabled:
+            options_flow = OptionsFlowDetector(
+                min_volume_oi_ratio=self.settings.options_flow_min_volume_oi_ratio,
+                min_premium=self.settings.options_flow_min_premium,
+            )
         news = NewsService(settings=self.settings, repository=self.repository)
         model_gateway = ModelGateway(settings=self.settings)
-        tools = AgentTools(hyperliquid=self.hyperliquid, news=news, repository=self.repository, tradfi=None, options_flow=None)
+        tools = AgentTools(hyperliquid=self.hyperliquid, news=news, repository=self.repository, tradfi=self.tradfi, options_flow=options_flow)
         memory_service = MemoryService(settings=self.settings, repository=self.repository)
         world_model_service = WorldModelService(settings=self.settings, repository=self.repository)
         decision_context_recorder = DecisionContextRecorder(settings=self.settings, repository=self.repository, code_version=__version__)
@@ -56,13 +67,17 @@ class AgentWorker(BaseWorker):
         try:
             await self.command_loop({"ask": self._handle_ask, "trade_proposal": self._handle_trade_proposal})
         finally:
+            if self.tradfi is not None:
+                await self.tradfi.close()
             await self.hyperliquid.close()
 
     async def _handle_ask(self, command: dict[str, Any]) -> dict[str, Any]:
         if self.runner is None:
             raise RuntimeError("agent_runner_unavailable")
-        payload = command.get("payload") or {}
-        context_payload = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        raw_payload = command.get("payload")
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
+        raw_context = payload.get("context")
+        context_payload = raw_context if isinstance(raw_context, dict) else {}
         agent_context = AgentContext(
             source=str(context_payload.get("source") or "api-command"),
             discord_guild_id=_optional_str(context_payload.get("discord_guild_id")),

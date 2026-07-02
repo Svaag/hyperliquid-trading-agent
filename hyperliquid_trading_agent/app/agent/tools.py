@@ -223,7 +223,7 @@ class AgentTools:
                 "quote": quote.model_dump(mode="json") if quote else None,
                 "last_trade": trade.model_dump(mode="json") if trade else None,
             }
-        return await self._run_tool("get_stock_quote", {"symbol": symbol}, run, "tradfi:alpaca")
+        return await self._run_tool("get_stock_quote", {"symbol": symbol}, run, self._tradfi_source())
 
     async def get_stock_bars(self, symbol: str, timeframe: str = "1d", lookback_hours: int = 120) -> ToolResult:
         async def run() -> Any:
@@ -236,7 +236,7 @@ class AgentTools:
                 "bars": [b.model_dump(mode="json") for b in bars],
                 "count": len(bars),
             }
-        return await self._run_tool("get_stock_bars", {"symbol": symbol, "timeframe": timeframe, "lookback_hours": lookback_hours}, run, "tradfi:alpaca")
+        return await self._run_tool("get_stock_bars", {"symbol": symbol, "timeframe": timeframe, "lookback_hours": lookback_hours}, run, self._tradfi_source())
 
     async def get_options_chain(self, underlying: str, expiration: str | None = None) -> ToolResult:
         async def run() -> Any:
@@ -253,7 +253,7 @@ class AgentTools:
                 "calls": [c.model_dump(mode="json") for c in chain.calls[:20]],
                 "puts": [c.model_dump(mode="json") for c in chain.puts[:20]],
             }
-        return await self._run_tool("get_options_chain", {"underlying": underlying, "expiration": expiration}, run, "tradfi:alpaca")
+        return await self._run_tool("get_options_chain", {"underlying": underlying, "expiration": expiration}, run, self._tradfi_source())
 
     async def get_earnings_calendar(self, symbol: str | None = None) -> ToolResult:
         async def run() -> Any:
@@ -267,7 +267,7 @@ class AgentTools:
                 "corporate_actions": {k: [a.model_dump(mode="json") for a in v] for k, v in actions.items()},
                 "note": "Check for upcoming ex_dividend and earnings dates in corporate actions. For full earnings calendar, use search_market_news.",
             }
-        return await self._run_tool("get_earnings_calendar", {"symbol": symbol}, run, "tradfi:alpaca")
+        return await self._run_tool("get_earnings_calendar", {"symbol": symbol}, run, self._tradfi_source())
 
     async def get_corporate_actions(self, symbol: str) -> ToolResult:
         async def run() -> Any:
@@ -279,7 +279,7 @@ class AgentTools:
                 "actions": [a.model_dump(mode="json") for a in actions.get(symbol.upper(), [])],
                 "count": len(actions.get(symbol.upper(), [])),
             }
-        return await self._run_tool("get_corporate_actions", {"symbol": symbol}, run, "tradfi:alpaca")
+        return await self._run_tool("get_corporate_actions", {"symbol": symbol}, run, self._tradfi_source())
 
     async def get_market_snapshot_tradfi(self, symbols: list[str]) -> ToolResult:
         async def run() -> Any:
@@ -289,7 +289,7 @@ class AgentTools:
             return {
                 sym: snap.model_dump(mode="json") for sym, snap in snaps.items()
             }
-        return await self._run_tool("get_market_snapshot_tradfi", {"symbols": symbols}, run, "tradfi:alpaca")
+        return await self._run_tool("get_market_snapshot_tradfi", {"symbols": symbols}, run, self._tradfi_source())
 
     # --- Analysis tools ---------------------------------------------------------
 
@@ -308,7 +308,7 @@ class AgentTools:
                 "flow_events": [e.model_dump(mode="json") for e in events[:10]],
                 "count": len(events),
             }
-        return await self._run_tool("analyze_options_flow", {"symbol": symbol}, run, "tradfi:alpaca")
+        return await self._run_tool("analyze_options_flow", {"symbol": symbol}, run, self._tradfi_source())
 
     async def compare_stocks(self, symbols: list[str]) -> ToolResult:
         async def run() -> Any:
@@ -329,7 +329,7 @@ class AgentTools:
                     "ask": snap.latest_quote.ask_price if snap.latest_quote else None,
                 }
             return comparison
-        return await self._run_tool("compare_stocks", {"symbols": symbols}, run, "tradfi:alpaca")
+        return await self._run_tool("compare_stocks", {"symbols": symbols}, run, self._tradfi_source())
 
     async def sector_heatmap(self, sector: str | None = None) -> ToolResult:
         async def run() -> Any:
@@ -355,7 +355,7 @@ class AgentTools:
                         "change_pct": snap.change_pct,
                     }
             return result
-        return await self._run_tool("sector_heatmap", {"sector": sector}, run, "tradfi:alpaca")
+        return await self._run_tool("sector_heatmap", {"sector": sector}, run, self._tradfi_source())
 
     async def stock_screener(self, criteria: str = "") -> ToolResult:
         async def run() -> Any:
@@ -388,7 +388,7 @@ class AgentTools:
                     "volume": snap.daily_bar.volume if snap.daily_bar else None,
                 })
             return {"criteria": criteria, "results": sorted(results, key=lambda r: r.get("volume") or 0, reverse=True)}
-        return await self._run_tool("stock_screener", {"criteria": criteria}, run, "tradfi:alpaca")
+        return await self._run_tool("stock_screener", {"criteria": criteria}, run, self._tradfi_source())
 
     async def estimate_option_greeks(self, symbol: str, strike: float, expiration: str, option_type: str) -> ToolResult:
         async def run() -> Any:
@@ -419,7 +419,7 @@ class AgentTools:
                 "vega": best.vega, "rho": best.rho,
                 "implied_volatility": best.implied_volatility,
             }
-        return await self._run_tool("estimate_option_greeks", {"symbol": symbol, "strike": strike, "expiration": expiration, "option_type": option_type}, run, "tradfi:alpaca")
+        return await self._run_tool("estimate_option_greeks", {"symbol": symbol, "strike": strike, "expiration": expiration, "option_type": option_type}, run, self._tradfi_source())
 
     async def _build_market_resolution_plan(self, prompt: str) -> ResolutionPlan:
         intent = parse_market_intent(prompt)
@@ -452,6 +452,10 @@ class AgentTools:
         await self._add_hip3_candidates(intent.symbols, candidates_by_query)
         await self._add_tradfi_candidates(intent.symbols, candidates_by_query)
         return route_market_intent(intent, candidates_by_query)
+
+    def _tradfi_source(self) -> str:
+        provider = getattr(getattr(self.tradfi, "provider", None), "name", None)
+        return f"tradfi:{provider or 'unavailable'}"
 
     async def _add_hip3_candidates(self, symbols: list[str], candidates_by_query: dict[str, list[AssetCandidate]]) -> None:
         dexs = await self._all_candidate_hip3_dexs(symbols)
@@ -516,7 +520,7 @@ class AgentTools:
                     asset_class=asset_class,
                     provider="alpaca",
                     venue=asset.exchange or "alpaca",
-                    source="alpaca_asset_metadata",
+                    source=f"{self._tradfi_source()}:asset_metadata",
                     active=asset.active,
                     tradable=asset.tradable,
                     metadata=asset.model_dump(mode="json"),

@@ -267,12 +267,17 @@ ENGINE_STRATEGY_MAX_ALLOCATIONS_PER_LOOP=3
 ENGINE_PNL_ATTRIBUTION_ENABLED=true
 ENGINE_PNL_ATTRIBUTION_INTERVAL_SECONDS=300
 
-# Optional equity paper loop when Alpaca data credentials are present
+# Optional TradFi data enrichment and equity paper loop
 TRADFI_ENABLED=true
+TRADFI_PROVIDER_ORDER=alpha_vantage,alpaca
+ALPHA_VANTAGE_ENABLED=true
+ALPHA_VANTAGE_API_KEY=<alpha-vantage-key>
 AUTONOMY_EQUITY_ENABLED=true
 AUTONOMY_EQUITY_UNIVERSE=SPY,QQQ,NVDA,AAPL,MSFT,TSLA,COIN,MSTR
 AUTONOMY_EQUITY_MAX_SIGNALS_PER_DAY=3
 ```
+
+When `DISCORD_CHART_COMMAND_ENABLED=true`, authorized Discord users can request a deterministic chart without mentioning the bot: `;;TSLA h`, `;;TSLA d`, `;;TSLA m`, or `;;TSLA y`. The bot fetches normalized candles from the configured TradFi stack, falls back to Hyperliquid for crypto/namespaced symbols, renders a PNG candlestick chart, and includes simple technical-analysis labels. The command is informational only and never creates a trade or paper position.
 
 When `AUTONOMY_ENABLED=true`, the service watches the configured universe, builds a deterministic market mental map, generates scored signals, posts qualifying alerts to `AUTONOMY_ALERT_CHANNEL_ID`, and waits for human signoff. Discord alert-channel commands: `approve signal <id>`, `reject signal <id>`, `signal <id>`, `signals`, `portfolio`, `positions`, `orders`, `market map`, `pause autonomy`, `resume autonomy`, `daily report`, `weekly report`, `token capital`, `signal outcome <id>`, `event outcome <event_id>`, `mark signal <id> good|bad|unclear|too_noisy|useful|wrong`, `memories [role]`, and `tuning proposals`. Approvals create paper orders/fills/positions only; no live trade is placed. If an approved signal opposes an existing open position (single-name exposure cap exhausted), the bot **autonomously closes the opposing paper position** and posts a flip-request alert: confirm with `approve flip <id>` (or `cancel flip <id>` to reject and keep the original position). The new side opens only on the second human approval. The persistent memory/evaluation knobs are shadow-safe: they evaluate and recommend, but never auto-apply strategy, risk, execution, or sizing changes. High-signal newswire catalysts are evaluated as first-class alpha events and linked to signals when they become evidence. See [docs/autonomy-memory.md](docs/autonomy-memory.md).
 
