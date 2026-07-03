@@ -65,6 +65,12 @@ from hyperliquid_trading_agent.app.newswire.gateway import register_newswire_rou
 from hyperliquid_trading_agent.app.newswire.service import NewswireService
 from hyperliquid_trading_agent.app.orchestration.routes import register_orchestration_routes
 from hyperliquid_trading_agent.app.orchestration.wave_supervisor import WaveSupervisor
+from hyperliquid_trading_agent.app.paper.schemas import (
+    PaperPositionCloseRequest,
+    PaperTradeCancelRequest,
+    PaperTradeConfirmRequest,
+    PaperTradeDraftRequest,
+)
 from hyperliquid_trading_agent.app.runtime_commands import COMMAND_REGISTRY, command_registry_json
 from hyperliquid_trading_agent.app.tracking.alerts import DiscordAlertSink
 from hyperliquid_trading_agent.app.tracking.service import PositionTrackingService
@@ -682,6 +688,125 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if proposal is None:
             raise HTTPException(status_code=404, detail="trade proposal not found")
         return proposal
+
+    @app.get("/portfolios/paper")
+    async def paper_portfolio(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        service = app.state.autonomy_service.portfolio
+        portfolio = await service.initialize()
+        latest = service.latest_snapshot()
+        return {
+            "mode": "paper",
+            "portfolio": portfolio.model_dump(mode="json"),
+            "latest_snapshot": latest.model_dump(mode="json") if latest else None,
+            "open_positions": len(service.open_positions()),
+            "orders": len(service.orders),
+            "fills": len(service.fills),
+            "live_execution_enabled": False,
+        }
+
+    @app.get("/portfolios/paper/positions")
+    async def paper_positions(status: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        service = app.state.autonomy_service.portfolio
+        await service.initialize()
+        positions = list(service.positions.values())
+        if status:
+            positions = [item for item in positions if item.status == status]
+        return {"items": [item.model_dump(mode="json") for item in positions], "count": len(positions)}
+
+    @app.get("/portfolios/paper/orders")
+    async def paper_orders(status: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        service = app.state.autonomy_service.portfolio
+        await service.initialize()
+        orders = list(service.orders.values())
+        if status:
+            orders = [item for item in orders if item.status == status]
+        return {"items": [item.model_dump(mode="json") for item in orders], "count": len(orders)}
+
+    @app.get("/portfolios/paper/fills")
+    async def paper_fills(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        service = app.state.autonomy_service.portfolio
+        await service.initialize()
+        fills = list(service.fills.values())
+        return {"items": [item.model_dump(mode="json") for item in fills], "count": len(fills)}
+
+    @app.get("/portfolios/shadow")
+    async def shadow_portfolio(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        repository: Repository = app.state.repository
+        positions = await repository.list_position_theses(state=None, limit=200)
+        reports = await repository.list_execution_reports(limit=200)
+        return {
+            "mode": "shadow",
+            "positions": positions,
+            "execution_reports": [item for item in reports if item.get("execution_mode") == "shadow"],
+            "live_execution_enabled": False,
+        }
+
+    @app.get("/portfolios/live")
+    async def live_portfolio(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        return {
+            "mode": "live",
+            "configured": False,
+            "enabled": False,
+            "reason": "live execution is disabled by runtime validation",
+            "live_execution_enabled": False,
+        }
+
+    @app.post("/paper/trades/draft", status_code=202)
+    async def draft_paper_trade(request: PaperTradeDraftRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        _require_manual_paper(settings)
+        command = await app.state.repository.enqueue_worker_command(
+            target_role="trader",
+            command_type="paper_trade_draft",
+            payload=request.model_dump(mode="json"),
+            requested_by="api",
+        )
+        return _accepted_command(command)
+
+    @app.post("/paper/trades/{order_id}/confirm", status_code=202)
+    async def confirm_paper_trade(order_id: str, request: PaperTradeConfirmRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        _require_manual_paper(settings)
+        payload = request.model_dump(mode="json") if request else {}
+        command = await app.state.repository.enqueue_worker_command(
+            target_role="trader",
+            command_type="paper_trade_confirm",
+            payload={"order_id": order_id, **payload},
+            requested_by="api",
+        )
+        return _accepted_command(command)
+
+    @app.post("/paper/trades/{order_id}/cancel", status_code=202)
+    async def cancel_paper_trade(order_id: str, request: PaperTradeCancelRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        _require_manual_paper(settings)
+        payload = request.model_dump(mode="json") if request else {}
+        command = await app.state.repository.enqueue_worker_command(
+            target_role="trader",
+            command_type="paper_trade_cancel",
+            payload={"order_id": order_id, **payload},
+            requested_by="api",
+        )
+        return _accepted_command(command)
+
+    @app.post("/paper/positions/{position_ref}/close", status_code=202)
+    async def close_paper_position(position_ref: str, request: PaperPositionCloseRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        _require_manual_paper(settings)
+        payload = request.model_dump(mode="json") if request else {}
+        command = await app.state.repository.enqueue_worker_command(
+            target_role="trader",
+            command_type="paper_position_close",
+            payload={"position_ref": position_ref, **payload},
+            requested_by="api",
+        )
+        return _accepted_command(command)
 
     @app.get("/tracking/positions")
     async def list_tracking_positions(
@@ -1362,6 +1487,11 @@ def _accepted_command(command: dict[str, Any]) -> dict[str, Any]:
         "command_type": command.get("command_type"),
         "status": command.get("status"),
     }
+
+
+def _require_manual_paper(settings: Settings) -> None:
+    if not settings.paper_trading_enabled:
+        raise HTTPException(status_code=409, detail="manual paper trading is disabled")
 
 
 def _root_html(settings: Settings) -> str:

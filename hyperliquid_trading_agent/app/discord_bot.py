@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from io import BytesIO
@@ -13,9 +14,14 @@ from hyperliquid_trading_agent.app.charting import (
     parse_chart_command,
     parse_chart_prompt,
 )
-from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.config import ServiceRole, Settings
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.metrics import DISCORD_MESSAGES
+from hyperliquid_trading_agent.app.paper.discord import (
+    PaperDiscordCommand,
+    format_paper_result,
+    parse_paper_discord_command,
+)
 from hyperliquid_trading_agent.app.tracking.commands import parse_tracking_command
 from hyperliquid_trading_agent.app.tracking.service import PositionTrackingService
 
@@ -126,6 +132,7 @@ class DiscordTradingBot:
             prompt = _message_prompt_without_mentions(message.content)
             referenced_message = await _resolve_referenced_message(message)
             autonomy_command = parse_autonomy_command(prompt, referenced_message=referenced_message) if (prompt or referenced_message is not None) else None
+            paper_command = parse_paper_discord_command(prompt) if prompt else None
             autonomy_alert_channel = bool(self.settings.autonomy_alert_channel_id and str(channel_id) == str(self.settings.autonomy_alert_channel_id))
             if not mentioned and not thread_continuation and not (autonomy_command is not None and autonomy_alert_channel):
                 return
@@ -144,6 +151,16 @@ class DiscordTradingBot:
             tracking_command = parse_tracking_command(prompt)
             try:
                 async with message.channel.typing():
+                    if paper_command is not None:
+                        content = await self._handle_paper_command(
+                            paper_command,
+                            user_id=_maybe_str(getattr(message.author, "id", None)),
+                            role_ids=role_ids,
+                        )
+                        for chunk in _chunk(content, self.settings.discord_max_response_chars):
+                            await message.reply(chunk, mention_author=False)
+                        DISCORD_MESSAGES.labels(result="paper_command").inc()
+                        return
                     if autonomy_command is not None and self.autonomy_service is not None and autonomy_alert_channel:
                         content = await self.autonomy_service.handle_discord_command(
                             autonomy_command,
@@ -198,6 +215,87 @@ class DiscordTradingBot:
                 log.exception("discord_message_failed", error=type(exc).__name__)
                 await message.reply("I hit an internal error while answering. No trade was placed.", mention_author=False)
 
+    async def _handle_paper_command(self, command: PaperDiscordCommand, *, user_id: str | None, role_ids: set[int]) -> str:
+        if command.action in {"portfolio", "positions", "orders"}:
+            return await self._handle_paper_read(command)
+        if not self.settings.paper_trading_enabled:
+            return "Manual paper trading is disabled for this runtime. Set PAPER_TRADING_ENABLED=true to use Discord paper commands. No live trade was placed."
+        if command.error:
+            return f"{command.error} No live trade was placed."
+        if not self._is_admin(user_id, role_ids):
+            return "Not authorized for paper trading commands."
+        repository = self._repository()
+        if repository is None:
+            return "Paper command routing is unavailable in this Discord worker. No live trade was placed."
+
+        if command.action == "draft":
+            command_type = "paper_trade_draft"
+            if command.draft is not None:
+                payload = command.draft.model_dump(mode="json")
+                payload["actor"] = user_id or "discord"
+            else:
+                payload = {"proposal_id": command.proposal_id, "actor": user_id or "discord", "source": "manual_discord"}
+        elif command.action == "confirm":
+            command_type = "paper_trade_confirm"
+            payload = {"order_id": command.order_id, "actor": user_id or "discord", "close_opposite": command.close_opposite}
+        elif command.action == "cancel":
+            command_type = "paper_trade_cancel"
+            payload = {"order_id": command.order_id, "actor": user_id or "discord", "reason": command.reason or "discord_cancel"}
+        elif command.action == "close":
+            command_type = "paper_position_close"
+            payload = {"position_ref": command.position_ref, "actor": user_id or "discord", "price": command.price, "reason": command.reason or "discord_manual_close"}
+        else:
+            return "Unknown paper command. No live trade was placed."
+
+        queued = await repository.enqueue_worker_command(
+            target_role=ServiceRole.TRADER.value,
+            command_type=command_type,
+            payload={key: value for key, value in payload.items() if value is not None},
+            requested_by="discord_bot",
+        )
+        return await self._paper_command_response(command, queued)
+
+    async def _paper_command_response(self, paper_command: PaperDiscordCommand, queued: dict[str, Any]) -> str:
+        repository = self._repository()
+        command_id = str(queued.get("command_id") or "")
+        if repository is None or not command_id:
+            return "Paper command was accepted, but status polling is unavailable. No live trade was placed."
+        timeout_seconds = min(30.0, max(5.0, float(getattr(self.settings, "discord_command_timeout_seconds", 30.0))))
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        current = queued
+        while asyncio.get_running_loop().time() < deadline:
+            current = await repository.get_worker_command(command_id) or current
+            status = str(current.get("status") or "")
+            if status == "completed":
+                result = current.get("result") if isinstance(current.get("result"), dict) else {}
+                return format_paper_result(paper_command, result)
+            if status in {"failed", "cancelled"}:
+                return f"Paper command `{command_id}` {status}: {current.get('last_error') or 'unknown error'}. No live trade was placed."
+            await asyncio.sleep(1.0)
+        return f"Accepted paper command `{command_id}`; it is still pending. Check `/commands/{command_id}`. No live trade was placed."
+
+    async def _handle_paper_read(self, command: PaperDiscordCommand) -> str:
+        repository = self._repository()
+        if repository is None:
+            return "Paper portfolio storage is unavailable."
+        if command.action == "portfolio":
+            snapshot = await repository.get_latest_portfolio_snapshot()
+            return _format_paper_snapshot_dict(snapshot) if snapshot else "No paper portfolio snapshot yet."
+        if command.action == "positions":
+            return _format_paper_positions_dict(await repository.list_paper_positions(limit=20))
+        if command.action == "orders":
+            return _format_paper_orders_dict(await repository.list_paper_orders(limit=20))
+        return "Unknown paper read command."
+
+    def _repository(self) -> Any | None:
+        repository = getattr(self.runner, "repository", None)
+        return repository if repository is not None and getattr(repository, "enabled", False) else None
+
+    def _is_admin(self, user_id: str | None, role_ids: set[int]) -> bool:
+        if user_id and user_id.isdigit() and int(user_id) in self.settings.autonomy_admin_users:
+            return True
+        return bool(role_ids & self.settings.autonomy_admin_roles)
+
     async def _handle_chart_command(
         self,
         message: Any,
@@ -236,6 +334,48 @@ class DiscordTradingBot:
             log.exception("discord_chart_command_failed", error=type(exc).__name__)
             await message.reply("I hit an internal error while rendering the chart. No trade was placed.", mention_author=False)
         return True
+
+
+def _format_paper_snapshot_dict(snapshot: dict[str, Any]) -> str:
+    sharpe = snapshot.get("sharpe")
+    sharpe_text = "n/a" if sharpe is None else f"{float(sharpe):.2f}"
+    return (
+        "**Paper portfolio**\n"
+        f"Equity: `${float(snapshot.get('equity_usd') or 0):,.2f}`\n"
+        f"Cash/Treasury: `${float(snapshot.get('cash_usd') or 0):,.2f}`\n"
+        f"Realized PnL: `${float(snapshot.get('realized_pnl_usd') or 0):,.2f}`\n"
+        f"Unrealized PnL: `${float(snapshot.get('unrealized_pnl_usd') or 0):,.2f}`\n"
+        f"Total PnL: `${float(snapshot.get('total_pnl_usd') or 0):,.2f}`\n"
+        f"Gross exposure: `${float(snapshot.get('gross_exposure_usd') or 0):,.2f}` | Net: `${float(snapshot.get('net_exposure_usd') or 0):,.2f}`\n"
+        f"Max drawdown: `{float(snapshot.get('drawdown_pct') or 0):.2f}%` | Sharpe: `{sharpe_text}`"
+    )
+
+
+def _format_paper_positions_dict(positions: list[dict[str, Any]]) -> str:
+    if not positions:
+        return "No paper positions."
+    lines = ["**Paper positions**"]
+    for item in positions[:20]:
+        lines.append(
+            f"- `{str(item.get('id') or '')[:8]}` {item.get('symbol')} {item.get('side')} {item.get('status')}: "
+            f"qty `{float(item.get('quantity') or 0):.6g}` entry `{float(item.get('avg_entry_px') or 0):.6g}` "
+            f"mark `{float(item.get('mark_px') or item.get('avg_entry_px') or 0):.6g}` "
+            f"uPnL `${float(item.get('unrealized_pnl_usd') or 0):,.2f}` rPnL `${float(item.get('realized_pnl_usd') or 0):,.2f}`"
+        )
+    return "\n".join(lines)
+
+
+def _format_paper_orders_dict(orders: list[dict[str, Any]]) -> str:
+    if not orders:
+        return "No paper orders."
+    lines = ["**Paper orders**"]
+    for item in orders[:20]:
+        fill = item.get("filled_px") or item.get("requested_px") or 0
+        lines.append(
+            f"- `{str(item.get('id') or '')[:8]}` {item.get('symbol')} {item.get('side')} {item.get('status')}: "
+            f"qty `{float(item.get('quantity') or 0):.6g}` px `{float(fill):.6g}` source `{(item.get('metadata') or {}).get('source', '-')}`"
+        )
+    return "\n".join(lines)
 
 
 async def _referenced_message_content(message, bot_user) -> str:

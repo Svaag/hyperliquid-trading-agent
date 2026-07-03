@@ -88,6 +88,55 @@ def test_trader_autonomy_handlers_delegate_to_real_service_methods() -> None:
     anyio.run(run)
 
 
+def test_trader_manual_paper_handlers_mutate_unified_paper_portfolio() -> None:
+    async def run() -> None:
+        worker = TraderWorker(Settings(environment="test", paper_trading_enabled=True, _env_file=None))
+
+        draft = await worker._handle_paper_trade_draft(
+            {
+                "command_type": "paper_trade_draft",
+                "requested_by": "discord_bot",
+                "payload": {"symbol": "BTC", "side": "long", "entry": 100, "stop": 95, "actor": "u1", "source": "manual_discord"},
+            }
+        )
+        order_id = draft["order"]["id"]
+        assert draft["order"]["status"] == "new"
+
+        confirm = await worker._handle_paper_trade_confirm(
+            {
+                "command_type": "paper_trade_confirm",
+                "requested_by": "discord_bot",
+                "payload": {"order_id": order_id, "mid": 101, "actor": "u1"},
+            }
+        )
+
+        assert confirm["order"]["status"] == "filled"
+        assert confirm["fill"]["order_id"] == order_id
+        assert confirm["position"]["status"] == "open"
+        assert confirm["paper_only"] is True
+        assert confirm["exchange_actions"] == []
+
+    anyio.run(run)
+
+
+def test_trader_manual_paper_handlers_require_feature_flag() -> None:
+    async def run() -> None:
+        worker = TraderWorker(Settings(environment="test", paper_trading_enabled=False, _env_file=None))
+        try:
+            await worker._handle_paper_trade_draft(
+                {
+                    "command_type": "paper_trade_draft",
+                    "payload": {"symbol": "BTC", "side": "long", "entry": 100, "stop": 95},
+                }
+            )
+        except RuntimeError as exc:
+            assert "PAPER_TRADING_ENABLED" in str(exc)
+        else:  # pragma: no cover
+            raise AssertionError("paper draft should require PAPER_TRADING_ENABLED")
+
+    anyio.run(run)
+
+
 def test_trader_engine_newsfeed_pump_starts_with_persisted_consumer() -> None:
     async def run() -> None:
         settings = Settings(environment="test", engine_enabled=True, engine_newsfeed_enabled=True, newswire_enabled=False, _env_file=None)

@@ -425,7 +425,14 @@ def test_tradfi_config_warnings(monkeypatch):
     assert settings.tradfi_config_warnings() == []
 
     # TradFi enabled without keys
-    settings = Settings(tradfi_enabled=True, alpaca_api_key="", alpaca_api_secret="")
+    settings = Settings(
+        tradfi_enabled=True,
+        tradfi_provider_order="alpaca",
+        alpha_vantage_enabled=False,
+        alpha_vantage_api_key="",
+        alpaca_api_key="",
+        alpaca_api_secret="",
+    )
     warnings = settings.tradfi_config_warnings()
     assert any("ALPACA_API_KEY" in w for w in warnings)
 

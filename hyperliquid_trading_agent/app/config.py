@@ -293,6 +293,9 @@ class Settings(BaseSettings):
     high_stakes_smart_money_addresses: str = ""
     agent_api_bearer_token: str = ""
 
+    paper_trading_enabled: bool = False
+    paper_trading_require_confirm: bool = True
+
     autonomy_enabled: bool = False
     autonomy_mode: Literal["paper_signoff"] = "paper_signoff"
     autonomy_alert_channel_id: str = ""

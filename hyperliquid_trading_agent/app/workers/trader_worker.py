@@ -18,6 +18,7 @@ from hyperliquid_trading_agent.app.hip4.service import Hip4Service
 from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.newswire.bus import InProcessNewswireBus
+from hyperliquid_trading_agent.app.paper.schemas import PaperTradeDraftRequest
 from hyperliquid_trading_agent.app.workers.base import BaseWorker
 from hyperliquid_trading_agent.app.workers.stored_newswire_pump import StoredNewswirePump
 
@@ -84,6 +85,10 @@ class TraderWorker(BaseWorker):
             "autonomy_signal_expire": self._handle_autonomy_signal_expire,
             "autonomy_equity_signal_approve": self._handle_autonomy_equity_signal_approve,
             "autonomy_equity_signal_reject": self._handle_autonomy_equity_signal_reject,
+            "paper_trade_draft": self._handle_paper_trade_draft,
+            "paper_trade_confirm": self._handle_paper_trade_confirm,
+            "paper_trade_cancel": self._handle_paper_trade_cancel,
+            "paper_position_close": self._handle_paper_position_close,
             "tracking_pause": self._handle_tracking_pause,
             "tracking_resume": self._handle_tracking_resume,
             "tracking_stop": self._handle_tracking_stop,
@@ -266,6 +271,69 @@ class TraderWorker(BaseWorker):
         signal = await self._get_autonomy_service().reject_equity_signal(self._required_str(payload, "signal_id"), actor=self._actor(command), reason=str(payload.get("reason") or ""))
         return self._result(command, signal=signal.model_dump(mode="json"))
 
+    async def _handle_paper_trade_draft(self, command: dict[str, Any]) -> dict[str, Any]:
+        self._record_command(command)
+        self._require_manual_paper_enabled()
+        payload = self._payload(command)
+        request = await self._paper_draft_request(payload, actor=self._actor(command))
+        mid = self._optional_float(payload.get("mid"))
+        if mid is None and request.entry is None:
+            mid = await self._latest_mid(request.symbol)
+        order = await self._get_autonomy_service().portfolio.draft_trade(request, mid=mid)
+        return self._result(command, order=order.model_dump(mode="json"))
+
+    async def _handle_paper_trade_confirm(self, command: dict[str, Any]) -> dict[str, Any]:
+        self._record_command(command)
+        self._require_manual_paper_enabled()
+        payload = self._payload(command)
+        order_id = self._required_str(payload, "order_id")
+        service = self._get_autonomy_service().portfolio
+        await service.initialize()
+        order = service.orders.get(order_id)
+        mid = self._optional_float(payload.get("mid"))
+        if mid is None and order is not None:
+            mid = await self._latest_mid(order.symbol)
+        order, fill, position = await service.confirm_draft(
+            order_id,
+            actor=self._actor(command),
+            mid=mid,
+            close_opposite=bool(payload.get("close_opposite", False)),
+        )
+        return self._result(command, order=order.model_dump(mode="json"), fill=fill.model_dump(mode="json"), position=position.model_dump(mode="json"))
+
+    async def _handle_paper_trade_cancel(self, command: dict[str, Any]) -> dict[str, Any]:
+        self._record_command(command)
+        self._require_manual_paper_enabled()
+        payload = self._payload(command)
+        order = await self._get_autonomy_service().portfolio.cancel_draft(
+            self._required_str(payload, "order_id"),
+            actor=self._actor(command),
+            reason=str(payload.get("reason") or "cancelled"),
+        )
+        return self._result(command, order=order.model_dump(mode="json"))
+
+    async def _handle_paper_position_close(self, command: dict[str, Any]) -> dict[str, Any]:
+        self._record_command(command)
+        self._require_manual_paper_enabled()
+        payload = self._payload(command)
+        ref = self._required_str(payload, "position_ref")
+        service = self._get_autonomy_service().portfolio
+        await service.initialize()
+        price = self._optional_float(payload.get("price"))
+        if price is None:
+            symbol = ref.upper()
+            if ref in service.positions:
+                symbol = service.positions[ref].symbol
+            price = await self._latest_mid(symbol)
+        if price is None:
+            raise ValueError("paper close requires price when no latest mid is available")
+        reason = str(payload.get("reason") or "manual")
+        if ref in service.positions:
+            position = await service.close_position(ref, price, reason=reason)
+        else:
+            position = await service.close_position_by_symbol(ref, price, reason=reason)
+        return self._result(command, position=position.model_dump(mode="json"))
+
     async def _handle_tracking_pause(self, command: dict[str, Any]) -> dict[str, Any]:
         self._record_command(command)
         return await self._set_tracker_status(command, "paused")
@@ -363,6 +431,33 @@ class TraderWorker(BaseWorker):
     def _optional_float(self, value: Any) -> float | None:
         return float(value) if value is not None else None
 
+    def _require_manual_paper_enabled(self) -> None:
+        if not getattr(self.settings, "paper_trading_enabled", False):
+            raise RuntimeError("PAPER_TRADING_ENABLED is false")
+
+    async def _paper_draft_request(self, payload: dict[str, Any], *, actor: str) -> PaperTradeDraftRequest:
+        if payload.get("proposal_id") and not payload.get("symbol"):
+            proposal = await self.repository.get_trade_proposal(str(payload["proposal_id"]))
+            if proposal is None:
+                raise KeyError("trade proposal not found")
+            payload = {**_paper_payload_from_proposal(proposal), **{k: v for k, v in payload.items() if v not in (None, "")}}
+        payload = {**payload, "actor": str(payload.get("actor") or actor)}
+        return PaperTradeDraftRequest.model_validate(payload)
+
+    async def _latest_mid(self, symbol: str) -> float | None:
+        try:
+            client = self._get_hyperliquid_client()
+            mids = await client.all_mids()
+            value = mids.get(symbol.upper()) or mids.get(symbol)
+            return float(value) if value is not None else None
+        except Exception:
+            return None
+
+    def _get_hyperliquid_client(self) -> HyperliquidClient:
+        if self._engine_hyperliquid is None:
+            self._engine_hyperliquid = HyperliquidClient(settings=self.settings)
+        return self._engine_hyperliquid
+
     def _get_hip4_service(self) -> Hip4Service:
         if self._hip4_service is None:
             self._hip4_service = Hip4Service(settings=self.settings, repository=self.repository, hyperliquid=None, ws_worker=None, risk_gateway=None)
@@ -422,3 +517,20 @@ class TraderWorker(BaseWorker):
                 "catalyst_threshold": self.settings.engine_news_catalyst_threshold,
             },
         }
+
+
+def _paper_payload_from_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
+    data = proposal.get("proposal") or proposal.get("proposal_json") or proposal
+    if not isinstance(data, dict):
+        data = {}
+    return {
+        "symbol": data.get("coin"),
+        "side": data.get("side"),
+        "entry": data.get("entry"),
+        "stop": data.get("stop"),
+        "take_profit": data.get("take_profit"),
+        "risk_pct": data.get("risk_pct"),
+        "thesis": data.get("thesis") or proposal.get("content") or "",
+        "source": "trade_proposal",
+        "proposal_id": proposal.get("id") or data.get("proposal_id"),
+    }

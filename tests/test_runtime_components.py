@@ -43,6 +43,18 @@ class FakeHttpClient:
         return FakeResponse({"ok": json})
 
 
+class FakeCommandRepository:
+    async def enqueue_worker_command(self, *, target_role, command_type, payload=None, requested_by=None, idempotency_key=None, metadata=None, requested_at_ms=None):
+        return {
+            "command_id": "cmd_test",
+            "target_role": target_role,
+            "command_type": command_type,
+            "status": "accepted_unpersisted",
+            "payload": payload or {},
+            "requested_by": requested_by,
+        }
+
+
 class FakeTools:
     tradfi = None
 
@@ -175,6 +187,24 @@ def test_health_config_exposes_autonomy_without_starting_service():
     assert autonomy["safety"]["live_execution_enabled"] is False
     assert autonomy["safety"]["strategy_mutation_enabled"] is False
     assert autonomy["warnings"] == []
+
+
+def test_manual_paper_routes_are_command_backed_and_gated():
+    disabled_app = create_app(Settings(environment="test", paper_trading_enabled=False, _env_file=None))
+    with TestClient(disabled_app) as client:
+        response = client.post("/paper/trades/draft", json={"symbol": "BTC", "side": "long", "entry": 100, "stop": 95})
+        assert response.status_code == 409
+
+    enabled_app = create_app(Settings(environment="test", paper_trading_enabled=True, _env_file=None))
+    with TestClient(enabled_app) as client:
+        enabled_app.state.repository = FakeCommandRepository()
+        draft = client.post("/paper/trades/draft", json={"symbol": "BTC", "side": "long", "entry": 100, "stop": 95})
+        assert draft.status_code == 202
+        data = draft.json()
+        assert data["accepted"] is True
+        assert data["target_role"] == "trader"
+        assert data["command_type"] == "paper_trade_draft"
+        assert client.get("/portfolios/live").json()["enabled"] is False
 
 
 def test_autonomy_config_warnings_invalid_memory_loop_settings():

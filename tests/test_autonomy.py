@@ -19,6 +19,8 @@ from hyperliquid_trading_agent.app.autonomy.signals import SignalEngine, risk_ve
 from hyperliquid_trading_agent.app.autonomy.universe import MarketUniverseResolver
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.main import create_app
+from hyperliquid_trading_agent.app.paper.discord import parse_paper_discord_command
+from hyperliquid_trading_agent.app.paper.schemas import PaperTradeDraftRequest
 
 
 class FakeHyperliquid:
@@ -199,6 +201,122 @@ def test_flip_request_closes_opposing_position_and_marks_signal():
     diag = portfolio.sizing_diagnostics(long_signal, 101.0)
     assert diag["opposing_position_side"] == "short"
     assert diag["current_symbol_exposure_usd"] > diag["max_single_name_exposure_usd"]
+
+
+def test_manual_paper_trade_draft_confirm_cancel_lifecycle():
+    settings = Settings(autonomy_paper_initial_equity_usd=10_000, autonomy_paper_risk_pct_per_trade=1, autonomy_paper_max_single_name_exposure_pct=100)
+    portfolio = PaperPortfolioService(settings)
+    request = PaperTradeDraftRequest(symbol="BTC", side="long", entry=100, stop=95, take_profit=115, actor="u1", source="manual_discord")
+
+    import anyio
+
+    draft = anyio.run(portfolio.draft_trade, request, None, 1)
+    assert draft.status == "new"
+    assert portfolio.fills == {}
+    assert portfolio.positions == {}
+
+    async def confirm_first():
+        return await portfolio.confirm_draft(draft.id, actor="u1", mid=101, timestamp_ms=2)
+
+    order, fill, position = anyio.run(confirm_first)
+    assert order.status == "filled"
+    assert fill.order_id == order.id
+    assert position.status == "open"
+    assert position.metadata["source"] == "manual_discord"
+    assert portfolio.latest_snapshot() is not None
+
+    cancel_request = PaperTradeDraftRequest(symbol="ETH", side="short", entry=200, stop=210, actor="u1", source="manual_discord")
+    cancel_draft = anyio.run(portfolio.draft_trade, cancel_request, None, 3)
+    async def cancel_second():
+        return await portfolio.cancel_draft(cancel_draft.id, actor="u1", reason="test", timestamp_ms=4)
+
+    cancelled = anyio.run(cancel_second)
+    assert cancelled.status == "cancelled"
+    with pytest.raises(Exception):
+        async def confirm_cancelled():
+            return await portfolio.confirm_draft(cancel_draft.id, actor="u1", mid=199, timestamp_ms=5)
+
+        anyio.run(confirm_cancelled)
+
+
+def test_manual_paper_confirm_requires_explicit_close_opposite_for_flip():
+    settings = Settings(autonomy_paper_initial_equity_usd=10_000, autonomy_paper_risk_pct_per_trade=1, autonomy_paper_max_single_name_exposure_pct=100)
+    portfolio = PaperPortfolioService(settings)
+
+    import anyio
+
+    short = anyio.run(
+        portfolio.draft_trade,
+        PaperTradeDraftRequest(symbol="SOL", side="short", entry=100, stop=105, actor="u1", source="manual_discord"),
+        None,
+        1,
+    )
+    async def confirm_short():
+        return await portfolio.confirm_draft(short.id, actor="u1", mid=100, timestamp_ms=2)
+
+    anyio.run(confirm_short)
+    long = anyio.run(
+        portfolio.draft_trade,
+        PaperTradeDraftRequest(symbol="SOL", side="long", entry=101, stop=99, actor="u1", source="manual_discord"),
+        None,
+        3,
+    )
+    with pytest.raises(Exception):
+        async def confirm_blocked_long():
+            return await portfolio.confirm_draft(long.id, actor="u1", mid=101, timestamp_ms=4)
+
+        anyio.run(confirm_blocked_long)
+
+    async def confirm_long_flip():
+        return await portfolio.confirm_draft(long.id, actor="u1", mid=101, close_opposite=True, timestamp_ms=5)
+
+    _order, _fill, new_position = anyio.run(confirm_long_flip)
+    assert new_position.side == "long"
+    assert len([item for item in portfolio.positions.values() if item.status == "open"]) == 1
+
+
+def test_manual_paper_explicit_quantity_respects_exposure_caps():
+    settings = Settings(
+        autonomy_paper_initial_equity_usd=10_000,
+        autonomy_paper_max_single_name_exposure_pct=10,
+        autonomy_paper_max_gross_leverage=1,
+    )
+    portfolio = PaperPortfolioService(settings)
+
+    import anyio
+
+    with pytest.raises(Exception):
+        anyio.run(
+            portfolio.draft_trade,
+            PaperTradeDraftRequest(symbol="BTC", side="long", entry=100, stop=95, quantity=20),
+            None,
+            1,
+        )
+
+
+def test_parse_paper_discord_commands():
+    draft = parse_paper_discord_command("paper long BTC entry 65000 stop 64000 tp 68000 risk 0.25")
+    assert draft is not None
+    assert draft.action == "draft"
+    assert draft.draft is not None
+    assert draft.draft.symbol == "BTC"
+    assert draft.draft.risk_pct == 0.25
+
+    market = parse_paper_discord_command("take paper short ETH market stop 3600")
+    assert market is not None
+    assert market.draft is not None
+    assert market.draft.market is True
+
+    confirm = parse_paper_discord_command("confirm paper abc123 close opposite")
+    assert confirm is not None
+    assert confirm.action == "confirm"
+    assert confirm.close_opposite is True
+
+    close = parse_paper_discord_command("paper close BTC price 101")
+    assert close is not None
+    assert close.action == "close"
+    assert close.position_ref == "BTC"
+    assert close.price == 101
 
 
 def test_discord_autonomy_command_parser_and_alert_format():
