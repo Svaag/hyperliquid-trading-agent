@@ -193,6 +193,7 @@ class DiscordNewsPublisher:
             NEWSWIRE_DISCORD_POSTS.labels(mode=mode, result="skipped").inc()
             return None
         content = str(payload.get("content") or "")[: self.settings.discord_max_response_chars]
+        fallback_content = str(payload.get("fallback_content") or content)[: self.settings.discord_max_response_chars]
         embeds = payload.get("embeds") if isinstance(payload.get("embeds"), list) else None
         async with self._send_lock:
             await self._throttle()
@@ -201,7 +202,7 @@ class DiscordNewsPublisher:
                     result = await self.alert_sink.send(self._channel_id, content, embeds=embeds)
                 except TypeError:
                     # Compatibility with older/fake sinks that accept only content.
-                    result = await self.alert_sink.send(self._channel_id, content)
+                    result = await self.alert_sink.send(self._channel_id, fallback_content)
                 NEWSWIRE_DISCORD_POSTS.labels(mode=mode, result="ok" if result else "skipped").inc()
                 if not result:
                     self._last_error = "discord_send_skipped"
@@ -238,13 +239,13 @@ class DiscordNewsPublisher:
     async def send_test_message(self, *, channel_id: str | None = None, dry_run: bool = False) -> dict[str, Any]:
         target = str(channel_id or self._channel_id)
         payload = {
-            "content": "🧪 Newswire Discord test — no market event.\nNews feed only — no trade was placed.",
+            "content": "",
+            "fallback_content": "🧪 Newswire Discord test — no market event.",
             "embeds": [
                 {
                     "title": "🧪 Newswire Discord test",
                     "description": "This verifies the send-only Newswire publisher can post to #news.",
                     "color": 0x3498DB,
-                    "footer": {"text": "News feed only — no trade was placed."},
                 }
             ],
         }

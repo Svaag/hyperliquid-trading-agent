@@ -139,8 +139,11 @@ class NewswireService:
         return event
 
     async def _persist_event(self, event: NewswireEvent) -> None:
+        repository = self.repository
+        if repository is None:
+            return
         try:
-            result = await self.repository.record_newswire_event(event.model_dump(mode="json"))
+            result = await repository.record_newswire_event(event.model_dump(mode="json"))
         except Exception as exc:  # pragma: no cover - persistence must not break ingestion
             self.persistence_errors += 1
             self.last_persistence_error = {"event_id": event.event_id, "error": type(exc).__name__, "detail": str(exc)[:500], "at_ms": now_ms()}

@@ -15,7 +15,6 @@ from hyperliquid_trading_agent.app.newswire.bus import InProcessNewswireBus, Que
 from hyperliquid_trading_agent.app.newswire.classify import classify_event_type, classify_urgency, source_score
 from hyperliquid_trading_agent.app.newswire.consumers.discord_news import DiscordNewsPublisher
 from hyperliquid_trading_agent.app.newswire.format import (
-    NEWSWIRE_DISCLAIMER,
     format_news_digest_message,
     format_news_event_message,
 )
@@ -85,18 +84,22 @@ def test_to_news_event_bridge_preserves_core_fields():
     assert legacy.metadata["event_type"] == event.event_type
 
 
-def test_discord_embed_payloads_include_fallback_and_footer():
-    event = _event(source="coindesk", headline="ETH rallies on inflows", symbols=["ETH"])
+def test_discord_embed_payloads_are_embed_first_and_decode_entities():
+    event = _event(source="coindesk", headline="ETH rallies &#39;hard&#39; on inflows", symbols=["ETH"])
     event.importance_score = 82.0
     event.urgency = "breaking"
     single = format_news_event_message(event)
-    assert "ETH rallies" in single["content"]
-    assert single["embeds"][0]["footer"]["text"] == NEWSWIRE_DISCLAIMER
+    assert single["content"] == ""
+    assert "ETH rallies 'hard'" in single["fallback_content"]
+    assert "ETH rallies 'hard'" in single["embeds"][0]["title"]
+    assert "footer" not in single["embeds"][0]
     assert single["embeds"][0]["color"] == 0xE74C3C
 
     digest = format_news_digest_message([event], max_items=10)
+    assert digest["content"] == ""
     assert "Newswire digest" in digest["embeds"][0]["title"]
-    assert digest["embeds"][0]["footer"]["text"] == NEWSWIRE_DISCLAIMER
+    assert "ETH rallies 'hard'" in digest["embeds"][0]["description"]
+    assert "footer" not in digest["embeds"][0]
 
 
 # --- bus ---------------------------------------------------------------------
@@ -273,10 +276,11 @@ def test_discord_publisher_posts_breaking_immediately_and_batches_rest():
 
     before_flush, after_flush = anyio.run(run)
     assert len(before_flush) == 1  # only the breaking event posted immediately
-    assert "Trading halt on NVDA" in before_flush[0][1]
+    assert before_flush[0][1] == ""
     assert before_flush[0][2]  # embed payload included
     assert len(after_flush) == 2  # digest flushed the buffered normal event
-    assert "digest" in after_flush[1][1].lower()
+    assert after_flush[1][1] == ""
+    assert "digest" in after_flush[1][2][0]["title"].lower()
 
 
 def test_discord_publisher_skips_startup_backlog():
@@ -345,7 +349,9 @@ def test_newswire_discord_test_endpoint_dry_run():
     body = response.json()
     assert body["dry_run"] is True
     assert body["channel_id"] == "999"
-    assert "News feed only" in body["payload"]["content"]
+    assert body["payload"]["content"] == ""
+    assert "Newswire Discord test" in body["payload"]["fallback_content"]
+    assert "footer" not in body["payload"]["embeds"][0]
 
 
 def test_world_model_live_exposes_newswire_discord_without_full_bot():

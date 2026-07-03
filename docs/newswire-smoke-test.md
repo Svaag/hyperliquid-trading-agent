@@ -12,7 +12,7 @@ Run after enabling `ALPACA_NEWS_ENABLED=true` with valid API keys.
 - [ ] `NEWSWIRE_NEWS_CHANNEL_ID` is set to a Discord channel ID (for the curated news feed)
 - [ ] `ALPACA_NEWS_SYMBOLS=*` (or your watchlist like `AAPL,NVDA,MSFT,TSLA`)
 - [ ] `ENGINE_NEWS_MIN_IMPORTANCE` is set to the desired Institutional Engine gate (default `35`)
-- [ ] `NEWSWIRE_NEWS_MIN_IMPORTANCE` is set to the desired Discord #news gate (local runtime may use `25` for a livelier feed)
+- [ ] `NEWSWIRE_NEWS_MIN_IMPORTANCE` is set to the desired Discord #news gate (default `60`; lower values can make the feed noisy)
 
 ## Start-up Checks
 
@@ -51,7 +51,8 @@ docker compose --profile discord-publisher up -d discord-publisher
 - [ ] `POST /newswire/discord/test` returns an accepted command for `discord_publisher`; poll the returned `/commands/{id}` until completed
 - [ ] Breaking news (urgency=breaking or score >= NEWSWIRE_BREAKING_MIN_IMPORTANCE) appears immediately in the #news channel
 - [ ] Non-breaking news appears in periodic digest posts (every NEWSWIRE_DIGEST_INTERVAL_SECONDS)
-- [ ] Each message/embed footer includes "News feed only — no trade was placed."
+- [ ] Messages render as a single Discord embed without a duplicated plaintext digest
+- [ ] Headlines render decoded punctuation such as apostrophes instead of HTML entities like `&#39;`
 - [ ] Halt-state events (`⛔ Halt state`) show the halt warning when applicable
 
 ## Institutional Engine Delivery

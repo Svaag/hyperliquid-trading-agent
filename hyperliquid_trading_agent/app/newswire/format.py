@@ -1,10 +1,9 @@
 from __future__ import annotations
 
+import html
 from typing import Any
 
 from hyperliquid_trading_agent.app.newswire.schemas import NewswireEvent
-
-NEWSWIRE_DISCLAIMER = "News feed only — no trade was placed."
 
 _COLOR_BREAKING = 0xE74C3C
 _COLOR_HIGH = 0xF39C12
@@ -41,10 +40,14 @@ def _color(event: NewswireEvent) -> int:
 
 
 def _trim(value: Any, limit: int) -> str:
-    text = " ".join(str(value or "").split())
+    text = _clean_text(value)
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _clean_text(value: Any) -> str:
+    return html.unescape(" ".join(str(value or "").split()))
 
 
 def _event_description(event: NewswireEvent) -> str:
@@ -57,7 +60,7 @@ def _event_description(event: NewswireEvent) -> str:
         parts.append(f"**Why it matters:** {_trim(event.enrichment['why_it_matters'], 450)}")
     if event.tradability.halted_symbols:
         parts.append(f"⛔ Halt state: {', '.join(event.tradability.halted_symbols)} — confirm before acting.")
-    return "\n\n".join(parts)[:3500] or _trim(event.headline, 3500)
+    return _trim("\n\n".join(parts), 3500) or _trim(event.headline, 3500)
 
 
 def format_news_event(event: NewswireEvent) -> str:
@@ -65,17 +68,16 @@ def format_news_event(event: NewswireEvent) -> str:
     symbols = _symbols(event) or "—"
     why = ""
     if event.enrichment and event.enrichment.get("why_it_matters"):
-        why = f"\n_why:_ {str(event.enrichment['why_it_matters'])[:240]}"
+        why = f"\n_why:_ {_trim(event.enrichment['why_it_matters'], 240)}"
     url = f"\n{event.url}" if event.url else ""
     halt = ""
     if event.tradability.halted_symbols:
         halt = f"\n⛔ Halt state: {', '.join(event.tradability.halted_symbols)} — confirm before acting."
     return (
-        f"{_icon(event)} **{event.headline}**{_action_note(event)}\n"
+        f"{_icon(event)} **{_trim(event.headline, 500)}**{_action_note(event)}\n"
         f"`{event.source}` · {event.event_type} · {event.asset_class} · {event.sentiment} · "
         f"score {event.importance_score:.0f} · {symbols}"
-        f"{why}{url}{halt}\n"
-        f"{NEWSWIRE_DISCLAIMER}"
+        f"{why}{url}{halt}"
     )
 
 
@@ -85,8 +87,7 @@ def format_news_digest(events: list[NewswireEvent]) -> str:
     for event in events[:25]:
         symbols = _symbols(event)
         tail = f" · {symbols}" if symbols else ""
-        lines.append(f"- {_icon(event)} `{event.source}` {event.headline[:160]}{tail} (score {event.importance_score:.0f})")
-    lines.append(NEWSWIRE_DISCLAIMER)
+        lines.append(f"- {_icon(event)} `{event.source}` {_trim(event.headline, 160)}{tail} (score {event.importance_score:.0f})")
     return "\n".join(lines)
 
 
@@ -97,7 +98,7 @@ def format_news_event_message(event: NewswireEvent) -> dict[str, Any]:
     inspect it without importing discord.py.
     """
     symbols = _symbols(event) or "—"
-    content = format_news_event(event)
+    fallback_content = format_news_event(event)
     fields = [
         {"name": "Source", "value": _trim(f"{event.source} / {event.provider}", 1024), "inline": True},
         {"name": "Type", "value": _trim(f"{event.event_type} · {event.asset_class}", 1024), "inline": True},
@@ -110,11 +111,10 @@ def format_news_event_message(event: NewswireEvent) -> dict[str, Any]:
         "description": _event_description(event),
         "color": _color(event),
         "fields": fields,
-        "footer": {"text": NEWSWIRE_DISCLAIMER},
     }
     if event.url:
         embed["url"] = event.url
-    return {"content": _trim(content, 1800), "embeds": [embed]}
+    return {"content": "", "fallback_content": _trim(fallback_content, 1800), "embeds": [embed]}
 
 
 def format_news_digest_message(events: list[NewswireEvent], *, max_items: int = 10) -> dict[str, Any]:
@@ -129,11 +129,10 @@ def format_news_digest_message(events: list[NewswireEvent], *, max_items: int = 
         lines.append(f"…and {hidden} more update(s) in this digest batch.")
     embed = {
         "title": f"📰 Newswire digest — {len(events)} update(s)",
-        "description": "\n".join(lines)[:3500] or "No digest items.",
+        "description": _trim("\n".join(lines), 3500) or "No digest items.",
         "color": _COLOR_DIGEST,
-        "footer": {"text": NEWSWIRE_DISCLAIMER},
     }
-    content = format_news_digest(events[: max(1, max_items)])
+    fallback_content = format_news_digest(events[: max(1, max_items)])
     if hidden:
-        content += f"\n…and {hidden} more update(s) in this digest batch."
-    return {"content": _trim(content, 1800), "embeds": [embed]}
+        fallback_content += f"\n…and {hidden} more update(s) in this digest batch."
+    return {"content": "", "fallback_content": _trim(fallback_content, 1800), "embeds": [embed]}

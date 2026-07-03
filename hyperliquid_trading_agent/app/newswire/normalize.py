@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import time
 from datetime import datetime
 from email.utils import parsedate_to_datetime
@@ -24,8 +25,8 @@ def normalize(raw: RawNewsItem, *, symbols_universe: list[str], received_at_ms: 
 
     Returns ``None`` for empty items. No LLM is involved here by design.
     """
-    headline = (raw.headline or raw.body or "").strip()
-    body = (raw.body or "").strip()
+    headline = _clean_text(raw.headline or raw.body or "")
+    body = _clean_text(raw.body or "")
     if not headline and not body:
         return None
     received = received_at_ms or now_ms()
@@ -109,6 +110,10 @@ def created_at_ms_from(value: Any) -> int | None:
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _clean_text(value: Any) -> str:
+    return html.unescape(" ".join(str(value or "").split()))
 
 
 def _confidence(raw: RawNewsItem, score: float) -> float:
