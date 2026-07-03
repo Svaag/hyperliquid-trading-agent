@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import anyio
 
 from hyperliquid_trading_agent.app.config import ServiceRole, Settings
@@ -104,6 +106,37 @@ def test_trader_engine_newsfeed_pump_starts_with_persisted_consumer() -> None:
         assert metadata["consumer"]["running"] is True
         assert metadata["pump"]["bootstrap_from_latest"] is True
         await worker._engine_news_consumer.stop()
+        await worker._shutdown_engine_runtime()
+
+    anyio.run(run)
+
+
+def test_trader_engine_loop_starts_with_shared_engine_service() -> None:
+    async def run() -> None:
+        settings = Settings(environment="test", engine_enabled=True, engine_newsfeed_enabled=True, newswire_enabled=False, engine_loop_interval_seconds=60, _env_file=None)
+        worker = TraderWorker(settings)
+
+        await worker._start_engine_loop()
+        await worker._start_engine_newsfeed()
+        metadata = worker.heartbeat_metadata()
+
+        assert worker._engine_service is not None
+        assert worker._engine_loop_task is not None
+        assert worker._engine_loop_task.get_name() == "trader-engine-shadow-loop"
+        assert metadata["engine_loop"]["enabled"] is True
+        assert metadata["engine_loop"]["running"] is True
+        assert metadata["engine_loop"]["interval_seconds"] == 60
+        assert metadata["engine_newsfeed"]["consumer"]["running"] is True
+        assert worker._engine_news_consumer is not None
+        assert worker._engine_news_consumer.engine_service is worker._engine_service
+
+        worker._engine_loop_task.cancel()
+        try:
+            await worker._engine_loop_task
+        except asyncio.CancelledError:
+            pass
+        await worker._engine_news_consumer.stop()
+        await worker._shutdown_engine_runtime()
 
     anyio.run(run)
 

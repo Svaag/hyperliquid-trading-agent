@@ -15,9 +15,13 @@ from hyperliquid_trading_agent.app.engine.service import InstitutionalEngineServ
 from hyperliquid_trading_agent.app.engine.strategy_performance import refresh_strategy_regime_performance
 from hyperliquid_trading_agent.app.governance.risk_gateway import RiskGateway
 from hyperliquid_trading_agent.app.hip4.service import Hip4Service
+from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
+from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.newswire.bus import InProcessNewswireBus
 from hyperliquid_trading_agent.app.workers.base import BaseWorker
 from hyperliquid_trading_agent.app.workers.stored_newswire_pump import StoredNewswirePump
+
+log = get_logger(__name__)
 
 
 class TraderWorker(BaseWorker):
@@ -32,13 +36,20 @@ class TraderWorker(BaseWorker):
         self._autonomy_service: AutonomousTradingLoopService | None = None
         self._memory_service: MemoryService | None = None
         self._engine_service: InstitutionalEngineService | None = None
+        self._engine_hyperliquid: HyperliquidClient | None = None
+        self._engine_loop_task: asyncio.Task | None = None
+        self._engine_loop_last_result: dict[str, Any] | None = None
+        self._engine_loop_last_error: str | None = None
         self._engine_news_bus: InProcessNewswireBus | None = None
         self._engine_news_consumer: EngineNewsConsumer | None = None
         self._engine_news_pump: StoredNewswirePump | None = None
 
     async def run(self) -> None:
+        await self._start_engine_loop()
         await self._start_engine_newsfeed()
         tasks = [asyncio.create_task(self.command_loop(self._command_handlers()), name="trader-command-loop")]
+        if self._engine_loop_task is not None:
+            tasks.append(self._engine_loop_task)
         if self._engine_news_pump is not None:
             tasks.append(asyncio.create_task(self._engine_news_pump.run_forever(), name="trader-engine-newswire-pump"))
         try:
@@ -54,6 +65,7 @@ class TraderWorker(BaseWorker):
                     await task
                 except asyncio.CancelledError:
                     pass
+            await self._shutdown_engine_runtime()
 
     def _command_handlers(self):
         return {
@@ -81,18 +93,9 @@ class TraderWorker(BaseWorker):
     async def _start_engine_newsfeed(self) -> None:
         if self._engine_news_pump is not None or not (self.settings.engine_enabled and self.settings.engine_newsfeed_enabled):
             return
+        engine_service = self._ensure_engine_service()
         self._engine_news_bus = InProcessNewswireBus()
-        risk_gateway = RiskGateway(settings=self.settings, repository=self.repository)
-        self._engine_service = InstitutionalEngineService(
-            settings=self.settings,
-            repository=self.repository,
-            hyperliquid=None,
-            risk_gateway=risk_gateway,
-            portfolio_service=None,
-            world_model_service=None,
-            liquidation_bridge=None,
-        )
-        self._engine_news_consumer = EngineNewsConsumer(settings=self.settings, bus=self._engine_news_bus, engine_service=self._engine_service)
+        self._engine_news_consumer = EngineNewsConsumer(settings=self.settings, bus=self._engine_news_bus, engine_service=engine_service)
         await self._engine_news_consumer.start()
         self._engine_news_pump = StoredNewswirePump(
             consumer_name="trader:engine_newswire",
@@ -103,6 +106,56 @@ class TraderWorker(BaseWorker):
             bootstrap_from_latest=True,
             bootstrap_metadata={"consumer": "engine_newsfeed", "owner_role": self.role.value},
         )
+
+    async def _start_engine_loop(self) -> None:
+        if self._engine_loop_task is not None or not self.settings.engine_enabled:
+            return
+        self._ensure_engine_service()
+        self._engine_loop_task = asyncio.create_task(self._run_engine_loop(), name="trader-engine-shadow-loop")
+        log.info("trader_engine_loop_started", interval_seconds=self.settings.engine_loop_interval_seconds)
+
+    async def _run_engine_loop(self) -> None:
+        interval = max(5, int(self.settings.engine_loop_interval_seconds))
+        while not self._stop.is_set():
+            try:
+                service = self._ensure_engine_service()
+                self._engine_loop_last_result = await service.run_once(symbols=self.settings.autonomy_core_symbols)
+                self._engine_loop_last_error = None
+                log.info(
+                    "trader_engine_loop_completed",
+                    candidates=self._engine_loop_last_result.get("candidates"),
+                    executed=self._engine_loop_last_result.get("executed"),
+                    run_count=service.run_count,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - worker resilience
+                self._engine_loop_last_error = type(exc).__name__
+                log.warning("trader_engine_loop_failed", error=type(exc).__name__)
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+            except TimeoutError:
+                continue
+
+    def _ensure_engine_service(self) -> InstitutionalEngineService:
+        if self._engine_service is None:
+            self._engine_hyperliquid = HyperliquidClient(settings=self.settings)
+            risk_gateway = RiskGateway(settings=self.settings, repository=self.repository)
+            self._engine_service = InstitutionalEngineService(
+                settings=self.settings,
+                repository=self.repository,
+                hyperliquid=self._engine_hyperliquid,
+                risk_gateway=risk_gateway,
+                portfolio_service=None,
+                world_model_service=None,
+                liquidation_bridge=None,
+            )
+        return self._engine_service
+
+    async def _shutdown_engine_runtime(self) -> None:
+        if self._engine_hyperliquid is not None:
+            await self._engine_hyperliquid.close()
+            self._engine_hyperliquid = None
 
     async def _handle_engine_strategy_regime_refresh(self, command: dict[str, Any]) -> dict[str, Any]:
         self._record_command(command)
@@ -338,7 +391,20 @@ class TraderWorker(BaseWorker):
     def heartbeat_metadata(self) -> dict[str, Any]:
         return {
             "trader": {"command_count": self.command_count, "last_command_type": self.last_command_type, "execution_authority": "paper-only/settings-gated"},
+            "engine_loop": self._engine_loop_metadata(),
             "engine_newsfeed": self._engine_newsfeed_metadata(),
+        }
+
+    def _engine_loop_metadata(self) -> dict[str, Any]:
+        enabled = bool(self.settings.engine_enabled)
+        task_running = self._engine_loop_task is not None and not self._engine_loop_task.done()
+        return {
+            "enabled": enabled,
+            "running": task_running,
+            "interval_seconds": self.settings.engine_loop_interval_seconds,
+            "last_result": self._engine_loop_last_result or {},
+            "last_error": self._engine_loop_last_error,
+            "service": self._engine_service.status() if self._engine_service is not None else {},
         }
 
     def _engine_newsfeed_metadata(self) -> dict[str, Any]:

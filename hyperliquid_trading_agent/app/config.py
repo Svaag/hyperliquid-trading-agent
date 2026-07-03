@@ -346,6 +346,7 @@ class Settings(BaseSettings):
     engine_cross_venue_dexes: str = ""
     engine_wave1c_enabled: bool = False
     engine_wave2_enabled: bool = False
+    engine_loop_interval_seconds: int = 60
     engine_shadow_enabled: bool = True
     engine_paper_enabled: bool = False
     engine_live_enabled: bool = False

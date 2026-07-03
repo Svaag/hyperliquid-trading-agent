@@ -105,22 +105,30 @@ def _spec_shadow_only(spec: dict[str, Any]) -> bool:
     return str(metadata.get("activation_scope") or "paper_shadow") == "shadow_only" or bool(metadata.get("operator_promotion_required"))
 
 
-async def _latest_trader_engine_newsfeed(repository: Any) -> dict[str, Any]:
+async def _latest_trader_metadata(repository: Any, key: str) -> dict[str, Any]:
     if not callable(getattr(repository, "list_service_heartbeats", None)):
         return {}
     heartbeats = await repository.list_service_heartbeats(service_role="trader", limit=5)
     for heartbeat in heartbeats:
         metadata = heartbeat.get("metadata") if isinstance(heartbeat, dict) else None
-        engine_newsfeed = metadata.get("engine_newsfeed") if isinstance(metadata, dict) else None
-        if isinstance(engine_newsfeed, dict):
+        item = metadata.get(key) if isinstance(metadata, dict) else None
+        if isinstance(item, dict):
             return {
                 "service_role": heartbeat.get("service_role"),
                 "instance_id": heartbeat.get("instance_id"),
                 "status": heartbeat.get("status"),
                 "updated_at_ms": heartbeat.get("updated_at_ms"),
-                **engine_newsfeed,
+                **item,
             }
     return {}
+
+
+async def _latest_trader_engine_newsfeed(repository: Any) -> dict[str, Any]:
+    return await _latest_trader_metadata(repository, "engine_newsfeed")
+
+
+async def _latest_trader_engine_loop(repository: Any) -> dict[str, Any]:
+    return await _latest_trader_metadata(repository, "engine_loop")
 
 
 def register_engine_routes(app: FastAPI, settings: Settings, require_auth: RequireAuth) -> None:
@@ -146,6 +154,7 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
         news_consumer = getattr(app.state, "engine_news_consumer", None)
         news_status = news_consumer.status() if news_consumer is not None and callable(getattr(news_consumer, "status", None)) else {}
         news_runtime = {} if news_status.get("running") else await _latest_trader_engine_newsfeed(repository)
+        engine_runtime = await _latest_trader_engine_loop(repository)
         return {
             "enabled": settings.engine_enabled,
             "mode": settings.engine_mode,
@@ -160,6 +169,7 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
             },
             "repository_enabled": getattr(repository, "enabled", False),
             "service": service_status,
+            "engine_runtime": engine_runtime,
             "newsfeed": news_status,
             "newsfeed_runtime": news_runtime,
             "validation_monitor": monitor_status,

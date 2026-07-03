@@ -23,6 +23,11 @@ class FakeReadinessService:
         return {"run_count": self.run_count, "last_run_at_ms": self.now_ms, "last_error": self.last_error}
 
 
+class PassiveReadinessService:
+    def status(self) -> dict[str, Any]:
+        return {"enabled": False, "run_count": 0, "last_run_at_ms": None, "last_error": None}
+
+
 class FakeReadinessRepository:
     enabled = True
 
@@ -81,6 +86,7 @@ class FakeReadinessRepository:
         self.replay_results = [
             {"replay_id": "ereplay_1", "proposal_id": "engine:test", "status": "passed", "candidate_metrics": {"candidate_count": 2}, "created_at_ms": now_ms - 1000, "metadata": {"artifact_type": "engine_shadow_comparison", "data_window": {"start_ms": now_ms - 60 * 60 * 1000, "end_ms": now_ms}, "verdict": "candidate_better"}}
         ]
+        self.heartbeats: list[dict[str, Any]] = []
         self.missing_data = missing_data
 
     async def list_alpha_candidates(self, **kwargs):
@@ -140,6 +146,12 @@ class FakeReadinessRepository:
 
     async def list_replay_results(self, **kwargs):
         return self.replay_results[: kwargs.get("limit", 100)]
+
+    async def list_service_heartbeats(self, **kwargs):
+        items = self.heartbeats
+        if kwargs.get("service_role"):
+            items = [item for item in items if item.get("service_role") == kwargs["service_role"]]
+        return items[: kwargs.get("limit", 100)]
 
 
 def test_engine_settings_defaults_are_shadow_only():
@@ -223,6 +235,38 @@ def test_paper_readiness_can_pass_with_clean_shadow_sample():
     assert scorecard["score"] >= 85
     assert scorecard["hard_blocks"] == []
     assert scorecard["recommendation"] == "ready_for_paper"
+
+
+def test_paper_readiness_uses_trader_engine_loop_heartbeat_when_api_service_is_passive():
+    now_ms = int(time.time() * 1000)
+    repo = FakeReadinessRepository(now_ms=now_ms)
+    repo.heartbeats = [
+        {
+            "service_role": "trader",
+            "instance_id": "trader-1",
+            "status": "running",
+            "updated_at_ms": now_ms,
+            "metadata": {
+                "engine_loop": {
+                    "enabled": True,
+                    "running": True,
+                    "service": {"enabled": True, "run_count": 3, "last_run_at_ms": now_ms, "last_error": None},
+                }
+            },
+        }
+    ]
+    settings = readiness_settings()
+
+    async def run():
+        return await build_paper_readiness_scorecard(repo, settings, PassiveReadinessService(), window_hours=1, limit=100)
+
+    scorecard = anyio.run(run)
+    reliability = scorecard["checks"]["engine_reliability"]
+
+    assert scorecard["ready_for_paper"] is True
+    assert reliability["run_count"] == 3
+    assert reliability["runtime_source"] == "trader_heartbeat"
+    assert reliability["runtime_instance_id"] == "trader-1"
 
 
 def test_readiness_separates_shadow_research_breadth_from_paper_eligible_breadth():

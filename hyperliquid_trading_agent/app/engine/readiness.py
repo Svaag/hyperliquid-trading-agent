@@ -100,6 +100,47 @@ async def _maybe_list(repository: Any, method_name: str, **kwargs) -> list[dict[
         return await method()
 
 
+async def _latest_trader_engine_loop_status(repository: Any, settings: Settings, *, generated_at_ms: int) -> dict[str, Any]:
+    method = getattr(repository, "list_service_heartbeats", None)
+    if not callable(method):
+        return {}
+    try:
+        heartbeats = await method(service_role="trader", limit=5)
+    except TypeError:
+        heartbeats = await method()
+    stale_after_ms = max(1, int(settings.service_heartbeat_stale_seconds)) * 1000
+    for heartbeat in heartbeats:
+        if not isinstance(heartbeat, dict) or str(heartbeat.get("status") or "") != "running":
+            continue
+        updated_at_ms = _i(heartbeat.get("updated_at_ms"), 0)
+        if updated_at_ms and generated_at_ms - updated_at_ms > stale_after_ms:
+            continue
+        metadata = heartbeat.get("metadata") if isinstance(heartbeat.get("metadata"), dict) else {}
+        engine_loop = metadata.get("engine_loop") if isinstance(metadata, dict) else None
+        if not isinstance(engine_loop, dict) or not engine_loop.get("enabled"):
+            continue
+        service = engine_loop.get("service") if isinstance(engine_loop.get("service"), dict) else {}
+        if service:
+            return {
+                **service,
+                "runtime_source": "trader_heartbeat",
+                "runtime_instance_id": heartbeat.get("instance_id"),
+                "runtime_updated_at_ms": updated_at_ms,
+                "runtime_running": bool(engine_loop.get("running")),
+            }
+    return {}
+
+
+async def _engine_service_status(repository: Any, settings: Settings, engine_service: Any | None, *, generated_at_ms: int) -> dict[str, Any]:
+    local = engine_service.status() if engine_service is not None and callable(getattr(engine_service, "status", None)) else {}
+    if _i(local.get("last_run_at_ms"), 0) > 0 or (local.get("enabled") and _i(local.get("run_count"), 0) > 0):
+        return {**local, "runtime_source": "local_service"}
+    runtime = await _latest_trader_engine_loop_status(repository, settings, generated_at_ms=generated_at_ms)
+    if runtime:
+        return runtime
+    return {**local, "runtime_source": "local_service" if local else "unavailable"}
+
+
 async def build_paper_readiness_scorecard(
     repository: Any,
     settings: Settings,
@@ -119,7 +160,7 @@ async def build_paper_readiness_scorecard(
     hours = int(window_hours or settings.engine_readiness_window_hours)
     window_ms = max(1, hours) * 60 * 60 * 1000
     start_ms = max(generated_at_ms - window_ms, int(getattr(settings, "engine_readiness_clean_window_start_ms", 0) or 0))
-    service_status = engine_service.status() if engine_service is not None and callable(getattr(engine_service, "status", None)) else {}
+    service_status = await _engine_service_status(repository, settings, engine_service, generated_at_ms=generated_at_ms)
 
     report = await build_engine_validation_report(repository, limit=limit)
     candidates_all = await repository.list_alpha_candidates(limit=limit)
@@ -211,6 +252,10 @@ async def build_paper_readiness_scorecard(
         "stale_after_ms": stale_after_ms,
         "observed_shadow_hours": observed_hours,
         "first_shadow_ms": first_shadow_ms,
+        "runtime_source": service_status.get("runtime_source"),
+        "runtime_instance_id": service_status.get("runtime_instance_id"),
+        "runtime_updated_at_ms": service_status.get("runtime_updated_at_ms"),
+        "runtime_running": service_status.get("runtime_running"),
     }
 
     # Data completeness for core symbols.
