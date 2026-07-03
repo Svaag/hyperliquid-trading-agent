@@ -15,6 +15,11 @@ from hyperliquid_trading_agent.app.newswire.adapters.base import NewswireAdapter
 from hyperliquid_trading_agent.app.newswire.adapters.rss import RssAdapter
 from hyperliquid_trading_agent.app.newswire.bus import InProcessNewswireBus, NewswireBus
 from hyperliquid_trading_agent.app.newswire.normalize import normalize, now_ms
+from hyperliquid_trading_agent.app.newswire.policy import (
+    BASELINE_POLICY_VERSION,
+    DeterministicNewswirePolicy,
+    decision_summary,
+)
 from hyperliquid_trading_agent.app.newswire.riskgate import HaltStateGate
 from hyperliquid_trading_agent.app.newswire.schemas import NewswireEvent, NewswireFilter, RawNewsItem
 
@@ -43,8 +48,12 @@ class NewswireService:
         self.adapter_last_error: dict[str, dict[str, Any]] = {}
         self.dropped_events_by_reason: dict[str, int] = {}
         self.persisted_event_count = 0
+        self.persisted_decision_count = 0
         self.persistence_errors = 0
         self.last_persistence_error: dict[str, Any] | None = None
+        self._policy_params: dict[str, Any] = {}
+        self._policy_version = settings.newswire_active_policy_version.strip() or BASELINE_POLICY_VERSION
+        self._policy_loaded_at_ms = 0
 
     def build_adapters(self) -> list[NewswireAdapter]:
         adapters: list[NewswireAdapter] = []
@@ -131,12 +140,64 @@ class NewswireService:
             NEWSWIRE_BUS_DROPPED.labels(reason="duplicate").inc()
             return None
         event = self.halt_gate.apply(event)
+        if self.settings.newswire_policy_enabled:
+            policy_version, policy_params = await self._policy_context()
+            decision = DeterministicNewswirePolicy(
+                self.settings,
+                policy_version=policy_version,
+                params=policy_params,
+            ).score(event)
+            event.metadata = {**event.metadata, "newswire_policy_decision": decision_summary(decision)}
+            if self.repository is not None and getattr(self.repository, "enabled", False):
+                await self._persist_decision(decision.model_dump(mode="json"))
         self._index(event)
         NEWSWIRE_EVENTS.labels(provider=event.provider).inc()
         if self.repository is not None and getattr(self.repository, "enabled", False):
             await self._persist_event(event)
         await self.bus.publish(event)
         return event
+
+    async def _persist_decision(self, decision: dict[str, Any]) -> None:
+        repository = self.repository
+        if repository is None or not callable(getattr(repository, "record_newswire_decision", None)):
+            return
+        try:
+            result = await repository.record_newswire_decision(decision)
+        except Exception as exc:  # pragma: no cover
+            self.persistence_errors += 1
+            self.last_persistence_error = {"decision_id": decision.get("decision_id"), "error": type(exc).__name__, "detail": str(exc)[:500], "at_ms": now_ms()}
+            log.warning("newswire_decision_persist_failed", decision_id=decision.get("decision_id"), error=type(exc).__name__, detail=str(exc)[:200])
+            return
+        if result:
+            self.persisted_decision_count += 1
+
+    async def _policy_context(self) -> tuple[str, dict[str, Any]]:
+        configured = self.settings.newswire_active_policy_version.strip()
+        fallback = configured or BASELINE_POLICY_VERSION
+        repository = self.repository
+        if repository is None or not getattr(repository, "enabled", False) or not callable(getattr(repository, "list_newswire_policy_versions", None)):
+            return fallback, {}
+        current = now_ms()
+        if current - self._policy_loaded_at_ms < 30_000:
+            return self._policy_version, dict(self._policy_params)
+        self._policy_loaded_at_ms = current
+        try:
+            if configured:
+                policies = await repository.list_newswire_policy_versions(limit=1000)
+                selected = next((item for item in policies if item.get("policy_version") == configured), None)
+            else:
+                policies = await repository.list_newswire_policy_versions(status="promoted", limit=1)
+                selected = policies[0] if policies else None
+        except Exception as exc:  # pragma: no cover
+            log.warning("newswire_policy_lookup_failed", error=type(exc).__name__)
+            return self._policy_version or fallback, dict(self._policy_params)
+        if selected:
+            self._policy_version = str(selected.get("policy_version") or fallback)
+            self._policy_params = dict(selected.get("params") or {})
+        else:
+            self._policy_version = fallback
+            self._policy_params = {}
+        return self._policy_version, dict(self._policy_params)
 
     async def _persist_event(self, event: NewswireEvent) -> None:
         repository = self.repository
@@ -194,8 +255,18 @@ class NewswireService:
             "dropped_events_by_reason": dict(self.dropped_events_by_reason),
             "repository_enabled": bool(self.repository is not None and getattr(self.repository, "enabled", False)),
             "persisted_event_count": self.persisted_event_count,
+            "persisted_decision_count": self.persisted_decision_count,
             "persistence_errors": self.persistence_errors,
             "last_persistence_error": self.last_persistence_error,
+            "policy": {
+                "enabled": self.settings.newswire_policy_enabled,
+                "shadow_only": self.settings.newswire_policy_shadow_only,
+                "active_policy_version": self._policy_version,
+                "configured_policy_version": self.settings.newswire_active_policy_version.strip() or None,
+                "loaded_at_ms": self._policy_loaded_at_ms or None,
+                "learner": self._policy_params.get("learner"),
+                "ready": self._policy_params.get("ready"),
+            },
             "buffered_events": len(self._by_id),
             "last_event_at_ms": self.last_event_at_ms,
             "last_event_per_source": self.last_event_per_source,

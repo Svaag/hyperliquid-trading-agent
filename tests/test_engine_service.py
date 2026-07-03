@@ -4,17 +4,21 @@ import anyio
 
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.engine.alpha.wave1a import RegimeDefensiveFlatStrategy
-from hyperliquid_trading_agent.app.engine.schemas import EVEstimate, FeatureSnapshot, RegimeVector
+from hyperliquid_trading_agent.app.engine.schemas import AlphaCandidate, EVEstimate, FeatureSnapshot, RegimeVector
 from hyperliquid_trading_agent.app.engine.service import InstitutionalEngineService
 from hyperliquid_trading_agent.app.engine.strategy_registry import WAVE_1A_NUCLEUS_IDS
 from hyperliquid_trading_agent.app.governance.risk_gateway import RiskGateway
 
 
 class FakeHyperliquidEngine:
+    def __init__(self):
+        self.l2_calls = 0
+
     async def all_mids(self):
         return {"BTC": "104"}
 
     async def l2_book(self, symbol):
+        self.l2_calls += 1
         return {"levels": [[[103.9, 1000]], [[104.1, 900]]]}
 
 
@@ -141,3 +145,71 @@ def test_flat_candidates_receive_explicit_no_trade_risk_evidence():
     assert decision.metadata["candidate_level_no_trade"] is True
     assert decision.metadata["execution_authority"] == "none"
     assert repo.risk_decisions[0]["decision_id"] == decision.decision_id
+
+
+def test_candidate_risk_precheck_uses_fresh_decision_market_timestamps():
+    repo = FakeEngineHardeningRepo()
+    hyperliquid = FakeHyperliquidEngine()
+    settings = Settings(
+        environment="test",
+        engine_shadow_enabled=True,
+        engine_paper_enabled=False,
+        engine_min_net_ev_bps=-100,
+    )
+    service = InstitutionalEngineService(settings=settings, repository=repo, hyperliquid=hyperliquid, risk_gateway=RiskGateway(settings=settings, repository=repo))
+    candidate = AlphaCandidate(
+        candidate_id="cand_fresh_ts",
+        strategy_id="microstructure_ofi_v2",
+        strategy_version="test",
+        strategy_family="microstructure_orderflow",
+        asset="BTC",
+        asset_class="crypto",
+        venue="hyperliquid",
+        side="long",
+        horizon="5m",
+        proposed_entry=104.0,
+        stop=102.0,
+        targets=[108.0],
+        thesis="Fresh timestamp regression candidate.",
+        invalidation_conditions=["Order flow reverses"],
+        feature_snapshot_id="fs_test",
+        regime_snapshot_id="reg_test",
+        raw_alpha_score=70.0,
+        confidence=0.7,
+        created_at_ms=10_000,
+        expires_at_ms=70_000,
+    )
+    ev = EVEstimate(
+        estimate_id="ev_fresh_ts",
+        candidate_id=candidate.candidate_id,
+        model_version_id="deterministic_fallback_v1",
+        p_target=0.5,
+        p_stop=0.2,
+        p_timeout=0.3,
+        expected_favorable_bps=20,
+        expected_adverse_bps=10,
+        expected_holding_ms=60_000,
+        expected_fee_bps=0,
+        expected_spread_cost_bps=0,
+        expected_slippage_bps=0,
+        expected_market_impact_bps=0,
+        expected_funding_cost_bps=0,
+        tail_loss_bps=10,
+        net_ev_bps=8,
+        risk_adjusted_utility=8,
+        uncertainty=0.1,
+        calibration_bucket="test",
+        created_at_ms=10_000,
+    )
+
+    async def run():
+        return await service._candidate_risk_precheck(candidate, ev, snapshot_features={"spread_bps": 3.0}, timestamp_ms=10_000)
+
+    decision = anyio.run(run)
+    violation_codes = {item["code"] for item in decision.violations}
+
+    assert decision.allowed is True
+    assert violation_codes.isdisjoint({"expired_intent", "stale_price", "stale_orderbook"})
+    assert decision.market_snapshot["freshness_source"] == "hyperliquid_l2_book"
+    assert decision.market_snapshot["last_orderbook_at_ms"] > 10_000
+    assert hyperliquid.l2_calls == 1

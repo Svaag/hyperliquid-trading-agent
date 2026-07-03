@@ -715,6 +715,127 @@ class NewswirePublishLedgerRow(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class NewswireDecisionRow(TimestampMixin, Base):
+    __tablename__ = "newswire_decisions"
+    __table_args__ = (
+        Index("ix_newswire_decisions_event", "event_id"),
+        Index("ix_newswire_decisions_policy", "policy_version"),
+        Index("ix_newswire_decisions_created_at_ms", "created_at_ms"),
+    )
+
+    decision_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(96), nullable=False)
+    policy_type: Mapped[str] = mapped_column(String(32), nullable=False, default="static")
+    raw_event_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    cluster_id: Mapped[str | None] = mapped_column(String(96))
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    symbols_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    asset_class: Mapped[str] = mapped_column(String(16), nullable=False)
+    features_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    scores_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    newswire_action: Mapped[str] = mapped_column(String(32), nullable=False)
+    engine_action: Mapped[str] = mapped_column(String(32), nullable=False)
+    market_impact_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    quality_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    relevance_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    novelty_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    urgency_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    source_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    direction_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    direction_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    risk_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    reasons_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    penalties_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class NewswireEvalRow(TimestampMixin, Base):
+    __tablename__ = "newswire_evals"
+    __table_args__ = (
+        Index("ix_newswire_evals_event", "event_id"),
+        Index("ix_newswire_evals_decision", "decision_id"),
+        Index("ix_newswire_evals_created_at_ms", "created_at_ms"),
+    )
+
+    eval_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision_id: Mapped[str | None] = mapped_column(String(64))
+    policy_version: Mapped[str | None] = mapped_column(String(96))
+    evaluator_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    evaluator_id: Mapped[str | None] = mapped_column(String(128))
+    label_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    label_value_json: Mapped[Any] = mapped_column(JSON, default=dict)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    reason: Mapped[str | None] = mapped_column(String(128))
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class NewswireRewardRow(TimestampMixin, Base):
+    __tablename__ = "newswire_rewards"
+    __table_args__ = (
+        Index("ix_newswire_rewards_event", "event_id"),
+        Index("ix_newswire_rewards_policy", "policy_version"),
+        Index("ix_newswire_rewards_created_at_ms", "created_at_ms"),
+    )
+
+    reward_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision_id: Mapped[str | None] = mapped_column(String(64))
+    policy_version: Mapped[str] = mapped_column(String(96), nullable=False)
+    total_reward: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    reward_components_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    labels_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    reasons_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class NewswireSourceReputationRow(TimestampMixin, Base):
+    __tablename__ = "newswire_source_reputation"
+    __table_args__ = (
+        Index("ix_newswire_source_reputation_source", "source_id", "event_type"),
+    )
+
+    reputation_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    source_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False, default="all")
+    learned_reputation: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    false_positive_rate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    duplicate_rate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    correction_rate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class NewswirePolicyVersionRow(TimestampMixin, Base):
+    __tablename__ = "newswire_policy_versions"
+    __table_args__ = (
+        Index("ix_newswire_policy_versions_status", "status"),
+        Index("ix_newswire_policy_versions_created_at_ms", "created_at_ms"),
+    )
+
+    policy_version: Mapped[str] = mapped_column(String(96), primary_key=True)
+    policy_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    params_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    model_uri: Mapped[str | None] = mapped_column(Text)
+    replay_metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    canary_metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    promoted_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class ServiceHeartbeatRecord(TimestampMixin, Base):
     __tablename__ = "service_heartbeats"
     __table_args__ = (

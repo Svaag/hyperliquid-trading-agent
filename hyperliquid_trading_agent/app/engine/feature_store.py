@@ -221,6 +221,9 @@ def _orderbook_features(event: NormalizedEvent) -> list[FeatureValue]:
 
 def _news_features(event: NormalizedEvent) -> list[FeatureValue]:
     payload = event.payload or {}
+    decision = _news_policy_decision(payload, event.metadata)
+    if decision and decision.get("shadow_only") is False:
+        return _news_policy_features(event, decision)
     importance = _float(payload.get("importance_score")) or _float(payload.get("importance")) or 0.0
     sentiment = str(payload.get("sentiment") or "unknown").lower()
     confidence = _float(payload.get("confidence"))
@@ -294,6 +297,100 @@ def _news_features(event: NormalizedEvent) -> list[FeatureValue]:
             )
         )
     return out
+
+
+def _news_policy_features(event: NormalizedEvent, decision: dict[str, Any]) -> list[FeatureValue]:
+    engine_action = str(decision.get("engine_action") or "ignore")
+    if engine_action in {"ignore", "ledger_only"}:
+        return []
+    impact01 = _bounded01((_float(decision.get("market_impact_score")) or 0.0) / 100.0)
+    relevance01 = _bounded01((_float(decision.get("relevance_score")) or 0.0) / 100.0)
+    novelty01 = _bounded01((_float(decision.get("novelty_score")) or 0.0) / 100.0)
+    urgency01 = _bounded01((_float(decision.get("urgency_score")) or 0.0) / 100.0)
+    quality01 = _bounded01((_float(decision.get("quality_score")) or 0.0) / 100.0)
+    confidence = _bounded01(_float(decision.get("confidence")) or 0.0)
+    source_score = _bounded01(_float(decision.get("source_score")) or 0.0)
+    direction_score = max(-1.0, min(1.0, _float(decision.get("direction_score")) or 0.0))
+    direction_confidence = _bounded01(_float(decision.get("direction_confidence")) or 0.0)
+    risk_score = _bounded01(_float(decision.get("risk_score")) or 0.0)
+    weighted = impact01 * confidence * source_score * relevance01 * max(0.35, novelty01) * max(0.50, urgency01)
+    catalyst_pressure = 0.0 if engine_action == "risk_only" else weighted * direction_score * direction_confidence
+    event_risk_pressure = weighted * risk_score
+    source_consensus = min(1.0, 0.50 * confidence + 0.30 * source_score + 0.20 * quality01)
+    payload = event.payload or {}
+    newswire_event_id = str(payload.get("newswire_event_id") or event.metadata.get("source_newswire_event_id") or event.event_id)
+    news_metadata = {
+        "newswire_event_id": newswire_event_id,
+        "headline": payload.get("headline"),
+        "event_type": payload.get("event_type") or event.event_type,
+        "urgency": payload.get("urgency"),
+        "policy_version": decision.get("policy_version"),
+        "decision_id": decision.get("decision_id"),
+        "newswire_action": decision.get("newswire_action"),
+        "engine_action": engine_action,
+        "market_impact_score": _float(decision.get("market_impact_score")) or 0.0,
+        "quality_score": _float(decision.get("quality_score")) or 0.0,
+        "relevance_score": _float(decision.get("relevance_score")) or 0.0,
+        "novelty_score": _float(decision.get("novelty_score")) or 0.0,
+        "urgency_score": _float(decision.get("urgency_score")) or 0.0,
+        "confidence": confidence,
+        "source_score": source_score,
+        "direction_score": direction_score,
+        "direction_confidence": direction_confidence,
+        "risk_score": risk_score,
+    }
+    out: list[FeatureValue] = []
+    for symbol in event.symbols:
+        out.append(
+            _feature(
+                event,
+                asset=symbol,
+                group="news",
+                name="catalyst_pressure",
+                value={**news_metadata, "pressure": catalyst_pressure, "weighted_pressure": weighted},
+                scalar=catalyst_pressure,
+                quality=quality01,
+                metadata=news_metadata,
+            )
+        )
+        out.append(
+            _feature(
+                event,
+                asset=symbol,
+                group="news",
+                name="event_risk_pressure",
+                value={**news_metadata, "pressure": event_risk_pressure, "weighted_pressure": weighted},
+                scalar=event_risk_pressure,
+                quality=quality01,
+                metadata=news_metadata,
+            )
+        )
+        out.append(
+            _feature(
+                event,
+                asset=symbol,
+                group="news",
+                name="source_consensus_score",
+                value={**news_metadata, "consensus": source_consensus},
+                scalar=source_consensus,
+                quality=quality01,
+                metadata=news_metadata,
+            )
+        )
+    return out
+
+
+def _news_policy_decision(payload: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    direct = payload.get("newswire_policy_decision")
+    if isinstance(direct, dict):
+        return direct
+    nested = metadata.get("newswire_policy_decision")
+    if isinstance(nested, dict):
+        return nested
+    source_metadata = metadata.get("source_newswire_metadata")
+    if isinstance(source_metadata, dict) and isinstance(source_metadata.get("newswire_policy_decision"), dict):
+        return source_metadata["newswire_policy_decision"]
+    return {}
 
 
 def _funding_oi_features(event: NormalizedEvent) -> list[FeatureValue]:
@@ -568,6 +665,10 @@ def _float(value: Any) -> float | None:
         return None if value is None else float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _bounded01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
 
 
 def _level_px_sz(level: Any) -> tuple[float | None, float | None]:

@@ -173,6 +173,7 @@ class InstitutionalEngineService:
             current_loop_allocations = []
             throttle_events = []
             diversity_decisions = []
+            risk_market_snapshot_cache: dict[str, dict[str, Any]] = {}
             strategy_selection_summaries: dict[str, Any] = {}
             for symbol in symbols:
                 await self._record_world_model_features(symbol)
@@ -199,7 +200,13 @@ class InstitutionalEngineService:
                     estimates[candidate.candidate_id] = ev
                     allocation = await self.allocator.allocate(candidate, ev, regime=regime, portfolio_state=self._portfolio_snapshot())
                     allocation = self._enrich_allocation_metadata(allocation, candidate)
-                    candidate_risk = await self._candidate_risk_precheck(candidate, ev, snapshot_features=snapshot.features, timestamp_ms=ts)
+                    candidate_risk = await self._candidate_risk_precheck(
+                        candidate,
+                        ev,
+                        snapshot_features=snapshot.features,
+                        timestamp_ms=ts,
+                        market_snapshot_cache=risk_market_snapshot_cache,
+                    )
                     if candidate_risk is not None and not candidate_risk.allowed:
                         allocation = allocation.model_copy(
                             update={
@@ -231,10 +238,16 @@ class InstitutionalEngineService:
                     intent = None
                     order_risk = None
                     if allocation.status in {"allocate", "reduce", "require_debate"}:
-                        intent = self._order_intent(candidate, ev.model_version_id, allocation.allocation_id, allocation.allocated_size, allocation.allocated_notional_usd, ts)
+                        order_ts = now_ms()
+                        intent = self._order_intent(candidate, ev.model_version_id, allocation.allocation_id, allocation.allocated_size, allocation.allocated_notional_usd, order_ts)
+                        market_snapshot = await self._risk_market_snapshot(
+                            candidate,
+                            snapshot_features=snapshot.features,
+                            cache=risk_market_snapshot_cache,
+                        )
                         order_risk = await self.risk_gateway.check_order_intent(
                             intent,
-                            market_snapshot={"last_price_at_ms": ts, "last_orderbook_at_ms": ts, "spread_bps": snapshot.features.get("spread_bps")},
+                            market_snapshot=market_snapshot,
                             portfolio_snapshot=self._portfolio_snapshot(),
                             strategy_snapshot={"net_ev_bps": ev.net_ev_bps, "regime_permission": True},
                             operator_context={"kill_switch_active": False, "config_approved": True, "model_approved": ev.model_version_id == "deterministic_fallback_v1" or bool(self.settings.engine_approved_scorer_model_id)},
@@ -302,7 +315,7 @@ class InstitutionalEngineService:
                         await self._persist_allocation(allocation)
                         if allocation.allocated_size <= 0:
                             continue
-                        intent = self._order_intent(candidate, ev.model_version_id, allocation.allocation_id, allocation.allocated_size, allocation.allocated_notional_usd, ts)
+                        intent = self._order_intent(candidate, ev.model_version_id, allocation.allocation_id, allocation.allocated_size, allocation.allocated_notional_usd, now_ms())
                     report = await self.execution.submit(intent)
                     self.order_intents_created += 1
                     self.execution_reports_created += 1
@@ -405,7 +418,16 @@ class InstitutionalEngineService:
         self.strategy_specs_persisted_count = count
         return count
 
-    async def _candidate_risk_precheck(self, candidate: AlphaCandidate, ev: Any, *, snapshot_features: dict[str, Any], timestamp_ms: int) -> Any | None:
+    async def _candidate_risk_precheck(
+        self,
+        candidate: AlphaCandidate,
+        ev: Any,
+        *,
+        snapshot_features: dict[str, Any],
+        timestamp_ms: int,
+        market_snapshot_cache: dict[str, dict[str, Any]] | None = None,
+    ) -> Any | None:
+        decision_ts = now_ms()
         if candidate.side == "flat":
             decision = RiskGatewayDecision(
                 decision_id="rgd_no_trade_" + hashlib.sha1(candidate.candidate_id.encode()).hexdigest()[:24],
@@ -414,10 +436,10 @@ class InstitutionalEngineService:
                 decision="allow",
                 violations=[],
                 limits_snapshot={"asset_class": candidate.asset_class, "no_trade": True},
-                market_snapshot={"last_price_at_ms": timestamp_ms, "spread_bps": snapshot_features.get("spread_bps")},
+                market_snapshot={"last_price_at_ms": decision_ts, "spread_bps": snapshot_features.get("spread_bps")},
                 portfolio_snapshot=self._portfolio_snapshot(),
                 config_version_id=None,
-                created_at_ms=timestamp_ms,
+                created_at_ms=decision_ts,
                 metadata={
                     "candidate_id": candidate.candidate_id,
                     "strategy_id": candidate.strategy_id,
@@ -432,15 +454,63 @@ class InstitutionalEngineService:
             return decision
         notional = max(1.0, min(10.0, float(candidate.proposed_entry) * 0.001))
         size = notional / max(float(candidate.proposed_entry), 1e-9)
-        intent = self._order_intent(candidate, ev.model_version_id, f"precheck_{candidate.candidate_id}", size, notional, timestamp_ms)
+        intent = self._order_intent(candidate, ev.model_version_id, f"precheck_{candidate.candidate_id}", size, notional, decision_ts)
         intent = intent.model_copy(update={"intent_id": f"precheck_{candidate.candidate_id}"})
+        market_snapshot = await self._risk_market_snapshot(
+            candidate,
+            snapshot_features=snapshot_features,
+            cache=market_snapshot_cache,
+        )
         return await self.risk_gateway.check_order_intent(
             intent,
-            market_snapshot={"last_price_at_ms": timestamp_ms, "last_orderbook_at_ms": timestamp_ms, "spread_bps": snapshot_features.get("spread_bps")},
+            market_snapshot=market_snapshot,
             portfolio_snapshot=self._portfolio_snapshot(),
             strategy_snapshot={"net_ev_bps": ev.net_ev_bps, "regime_permission": True, "candidate_level_precheck": True},
             operator_context={"kill_switch_active": False, "config_approved": True, "model_approved": ev.model_version_id == "deterministic_fallback_v1" or bool(self.settings.engine_approved_scorer_model_id)},
         )
+
+    async def _risk_market_snapshot(
+        self,
+        candidate: AlphaCandidate,
+        *,
+        snapshot_features: dict[str, Any],
+        cache: dict[str, dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        asset = candidate.asset.upper()
+        now = now_ms()
+        if cache is not None:
+            cached = cache.get(asset)
+            cached_at = _int_or_none((cached or {}).get("last_orderbook_at_ms"))
+            if cached is not None and cached_at is not None and now - cached_at <= 15_000:
+                return dict(cached)
+
+        market_snapshot = {
+            "spread_bps": snapshot_features.get("spread_bps"),
+            "freshness_source": "feature_snapshot",
+        }
+        fetch_l2 = getattr(self.hyperliquid, "l2_book", None)
+        if not callable(fetch_l2):
+            return market_snapshot
+        try:
+            book = await fetch_l2(asset)
+        except Exception:
+            return market_snapshot
+
+        received_ts = now_ms()
+        spread_bps = _spread_bps_from_l2_book(book)
+        if spread_bps is not None:
+            market_snapshot["spread_bps"] = spread_bps
+        market_snapshot.update(
+            {
+                "last_price_at_ms": received_ts,
+                "last_market_data_at_ms": received_ts,
+                "last_orderbook_at_ms": received_ts,
+                "freshness_source": "hyperliquid_l2_book",
+            }
+        )
+        if cache is not None:
+            cache[asset] = dict(market_snapshot)
+        return market_snapshot
 
     async def _record_meta_and_asset_ctx_features(self, *, symbols: list[str], received_ts_ms: int) -> None:
         fetch = getattr(self.hyperliquid, "meta_and_asset_ctxs", None)
@@ -593,5 +663,43 @@ def _meta_and_asset_payload(raw: Any) -> dict[str, Any]:
 def _int_or_none(value: Any) -> int | None:
     try:
         return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _spread_bps_from_l2_book(book: Any) -> float | None:
+    if isinstance(book, dict):
+        levels = book.get("levels") or []
+    else:
+        levels = book or []
+    if not isinstance(levels, (list, tuple)) or len(levels) < 2:
+        return None
+    bids = levels[0] if isinstance(levels[0], (list, tuple)) else []
+    asks = levels[1] if isinstance(levels[1], (list, tuple)) else []
+    if not bids or not asks:
+        return None
+    bid_px, _ = _level_px_sz(bids[0])
+    ask_px, _ = _level_px_sz(asks[0])
+    if bid_px is None or ask_px is None or bid_px <= 0 or ask_px <= 0:
+        return None
+    mid = (bid_px + ask_px) / 2.0
+    if mid <= 0 or ask_px < bid_px:
+        return None
+    return (ask_px - bid_px) / mid * 10_000.0
+
+
+def _level_px_sz(level: Any) -> tuple[float | None, float | None]:
+    if isinstance(level, dict):
+        return _float_or_none(level.get("px") or level.get("price")), _float_or_none(level.get("sz") or level.get("size"))
+    if isinstance(level, (list, tuple)):
+        px = level[0] if len(level) > 0 else None
+        sz = level[1] if len(level) > 1 else None
+        return _float_or_none(px), _float_or_none(sz)
+    return None, None
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
     except (TypeError, ValueError):
         return None

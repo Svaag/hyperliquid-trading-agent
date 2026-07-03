@@ -34,6 +34,7 @@ class DiscordPublisherWorker(BaseWorker):
             enricher=Enricher(settings=self.settings, model_gateway=ModelGateway(settings=self.settings)),
             repository=self.repository,
         )
+        self.client.component_handler = self.publisher.handle_feedback_component
         self.pump = StoredNewswirePump(
             consumer_name="discord_publisher:newswire",
             repository=self.repository,

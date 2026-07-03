@@ -106,6 +106,15 @@ def format_news_event_message(event: NewswireEvent) -> dict[str, Any]:
         {"name": "Symbols", "value": _trim(symbols, 1024), "inline": True},
         {"name": "Sentiment", "value": event.sentiment, "inline": True},
     ]
+    decision = _policy_decision(event)
+    if decision:
+        fields.extend(
+            [
+                {"name": "Policy", "value": _trim(f"{decision.get('newswire_action')} / {decision.get('engine_action')}", 1024), "inline": True},
+                {"name": "Quality", "value": f"{float(decision.get('quality_score') or 0):.0f}", "inline": True},
+                {"name": "Impact", "value": f"{float(decision.get('market_impact_score') or 0):.0f}", "inline": True},
+            ]
+        )
     embed: dict[str, Any] = {
         "title": _trim(f"{_icon(event)} {event.headline}{_action_note(event)}", 256),
         "description": _event_description(event),
@@ -114,7 +123,7 @@ def format_news_event_message(event: NewswireEvent) -> dict[str, Any]:
     }
     if event.url:
         embed["url"] = event.url
-    return {"content": "", "fallback_content": _trim(fallback_content, 1800), "embeds": [embed]}
+    return {"content": "", "fallback_content": _trim(fallback_content, 1800), "embeds": [embed], "components": _feedback_components(event)}
 
 
 def format_news_digest_message(events: list[NewswireEvent], *, max_items: int = 10) -> dict[str, Any]:
@@ -136,3 +145,23 @@ def format_news_digest_message(events: list[NewswireEvent], *, max_items: int = 
     if hidden:
         fallback_content += f"\n…and {hidden} more update(s) in this digest batch."
     return {"content": "", "fallback_content": _trim(fallback_content, 1800), "embeds": [embed]}
+
+
+def _policy_decision(event: NewswireEvent) -> dict[str, Any]:
+    metadata = event.metadata if isinstance(event.metadata, dict) else {}
+    decision = metadata.get("newswire_policy_decision")
+    return decision if isinstance(decision, dict) else {}
+
+
+def _feedback_components(event: NewswireEvent) -> list[dict[str, str]]:
+    return [
+        {"label": "Useful", "custom_id": f"nwfb:{event.event_id}:quality:useful", "style": "success"},
+        {"label": "Noise", "custom_id": f"nwfb:{event.event_id}:quality:noise", "style": "danger"},
+        {"label": "Duplicate", "custom_id": f"nwfb:{event.event_id}:duplicate:true", "style": "secondary"},
+        {"label": "Stale", "custom_id": f"nwfb:{event.event_id}:stale:true", "style": "secondary"},
+        {"label": "Wrong Symbol", "custom_id": f"nwfb:{event.event_id}:symbol:false", "style": "secondary"},
+        {"label": "Wrong Direction", "custom_id": f"nwfb:{event.event_id}:direction:false", "style": "secondary"},
+        {"label": "Risk Only", "custom_id": f"nwfb:{event.event_id}:engine_action:risk_only", "style": "primary"},
+        {"label": "Should Be High", "custom_id": f"nwfb:{event.event_id}:newswire_action:high", "style": "primary"},
+        {"label": "Should Drop", "custom_id": f"nwfb:{event.event_id}:newswire_action:drop", "style": "danger"},
+    ]

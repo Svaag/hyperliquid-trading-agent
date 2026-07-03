@@ -285,6 +285,8 @@ async def lifespan(app: FastAPI):
         enricher=newswire_enricher,
         repository=repository,
     )
+    if newswire_discord_client is not None:
+        newswire_discord_client.component_handler = newswire_discord.handle_feedback_component
     newswire_agent_consumer = AgentNewsConsumer(
         settings=settings,
         bus=newswire_service.bus,

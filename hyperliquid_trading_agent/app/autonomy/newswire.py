@@ -8,10 +8,10 @@ from typing import Any, Literal
 from hyperliquid_trading_agent.app.autonomy.schemas import NewsEvent
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.news.service import NewsService
+from hyperliquid_trading_agent.app.newswire.keyword_matcher import score_importance_details
 
 BULLISH_WORDS = {"approval", "approved", "partnership", "surge", "rally", "inflow", "record", "breakout", "buyback", "listing"}
 BEARISH_WORDS = {"hack", "exploit", "lawsuit", "selloff", "outflow", "liquidation", "ban", "downgrade", "default", "rejection"}
-HIGH_IMPORTANCE_WORDS = {"fed", "fomc", "cpi", "sec", "etf", "hack", "exploit", "liquidation", "hyperliquid", "outage", "listing"}
 
 
 class AutonomyNewswire:
@@ -101,15 +101,7 @@ def tag_assets(text: str, symbols: list[str]) -> list[str]:
 
 
 def score_importance(title: str, text: str, query: str = "", public_metrics: Any = None) -> float:
-    lowered = f"{query} {title} {text}".lower()
-    score = 15.0
-    score += min(35.0, sum(10.0 for word in HIGH_IMPORTANCE_WORDS if word in lowered))
-    if any(word in lowered for word in {"breaking", "urgent", "alert"}):
-        score += 15.0
-    if any(word in lowered for word in {"billion", "$1b", "100m", "nine figures"}):
-        score += 10.0
-    score += min(20.0, _public_metric_score(public_metrics or {}) / 50.0)
-    return max(0.0, min(100.0, score))
+    return score_importance_details(title, text, query, public_metrics).score
 
 
 def score_sentiment(text: str) -> Literal["bullish", "bearish", "mixed", "unknown"]:

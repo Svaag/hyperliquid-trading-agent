@@ -70,11 +70,12 @@ class DiscordNewsPublisher:
             log.info("newswire_discord_publisher_disabled", reason=self._last_error)
             return
         self._started_at_ms = _now_ms()
-        flt = NewswireFilter(min_importance=self.settings.newswire_news_min_importance)
+        min_importance = 0.0 if _active_policy_enabled(self.settings) else self.settings.newswire_news_min_importance
+        flt = NewswireFilter(min_importance=min_importance)
         self._subscription_id = await self.bus.subscribe(self._on_event, filter=flt)
         self._flush_task = asyncio.create_task(self._flush_loop(), name="newswire-discord-digest")
         self._running = True
-        log.info("newswire_discord_publisher_started", channel=self._channel_id)
+        log.info("newswire_discord_publisher_started", channel=self._channel_id, min_importance=min_importance)
 
     async def stop(self) -> None:
         self._running = False
@@ -94,7 +95,12 @@ class DiscordNewsPublisher:
         if reason is not None:
             self._skip(reason)
             return
-        breaking = event.urgency == "breaking" or event.importance_score >= self.settings.newswire_breaking_min_importance
+        decision = _policy_decision(event)
+        breaking = (
+            str(decision.get("newswire_action") or "") in {"high", "breaking"}
+            if _active_policy_enabled(self.settings) and decision
+            else event.urgency == "breaking" or event.importance_score >= self.settings.newswire_breaking_min_importance
+        )
         if breaking:
             claimed = await self._claim(event, mode="breaking")
             if not claimed:
@@ -199,10 +205,14 @@ class DiscordNewsPublisher:
             await self._throttle()
             try:
                 try:
-                    result = await self.alert_sink.send(self._channel_id, content, embeds=embeds)
+                    result = await self.alert_sink.send(self._channel_id, content, embeds=embeds, components=payload.get("components"))
                 except TypeError:
-                    # Compatibility with older/fake sinks that accept only content.
-                    result = await self.alert_sink.send(self._channel_id, fallback_content)
+                    try:
+                        # Compatibility with older/fake sinks that accept embeds but no components.
+                        result = await self.alert_sink.send(self._channel_id, content, embeds=embeds)
+                    except TypeError:
+                        # Compatibility with sinks that accept only content.
+                        result = await self.alert_sink.send(self._channel_id, fallback_content)
                 NEWSWIRE_DISCORD_POSTS.labels(mode=mode, result="ok" if result else "skipped").inc()
                 if not result:
                     self._last_error = "discord_send_skipped"
@@ -222,7 +232,12 @@ class DiscordNewsPublisher:
         self._last_send_ms = _now_ms()
 
     def _skip_reason(self, event: NewswireEvent) -> str | None:
-        if event.importance_score < self.settings.newswire_news_min_importance:
+        decision = _policy_decision(event)
+        if _active_policy_enabled(self.settings) and decision:
+            action = str(decision.get("newswire_action") or "drop")
+            if action in {"drop", "watch"}:
+                return f"policy_{action}"
+        elif event.importance_score < self.settings.newswire_news_min_importance:
             return "low_importance"
         if event.freshness == "stale":
             return "stale"
@@ -231,6 +246,39 @@ class DiscordNewsPublisher:
             if int(event.published_at_ms) < self._started_at_ms - grace_ms:
                 return "startup_backlog"
         return None
+
+    async def handle_feedback_component(self, custom_id: str, user_id: str | None, message_id: str | None) -> str | None:
+        parts = str(custom_id or "").split(":", 3)
+        if len(parts) != 4 or parts[0] != "nwfb":
+            return None
+        _, event_id, raw_label_type, raw_value = parts
+        label_type, label_value = _feedback_label(raw_label_type, raw_value)
+        repo = self.repository
+        if repo is None or not callable(getattr(repo, "record_newswire_eval", None)):
+            return "Feedback received but no repository is configured."
+        decision_id = None
+        policy_version = None
+        if callable(getattr(repo, "list_newswire_decisions", None)):
+            decisions = await repo.list_newswire_decisions(event_id=event_id, limit=1)
+            if decisions:
+                decision_id = decisions[0].get("decision_id")
+                policy_version = decisions[0].get("policy_version")
+        await repo.record_newswire_eval(
+            {
+                "event_id": event_id,
+                "decision_id": decision_id,
+                "policy_version": policy_version,
+                "evaluator_type": "human",
+                "evaluator_id": user_id,
+                "label_type": label_type,
+                "label_value": label_value,
+                "confidence": 1.0,
+                "reason": "discord_button",
+                "created_at_ms": _now_ms(),
+                "metadata": {"discord_message_id": message_id, "custom_id": custom_id},
+            }
+        )
+        return f"Feedback recorded: {label_type}={label_value}."
 
     def _skip(self, reason: str) -> None:
         self._skip_counts[reason] += 1
@@ -306,6 +354,36 @@ def _sink_status(sink: Any | None) -> dict[str, Any]:
 
 def _event_chunks(events: list[NewswireEvent], size: int) -> list[list[NewswireEvent]]:
     return [events[index : index + size] for index in range(0, len(events), max(1, size))]
+
+
+def _active_policy_enabled(settings: Settings) -> bool:
+    return bool(settings.newswire_policy_enabled and not settings.newswire_policy_shadow_only)
+
+
+def _policy_decision(event: NewswireEvent) -> dict[str, Any]:
+    metadata = event.metadata if isinstance(event.metadata, dict) else {}
+    decision = metadata.get("newswire_policy_decision")
+    return decision if isinstance(decision, dict) else {}
+
+
+def _feedback_label(label_type: str, raw_value: str) -> tuple[str, Any]:
+    normalized_type = str(label_type or "").strip().lower()
+    normalized_value = str(raw_value or "").strip().lower()
+    if normalized_type == "quality":
+        return "quality", normalized_value == "useful"
+    if normalized_type == "duplicate":
+        return "duplicate", normalized_value == "true"
+    if normalized_type == "stale":
+        return "stale", normalized_value == "true"
+    if normalized_type == "symbol":
+        return "symbol_correct", normalized_value != "false"
+    if normalized_type == "direction":
+        return "direction_correct", normalized_value != "false"
+    if normalized_type == "engine_action":
+        return "correct_engine_action", normalized_value
+    if normalized_type == "newswire_action":
+        return "correct_newswire_action", normalized_value
+    return normalized_type or "unknown", normalized_value
 
 
 def _now_ms() -> int:

@@ -75,8 +75,12 @@ from hyperliquid_trading_agent.app.db.models import (
     ModelVersionRecord,
     NarrativeClusterRecord,
     NewsItem,
+    NewswireDecisionRow,
+    NewswireEvalRow,
     NewswireEventRow,
+    NewswirePolicyVersionRow,
     NewswirePublishLedgerRow,
+    NewswireRewardRow,
     NormalizedEventRecord,
     OperatorFeedbackRecord,
     OperatorOutputLessonRecord,
@@ -2690,6 +2694,127 @@ class Repository:
             log.warning("newswire_publish_status_failed", error=type(exc).__name__)
             return {"enabled": True, "error": type(exc).__name__, "counts": {}}
 
+    async def record_newswire_decision(self, decision: dict[str, Any]) -> str | None:
+        decision_id = str(decision["decision_id"])
+        fields = _newswire_decision_kwargs(decision)
+        try:
+            return await self._upsert_record_by_pk(
+                NewswireDecisionRow,
+                decision_id,
+                {"decision_id": decision_id, **fields},
+                lambda item: _apply_row_fields(item, fields),
+                "decision_id",
+            )
+        except Exception as exc:  # pragma: no cover
+            log.warning("newswire_decision_record_failed", decision_id=decision_id, error=type(exc).__name__)
+            return None
+
+    async def list_newswire_decisions(self, *, event_id: str | None = None, policy_version: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(NewswireDecisionRow).order_by(NewswireDecisionRow.created_at_ms.desc()).limit(limit)
+            if event_id:
+                stmt = stmt.where(NewswireDecisionRow.event_id == str(event_id))
+            if policy_version:
+                stmt = stmt.where(NewswireDecisionRow.policy_version == str(policy_version))
+            result = await session.execute(stmt)
+            return [_newswire_decision_to_dict(item) for item in result.scalars().all()]
+
+    async def record_newswire_eval(self, eval_record: dict[str, Any]) -> str | None:
+        data = dict(eval_record)
+        eval_id = str(data.get("eval_id") or f"nwe_{uuid4().hex[:24]}")
+        data["eval_id"] = eval_id
+        fields = _newswire_eval_kwargs(data)
+        try:
+            return await self._upsert_record_by_pk(
+                NewswireEvalRow,
+                eval_id,
+                {"eval_id": eval_id, **fields},
+                lambda item: _apply_row_fields(item, fields),
+                "eval_id",
+            )
+        except Exception as exc:  # pragma: no cover
+            log.warning("newswire_eval_record_failed", eval_id=eval_id, error=type(exc).__name__)
+            return None
+
+    async def list_newswire_evals(self, *, event_id: str | None = None, decision_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(NewswireEvalRow).order_by(NewswireEvalRow.created_at_ms.desc()).limit(limit)
+            if event_id:
+                stmt = stmt.where(NewswireEvalRow.event_id == str(event_id))
+            if decision_id:
+                stmt = stmt.where(NewswireEvalRow.decision_id == str(decision_id))
+            result = await session.execute(stmt)
+            return [_newswire_eval_to_dict(item) for item in result.scalars().all()]
+
+    async def record_newswire_reward(self, reward: dict[str, Any]) -> str | None:
+        reward_id = str(reward["reward_id"])
+        fields = _newswire_reward_kwargs(reward)
+        try:
+            return await self._upsert_record_by_pk(
+                NewswireRewardRow,
+                reward_id,
+                {"reward_id": reward_id, **fields},
+                lambda item: _apply_row_fields(item, fields),
+                "reward_id",
+            )
+        except Exception as exc:  # pragma: no cover
+            log.warning("newswire_reward_record_failed", reward_id=reward_id, error=type(exc).__name__)
+            return None
+
+    async def list_newswire_rewards(self, *, event_id: str | None = None, policy_version: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(NewswireRewardRow).order_by(NewswireRewardRow.created_at_ms.desc()).limit(limit)
+            if event_id:
+                stmt = stmt.where(NewswireRewardRow.event_id == str(event_id))
+            if policy_version:
+                stmt = stmt.where(NewswireRewardRow.policy_version == str(policy_version))
+            result = await session.execute(stmt)
+            return [_newswire_reward_to_dict(item) for item in result.scalars().all()]
+
+    async def upsert_newswire_policy_version(self, policy: dict[str, Any]) -> str | None:
+        policy_version = str(policy["policy_version"])
+        fields = _newswire_policy_version_kwargs(policy)
+        try:
+            return await self._upsert_record_by_pk(
+                NewswirePolicyVersionRow,
+                policy_version,
+                {"policy_version": policy_version, **fields},
+                lambda item: _apply_row_fields(item, fields),
+                "policy_version",
+            )
+        except Exception as exc:  # pragma: no cover
+            log.warning("newswire_policy_version_upsert_failed", policy_version=policy_version, error=type(exc).__name__)
+            return None
+
+    async def list_newswire_policy_versions(self, *, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(NewswirePolicyVersionRow).order_by(NewswirePolicyVersionRow.created_at_ms.desc()).limit(limit)
+            if status:
+                stmt = stmt.where(NewswirePolicyVersionRow.status == str(status))
+            result = await session.execute(stmt)
+            return [_newswire_policy_version_to_dict(item) for item in result.scalars().all()]
+
+    async def promote_newswire_policy_version(self, policy_version: str, *, now_ms: int) -> bool:
+        if self.sessionmaker is None:
+            return False
+        async with self.sessionmaker() as session:
+            await session.execute(update(NewswirePolicyVersionRow).where(NewswirePolicyVersionRow.status == "promoted").values(status="retired"))
+            result = await session.execute(
+                update(NewswirePolicyVersionRow)
+                .where(NewswirePolicyVersionRow.policy_version == str(policy_version))
+                .values(status="promoted", promoted_at_ms=now_ms)
+            )
+            await session.commit()
+            return bool(result.rowcount)
+
     async def upsert_world_event(self, event: dict[str, Any]) -> str | None:
         return await self._upsert_record_by_pk(
             WorldEventRecord,
@@ -4456,6 +4581,90 @@ def _apply_newswire_event_row(item: NewswireEventRow, fields: dict[str, Any]) ->
         setattr(item, key, value)
 
 
+def _apply_row_fields(item: Any, fields: dict[str, Any]) -> None:
+    for key, value in fields.items():
+        setattr(item, key, value)
+
+
+def _newswire_decision_kwargs(decision: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "event_id": str(decision.get("event_id") or ""),
+        "policy_version": str(decision.get("policy_version") or ""),
+        "policy_type": str(decision.get("policy_type") or "static"),
+        "raw_event_hash": str(decision.get("raw_event_hash") or ""),
+        "cluster_id": decision.get("cluster_id"),
+        "source": str(decision.get("source") or "unknown"),
+        "provider": str(decision.get("provider") or "unknown"),
+        "source_type": str(decision.get("source_type") or "unknown"),
+        "symbols_json": list(decision.get("symbols") or []),
+        "event_type": str(decision.get("event_type") or "headline"),
+        "asset_class": str(decision.get("asset_class") or "unknown"),
+        "features_json": redact_secrets(dict(decision.get("features") or {})),
+        "scores_json": redact_secrets(dict(decision.get("scores") or {})),
+        "newswire_action": str(decision.get("newswire_action") or "drop"),
+        "engine_action": str(decision.get("engine_action") or "ignore"),
+        "market_impact_score": float(decision.get("market_impact_score") or 0),
+        "quality_score": float(decision.get("quality_score") or 0),
+        "relevance_score": float(decision.get("relevance_score") or 0),
+        "novelty_score": float(decision.get("novelty_score") or 0),
+        "urgency_score": float(decision.get("urgency_score") or 0),
+        "source_score": float(decision.get("source_score") or 0),
+        "confidence": float(decision.get("confidence") or 0),
+        "direction_score": float(decision.get("direction_score") or 0),
+        "direction_confidence": float(decision.get("direction_confidence") or 0),
+        "risk_score": float(decision.get("risk_score") or 0),
+        "reasons_json": [str(item) for item in decision.get("reasons") or []],
+        "penalties_json": [str(item) for item in decision.get("penalties") or []],
+        "created_at_ms": int(decision.get("created_at_ms") or _runtime_now_ms()),
+        "metadata_json": redact_secrets(dict(decision.get("metadata") or {})),
+    }
+
+
+def _newswire_eval_kwargs(eval_record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "event_id": str(eval_record.get("event_id") or ""),
+        "decision_id": eval_record.get("decision_id"),
+        "policy_version": eval_record.get("policy_version"),
+        "evaluator_type": str(eval_record.get("evaluator_type") or "human"),
+        "evaluator_id": eval_record.get("evaluator_id"),
+        "label_type": str(eval_record.get("label_type") or ""),
+        "label_value_json": redact_secrets(eval_record.get("label_value")),
+        "confidence": float(eval_record.get("confidence") if eval_record.get("confidence") is not None else 1.0),
+        "reason": eval_record.get("reason"),
+        "notes": eval_record.get("notes"),
+        "created_at_ms": int(eval_record.get("created_at_ms") or _runtime_now_ms()),
+        "metadata_json": redact_secrets(dict(eval_record.get("metadata") or {})),
+    }
+
+
+def _newswire_reward_kwargs(reward: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "event_id": str(reward.get("event_id") or ""),
+        "decision_id": reward.get("decision_id"),
+        "policy_version": str(reward.get("policy_version") or ""),
+        "total_reward": float(reward.get("total_reward") or 0),
+        "reward_components_json": redact_secrets(dict(reward.get("reward_components") or {})),
+        "labels_json": redact_secrets(dict(reward.get("labels") or {})),
+        "reasons_json": [str(item) for item in reward.get("reasons") or []],
+        "created_at_ms": int(reward.get("created_at_ms") or _runtime_now_ms()),
+        "metadata_json": redact_secrets(dict(reward.get("metadata") or {})),
+    }
+
+
+def _newswire_policy_version_kwargs(policy: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "policy_type": str(policy.get("policy_type") or "static"),
+        "status": str(policy.get("status") or "candidate"),
+        "params_json": redact_secrets(dict(policy.get("params") or {})),
+        "model_uri": policy.get("model_uri"),
+        "replay_metrics_json": redact_secrets(dict(policy.get("replay_metrics") or {})),
+        "canary_metrics_json": redact_secrets(dict(policy.get("canary_metrics") or {})),
+        "created_at_ms": int(policy.get("created_at_ms") or _runtime_now_ms()),
+        "promoted_at_ms": policy.get("promoted_at_ms"),
+        "metadata_json": redact_secrets(dict(policy.get("metadata") or {})),
+    }
+
+
 def _default_worker_command_idempotency_key(target_role: str, command_type: str, payload: dict[str, Any]) -> str | None:
     spec = COMMAND_REGISTRY.get(command_type)
     if spec is None or not spec.idempotency_key_fields:
@@ -4575,6 +4784,89 @@ def _newswire_event_to_dict(item: NewswireEventRow) -> dict[str, Any]:
         "tradability": item.tradability_json,
         "enrichment": item.enrichment_json,
         "metadata": item.metadata_json,
+    }
+
+
+def _newswire_decision_to_dict(item: NewswireDecisionRow) -> dict[str, Any]:
+    return {
+        "decision_id": item.decision_id,
+        "event_id": item.event_id,
+        "policy_version": item.policy_version,
+        "policy_type": item.policy_type,
+        "raw_event_hash": item.raw_event_hash,
+        "cluster_id": item.cluster_id,
+        "source": item.source,
+        "provider": item.provider,
+        "source_type": item.source_type,
+        "symbols": item.symbols_json or [],
+        "event_type": item.event_type,
+        "asset_class": item.asset_class,
+        "features": item.features_json or {},
+        "scores": item.scores_json or {},
+        "newswire_action": item.newswire_action,
+        "engine_action": item.engine_action,
+        "market_impact_score": item.market_impact_score,
+        "quality_score": item.quality_score,
+        "relevance_score": item.relevance_score,
+        "novelty_score": item.novelty_score,
+        "urgency_score": item.urgency_score,
+        "source_score": item.source_score,
+        "confidence": item.confidence,
+        "direction_score": item.direction_score,
+        "direction_confidence": item.direction_confidence,
+        "risk_score": item.risk_score,
+        "reasons": item.reasons_json or [],
+        "penalties": item.penalties_json or [],
+        "created_at_ms": item.created_at_ms,
+        "metadata": item.metadata_json or {},
+    }
+
+
+def _newswire_eval_to_dict(item: NewswireEvalRow) -> dict[str, Any]:
+    return {
+        "eval_id": item.eval_id,
+        "event_id": item.event_id,
+        "decision_id": item.decision_id,
+        "policy_version": item.policy_version,
+        "evaluator_type": item.evaluator_type,
+        "evaluator_id": item.evaluator_id,
+        "label_type": item.label_type,
+        "label_value": item.label_value_json,
+        "confidence": item.confidence,
+        "reason": item.reason,
+        "notes": item.notes,
+        "created_at_ms": item.created_at_ms,
+        "metadata": item.metadata_json or {},
+    }
+
+
+def _newswire_reward_to_dict(item: NewswireRewardRow) -> dict[str, Any]:
+    return {
+        "reward_id": item.reward_id,
+        "event_id": item.event_id,
+        "decision_id": item.decision_id,
+        "policy_version": item.policy_version,
+        "total_reward": item.total_reward,
+        "reward_components": item.reward_components_json or {},
+        "labels": item.labels_json or {},
+        "reasons": item.reasons_json or [],
+        "created_at_ms": item.created_at_ms,
+        "metadata": item.metadata_json or {},
+    }
+
+
+def _newswire_policy_version_to_dict(item: NewswirePolicyVersionRow) -> dict[str, Any]:
+    return {
+        "policy_version": item.policy_version,
+        "policy_type": item.policy_type,
+        "status": item.status,
+        "params": item.params_json or {},
+        "model_uri": item.model_uri,
+        "replay_metrics": item.replay_metrics_json or {},
+        "canary_metrics": item.canary_metrics_json or {},
+        "created_at_ms": item.created_at_ms,
+        "promoted_at_ms": item.promoted_at_ms,
+        "metadata": item.metadata_json or {},
     }
 
 

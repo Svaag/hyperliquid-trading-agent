@@ -44,10 +44,11 @@ class EngineNewsConsumer:
     async def start(self) -> None:
         if self.running or not self.effective_enabled:
             return
-        flt = NewswireFilter(min_importance=float(self.settings.engine_news_min_importance))
+        min_importance = 0.0 if _active_policy_enabled(self.settings) else float(self.settings.engine_news_min_importance)
+        flt = NewswireFilter(min_importance=min_importance)
         self._subscription_id = await self.bus.subscribe(self.handle_event, filter=flt)
         self.running = True
-        log.info("engine_news_consumer_started", min_importance=self.settings.engine_news_min_importance)
+        log.info("engine_news_consumer_started", min_importance=min_importance)
 
     async def stop(self) -> None:
         if self._subscription_id is not None:
@@ -92,6 +93,11 @@ class EngineNewsConsumer:
             if event.action == "removed":
                 self._skip("removed_no_feature_derivation")
                 return
+            decision = _policy_decision(event)
+            engine_action = str(decision.get("engine_action") or "")
+            if _active_policy_enabled(self.settings) and engine_action == "ledger_only":
+                self._skip("policy_ledger_only")
+                return
             if event.source_score < float(self.settings.engine_news_min_source_score):
                 self._skip("source_score_below_minimum")
                 return
@@ -114,6 +120,9 @@ class EngineNewsConsumer:
 
 
 def newswire_event_to_engine_event(event: NewswireEvent, *, settings: Settings) -> NormalizedEvent | None:
+    decision = _policy_decision(event)
+    if _active_policy_enabled(settings) and decision and str(decision.get("engine_action") or "ignore") == "ignore":
+        return None
     symbols = engine_symbols_for_newswire_event(event, settings=settings)
     if not symbols:
         return None
@@ -139,6 +148,7 @@ def newswire_event_to_engine_event(event: NewswireEvent, *, settings: Settings) 
         "freshness": event.freshness,
         "confidence": event.confidence,
         "source_score": event.source_score,
+        "newswire_policy_decision": decision or None,
         "tradability": event.tradability.model_dump(mode="json"),
         "enrichment": event.enrichment,
     }
@@ -158,6 +168,7 @@ def newswire_event_to_engine_event(event: NewswireEvent, *, settings: Settings) 
         metadata={
             "source_newswire_event_id": event.event_id,
             "source_newswire_metadata": event.metadata,
+            "newswire_policy_decision": decision or None,
             "paper_only": True,
             "execution_authority": "none",
         },
@@ -165,8 +176,22 @@ def newswire_event_to_engine_event(event: NewswireEvent, *, settings: Settings) 
 
 
 def engine_symbols_for_newswire_event(event: NewswireEvent, *, settings: Settings) -> list[str]:
+    decision = _policy_decision(event)
+    if _active_policy_enabled(settings) and decision and str(decision.get("engine_action") or "ignore") == "ignore":
+        return []
     core = {symbol.upper() for symbol in settings.autonomy_core_symbols}
     symbols = {symbol.upper() for symbol in event.symbols if symbol.upper() in core}
-    if event.asset_class == "macro" and float(event.importance_score or 0.0) >= float(settings.engine_news_macro_min_importance):
+    macro_proxy = _active_policy_enabled(settings) and str(decision.get("engine_action") or "") == "macro_proxy"
+    if macro_proxy or (event.asset_class == "macro" and float(event.importance_score or 0.0) >= float(settings.engine_news_macro_min_importance)):
         symbols.update(symbol.upper() for symbol in settings.engine_news_macro_proxy_symbol_list)
     return sorted(symbols)
+
+
+def _active_policy_enabled(settings: Settings) -> bool:
+    return bool(settings.newswire_policy_enabled and not settings.newswire_policy_shadow_only)
+
+
+def _policy_decision(event: NewswireEvent) -> dict[str, Any]:
+    metadata = event.metadata if isinstance(event.metadata, dict) else {}
+    decision = metadata.get("newswire_policy_decision")
+    return decision if isinstance(decision, dict) else {}

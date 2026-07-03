@@ -504,6 +504,10 @@ class Settings(BaseSettings):
     newswire_llm_enrich_enabled: bool = True
     newswire_llm_enrich_min_importance: float = 70.0
     newswire_llm_enrich_max_calls_per_hour: int = 30
+    newswire_policy_enabled: bool = True
+    newswire_policy_shadow_only: bool = True
+    newswire_active_policy_version: str = ""
+    newswire_policy_min_reward_rows: int = 50
 
     world_model_adapters_enabled: bool = False
     world_model_adapter_max_items: int = 25
