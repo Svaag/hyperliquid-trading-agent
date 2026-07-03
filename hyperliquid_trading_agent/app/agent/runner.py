@@ -99,6 +99,20 @@ class TradingAgentRunner:
 
         tool_results: list[ToolResult] = []
         try:
+            capability_answer = _edgar_capability_answer(redacted_prompt, self.settings)
+            if capability_answer is not None:
+                await self._audit(
+                    "request_answered",
+                    context,
+                    {
+                        "prompt": redacted_prompt,
+                        "model": "local:capability-router",
+                        "provider": "local",
+                        "tool_count": 0,
+                        "latency_ms": int((time.perf_counter() - started) * 1000),
+                    },
+                )
+                return AgentResponse(content=capability_answer, model_used="local:capability-router")
             high_stakes = await self._maybe_answer_high_stakes(prompt=redacted_prompt, model_prompt=contextual_prompt, context=context, started=started)
             if high_stakes is not None:
                 return high_stakes
@@ -206,13 +220,45 @@ class TradingAgentRunner:
         include_l2 = any(term in lowered for term in ["order book", "book", "depth", "bid", "ask", "liquidity"])
         wants_cause = any(term in lowered for term in ["why", "breakout", "breaking out", "ripping", "ripped", "pump", "pumping", "dump", "dumping", "catalyst", "narrative", "mainnet", "staking", "airdrop"])
         wants_market = wants_cause or any(term in lowered for term in ["trade", "market", "price", "read", "setup", "long", "short", "funding", "liquidation", "book"])
-        wants_news = wants_cause or any(term in lowered for term in ["news", "macro", "fed", "fomc", "cpi", "ppi", "rates", "headline", "cycle", "economy"])
+        wants_news = wants_cause or any(
+            term in lowered
+            for term in ["news", "macro", "fed", "fomc", "cpi", "ppi", "rates", "headline", "cycle", "economy", "edgar", "filing", "filings", "sec filing", "sec filings", "10-k", "10-q", "8-k"]
+        )
         wants_docs = any(term in lowered for term in ["hyperliquid", "api", "docs", "margin", "order", "tick", "lot", "liquidation"])
         wants_funding = wants_cause or "funding" in lowered
         wants_candles = wants_cause or any(term in lowered for term in ["chart", "candle", "trend", "1h", "4h", "daily"])
         wants_paper = any(term in lowered for term in ["paper", "simulate", "position size", "risk 1", "risk:"])
         # TradFi / equity signals
-        wants_tradfi = any(term in lowered for term in ["stock", "equity", "option", "call", "put", "earnings", "dividend", "split", "sector", "heatmap", "screen", "comp", "compare", "flow", "greeks", "iv", "implied volatility"])
+        wants_tradfi = any(
+            term in lowered
+            for term in [
+                "stock",
+                "equity",
+                "option",
+                "call",
+                "put",
+                "earnings",
+                "dividend",
+                "split",
+                "filing",
+                "filings",
+                "edgar",
+                "sec filing",
+                "sec filings",
+                "10-k",
+                "10-q",
+                "8-k",
+                "sector",
+                "heatmap",
+                "screen",
+                "comp",
+                "compare",
+                "flow",
+                "greeks",
+                "iv",
+                "implied volatility",
+            ]
+        )
         stock_tickers = _extract_stock_tickers(prompt)
         tradfi_available = getattr(self.tools, "tradfi", None) is not None
         wants_equity = tradfi_available and (wants_tradfi or (stock_tickers and not coins) or any(t.upper() in ["AAPL", "NVDA", "MSFT", "TSLA", "SPY", "QQQ", "IWM", "AMZN", "GOOGL", "META"] for t in stock_tickers))
@@ -318,7 +364,11 @@ def extract_coins(text: str) -> list[str]:
     # is not in our explicit common-coin list. This lets prompts like
     # "read on HYPE?" or "thoughts on XYZ?" pass through to Hyperliquid's
     # resolver instead of being blocked by stale allowlists.
-    uppercase_tickers = {match.group(0).upper() for match in UPPERCASE_TICKER_RE.finditer(text) if not is_non_market_ticker(match.group(0))}
+    uppercase_tickers = {
+        match.group(0).upper()
+        for match in UPPERCASE_TICKER_RE.finditer(text)
+        if not is_non_market_ticker(match.group(0), text=text, start=match.start(), end=match.end())
+    }
     candidates = {coin for coin in re.findall(r"\b[A-Z][A-Z0-9]{1,12}\b", text.upper()) if not is_non_market_ticker(coin)}
     coins = list(uppercase_tickers | {coin for coin in candidates if coin in COMMON_COINS or coin.startswith("@")})
     # Also catch bitcoin/ethereum spelled out.
@@ -342,7 +392,7 @@ def _extract_stock_tickers(text: str) -> list[str]:
     for match in re.finditer(r"\$?\b([A-Z]{1,5})\b", text):
         token = match.group(1).upper()
         # Skip known crypto coins
-        if token in COMMON_COINS or is_non_market_ticker(token):
+        if token in COMMON_COINS or is_non_market_ticker(token, text=text, start=match.start(1), end=match.end(1)):
             continue
         # Skip common words that look like tickers
         if token in {"THE", "AND", "FOR", "ALL", "NEW", "NOW", "TOP", "LOW", "HIGH", "BIG", "BUY", "SELL", "LONG", "SHORT", "RISK", "NOTE", "CALL", "PUT"}:
@@ -369,6 +419,39 @@ def _with_symbol_hints(prompt: str, coins: list[str]) -> str:
     if not coins:
         return prompt
     return f"{prompt}\n\nPrior resolved symbols for reference only: {', '.join(coins)}"
+
+
+def _edgar_capability_answer(prompt: str, settings: Settings | None) -> str | None:
+    lowered = f" {prompt.lower()} "
+    if "edgar" not in lowered and "sec filing" not in lowered and "sec filings" not in lowered:
+        return None
+    capability_terms = [
+        "do you have access",
+        "can you access",
+        "can you query",
+        "can you read",
+        "do you query",
+        "edgar access",
+        "access to edgar",
+        "access to sec filings",
+    ]
+    if not any(term in lowered for term in capability_terms):
+        return None
+    if extract_coins(prompt) or _extract_stock_tickers(prompt):
+        return None
+
+    feeds = getattr(settings, "newswire_rss_feed_urls", []) if settings is not None else []
+    sec_feed_configured = any("sec.gov" in str(url).lower() for url in feeds)
+    if sec_feed_configured:
+        return (
+            "Yes. This runtime has SEC EDGAR current-filing coverage through the newswire RSS layer. "
+            "It is useful for recent 8-K/current filing alerts and filing-derived news context.\n\n"
+            "Limitation: this is not a full direct EDGAR query interface for arbitrary companies, CIK lookup, or full filing/document retrieval."
+        )
+    return (
+        "Not in this runtime configuration. I can discuss SEC filings conceptually, but I do not see a configured SEC EDGAR newswire feed here.\n\n"
+        "Limitation: even when configured, EDGAR support is current-filing RSS coverage, not a full direct EDGAR query interface."
+    )
 
 
 def _parse_paper_trade(prompt: str, coins: list[str]) -> PaperTradeRequest | None:

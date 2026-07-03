@@ -363,9 +363,25 @@ def test_extract_coins_guardrails_and_discord_helpers():
     assert extract_coins("Compare BTC ETH and random ABC") == ["ABC", "BTC", "ETH"]
     assert extract_coins("read on HYPE?") == ["HYPE"]
     assert extract_coins("APP Hunter says DEX/LIT has data") == ["LIT"]
+    assert extract_coins("do you have access to SEC EDGAR?") == []
+    assert extract_coins("AAPL 10-K in EDGAR?") == ["AAPL"]
     assert classify_request("read on FOOBAR?").allowed is True
+    assert classify_request("do you have access to edgar?").allowed is True
     assert _message_prompt_without_mentions("<@123> BTC plan") == "BTC plan"
     assert len(_chunk("a" * 5000, 1800)) == 3
+
+
+@pytest.mark.asyncio
+async def test_runner_answers_edgar_capability_without_market_data():
+    runner = TradingAgentRunner(tools=FakeTools(), model_gateway=FailingModelGateway(), settings=Settings())  # type: ignore[arg-type]
+
+    response = await runner.answer("do you have access to edgar?", context=AgentContext(source="test"))
+
+    assert response.high_stakes is False
+    assert response.fallback_used is False
+    assert response.tool_results == []
+    assert "SEC EDGAR current-filing coverage" in response.content
+    assert "not a full direct EDGAR query interface" in response.content
 
 
 @pytest.mark.asyncio

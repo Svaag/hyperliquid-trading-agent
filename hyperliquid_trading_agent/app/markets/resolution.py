@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from hyperliquid_trading_agent.app.markets.non_market import is_non_market_symbol
+
 Provider = Literal["hyperliquid", "alpaca", "alpha_vantage", "tradfi", "static"]
 TRADFI_PROVIDERS: set[str] = {"alpaca", "alpha_vantage", "tradfi"}
 AssetClass = Literal[
@@ -102,11 +104,17 @@ EQUITY_HINTS = {
     "earnings",
     "dividend",
     "split",
+    "edgar",
+    "filing",
+    "filings",
     "sec filing",
+    "sec filings",
     "10-k",
     "10-q",
     "8-k",
 }
+
+FILING_HINTS = {"edgar", "filing", "filings", "sec filing", "sec filings", "10-k", "10-q", "8-k", "s-1", "form 4"}
 
 ETF_HINTS = {"etf", "fund", "trust", "etn"}
 
@@ -267,7 +275,7 @@ def parse_market_intent(text: str) -> MarketIntent:
     uppercase_tokens: set[str] = set()
     for match in _UPPER_SYMBOL_RE.finditer(text):
         token = match.group(1).upper()
-        if token in STOP_TICKER_WORDS:
+        if token in STOP_TICKER_WORDS or is_non_market_symbol(token, text=text, start=match.start(1), end=match.end(1)):
             continue
         uppercase_tokens.add(token)
         if token not in symbols:
@@ -293,7 +301,7 @@ def parse_market_intent(text: str) -> MarketIntent:
     wants_orderbook = any(term in lowered for term in [" orderbook ", " order book ", " l2 ", " depth ", " bid ", " ask "])
     wants_candles = any(term in lowered for term in [" chart ", " candle ", " candles ", " trend ", " 1h ", " 4h ", " daily "])
     wants_compare = any(term in lowered for term in [" compare ", " versus ", " vs ", " side by side "])
-    wants_news = any(term in lowered for term in [" news ", " headline ", " macro ", " fed ", " cpi ", " fomc ", " ppi "])
+    wants_news = any(term in lowered for term in [" news ", " headline ", " macro ", " fed ", " cpi ", " fomc ", " ppi "]) or any(term in lowered for term in FILING_HINTS)
     wants_paper = any(term in lowered for term in [" paper ", " simulate ", " position size ", " risk 1", " risk:"])
 
     wants_hyperliquid = any(term in lowered for term in HYPERLIQUID_HINTS) or wants_funding or wants_orderbook

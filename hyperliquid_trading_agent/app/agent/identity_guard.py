@@ -4,30 +4,15 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from hyperliquid_trading_agent.app.markets.non_market import (
+    NON_MARKET_SYMBOLS,
+    is_non_market_symbol,
+    normalize_market_symbol_token,
+)
+
 HYPERLIQUID_NATIVE_TOKEN = "HYPE"
 
-NON_MARKET_TICKERS = {
-    "API",
-    "APP",
-    "DEX",
-    "EOF",
-    "ERROR",
-    "HTTP",
-    "HTTPS",
-    "INFO",
-    "JSON",
-    "LLM",
-    "POST",
-    "REST",
-    "SDK",
-    "STATUS",
-    "TEAM",
-    "URI",
-    "URL",
-    "USD",
-    "USDC",
-    "USDT",
-}
+NON_MARKET_TICKERS = NON_MARKET_SYMBOLS
 
 _SYMBOL_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,12}\b")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
@@ -62,8 +47,14 @@ class IdentityGuardVerdict:
     warning: str = ""
 
 
-def is_non_market_ticker(token: str) -> bool:
-    return _normalize_symbol(token) in NON_MARKET_TICKERS
+def is_non_market_ticker(
+    token: str,
+    *,
+    text: str | None = None,
+    start: int | None = None,
+    end: int | None = None,
+) -> bool:
+    return is_non_market_symbol(token, text=text, start=start, end=end)
 
 
 def asset_identity_context(tool_results: list[Any], *, prompt: str = "") -> dict[str, Any]:
@@ -111,7 +102,7 @@ def active_hyperliquid_symbols(tool_results: list[Any], *, prompt: str = "") -> 
                 _append_symbol(symbols, str(data.get("query_symbol") or data.get("coin") or ""))
     if not symbols and prompt:
         for match in _SYMBOL_RE.finditer(prompt):
-            _append_symbol(symbols, match.group(0))
+            _append_symbol(symbols, match.group(0), text=prompt, start=match.start(), end=match.end())
     return symbols
 
 
@@ -192,21 +183,23 @@ def _mentions_symbol(sentence: str, symbol: str) -> bool:
     return re.search(rf"\b{re.escape(symbol)}\b", sentence, re.IGNORECASE) is not None
 
 
-def _append_symbol(symbols: list[str], raw: str) -> None:
+def _append_symbol(
+    symbols: list[str],
+    raw: str,
+    *,
+    text: str | None = None,
+    start: int | None = None,
+    end: int | None = None,
+) -> None:
     symbol = _normalize_symbol(raw)
-    if not symbol or symbol in NON_MARKET_TICKERS:
+    if is_non_market_symbol(raw, text=text, start=start, end=end):
         return
     if symbol not in symbols:
         symbols.append(symbol)
 
 
 def _normalize_symbol(raw: str) -> str:
-    value = raw.strip().upper()
-    if ":" in value:
-        value = value.split(":", 1)[-1]
-    if value.endswith("/USDC"):
-        value = value[:-5]
-    return value
+    return normalize_market_symbol_token(raw)
 
 
 def _get(result: Any, name: str) -> Any:

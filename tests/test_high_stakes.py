@@ -339,6 +339,8 @@ def test_route_coin_extraction_ignores_error_log_tokens():
     assert "SPCX" in coins
     assert "EOF" not in coins
     assert "JSON" not in coins
+    assert extract_route_coins("do you have access to SEC EDGAR?") == []
+    assert extract_route_coins("AAPL 10-K in EDGAR?") == ["AAPL"]
 
 
 def test_debate_participation_shows_fallback_reason_and_latency():
@@ -572,6 +574,23 @@ async def test_runner_routes_high_stakes_ask_path():
     assert response.decision_run_id == "run-1"
     assert response.proposal_id == "proposal-1"
     assert response.content == "high stakes answer"
+
+
+@pytest.mark.asyncio
+async def test_runner_answers_edgar_capability_before_high_stakes():
+    graph = AskFakeGraph()
+    runner = TradingAgentRunner(
+        tools=object(),  # type: ignore[arg-type]
+        model_gateway=object(),  # type: ignore[arg-type]
+        settings=Settings(high_stakes_debate_enabled=True),
+        high_stakes_graph=graph,  # type: ignore[arg-type]
+    )
+
+    response = await runner.answer("do you have access to EDGAR?", context=AgentContext(source="test"))
+
+    assert response.high_stakes is False
+    assert graph.prompts == []
+    assert "SEC EDGAR current-filing coverage" in response.content
 
 
 @pytest.mark.asyncio

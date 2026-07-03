@@ -56,6 +56,17 @@ def test_parse_oil_market_is_commodity_not_literal_stock_only():
     assert {"WTI", "CL", "BRENTOIL", "OIL", "USO"}.issubset(set(intent.symbols))
 
 
+def test_parse_edgar_and_sec_forms_are_not_symbols():
+    access = parse_market_intent("do you have access to SEC EDGAR?")
+    filing = parse_market_intent("AAPL 10-K in EDGAR?")
+
+    assert access.symbols == []
+    assert access.wants_news is True
+    assert filing.symbols == ["AAPL"]
+    assert filing.wants_tradfi is True
+    assert filing.wants_news is True
+
+
 def test_msft_stock_prefers_nasdaq_equity_over_hip3():
     plan = _route(
         "MSFT stock read",
