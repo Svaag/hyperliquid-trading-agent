@@ -22,6 +22,8 @@ from hyperliquid_trading_agent.app.tradfi.schemas import Bar
 
 def test_parse_chart_command_exact_prefix():
     assert parse_chart_command(";;TSLA h") == ChartCommand(symbol="TSLA", horizon="h")
+    assert parse_chart_command(";;TSLA 1h") == ChartCommand(symbol="TSLA", horizon="h")
+    assert parse_chart_command(";;NQ 5m") == ChartCommand(symbol="NQ", horizon="5m")
     assert parse_chart_command(";;spcx d") == ChartCommand(symbol="SPCX", horizon="d")
     assert parse_chart_command(";; xyz:msft D") == ChartCommand(symbol="xyz:MSFT", horizon="d")
     assert parse_chart_command(";;TSLA q") is None
@@ -31,6 +33,8 @@ def test_parse_chart_command_exact_prefix():
 
 def test_parse_chart_prompt_accepts_natural_language_chart_intent():
     assert parse_chart_prompt("spacex daily chart") == ChartCommand(symbol="SPCX", horizon="d")
+    assert parse_chart_prompt("nq 5m chart") == ChartCommand(symbol="NQ", horizon="5m")
+    assert parse_chart_prompt("show me tsla 15 minute candles") == ChartCommand(symbol="TSLA", horizon="15m")
     assert parse_chart_prompt("show me TSLA hourly candles") == ChartCommand(symbol="TSLA", horizon="h")
     assert parse_chart_prompt("plot xyz:spcx monthly") == ChartCommand(symbol="xyz:SPCX", horizon="m")
 
@@ -164,6 +168,19 @@ async def test_charting_service_falls_back_to_resolved_hip3_symbol():
     assert result.image_png.startswith(b"\x89PNG")
     assert hyperliquid.calls[0][0] == "xyz:SPCX"
     assert "SPCX hourly chart" in result.content
+
+
+@pytest.mark.asyncio
+async def test_charting_service_renders_5m_hip3_chart():
+    hyperliquid = _FakeHyperliquid(hip3_symbols=["NQ"])
+    service = ChartingService(settings=Settings(), hyperliquid=hyperliquid, tradfi=_FakeTradFi([]))  # type: ignore[arg-type]
+
+    result = await service.render(ChartCommand(symbol="NQ", horizon="5m"))
+
+    assert result.image_png.startswith(b"\x89PNG")
+    assert hyperliquid.calls[0][0] == "xyz:NQ"
+    assert hyperliquid.calls[0][1] == "5m"
+    assert "NQ 5m chart" in result.content
 
 
 @pytest.mark.asyncio

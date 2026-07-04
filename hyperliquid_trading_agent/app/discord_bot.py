@@ -143,7 +143,7 @@ class DiscordTradingBot:
             if not prompt:
                 await message.reply("Mention me with a trading, Hyperliquid, market, macro, or news question.", mention_author=False)
                 return
-            natural_chart_command = parse_chart_prompt(prompt)
+            natural_chart_command = parse_chart_command(prompt) or parse_chart_prompt(prompt)
             if natural_chart_command is not None:
                 handled = await self._handle_chart_command(message, natural_chart_command, context=context, role_ids=role_ids)
                 if handled:

@@ -11,15 +11,25 @@ from typing import Any, Literal
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.hyperliquid.asset_resolver import AssetResolver
 from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
-from hyperliquid_trading_agent.app.markets.resolution import KNOWN_CRYPTO_SYMBOLS, parse_market_intent
+from hyperliquid_trading_agent.app.markets.resolution import (
+    KNOWN_CRYPTO_SYMBOLS,
+    STOP_TICKER_WORDS,
+    parse_market_intent,
+)
 from hyperliquid_trading_agent.app.tradfi.client import TradFiClient
 from hyperliquid_trading_agent.app.tradfi.schemas import Bar
 
-ChartHorizon = Literal["h", "d", "m", "y"]
+ChartHorizon = Literal["1m", "5m", "15m", "30m", "h", "2h", "4h", "d", "m", "y"]
 
-_CHART_COMMAND_RE = re.compile(r"^;;\s*([A-Za-z][A-Za-z0-9._:-]{0,24})\s+([hHdDmMyY])\s*$")
+_CHART_COMMAND_RE = re.compile(r"^;;\s*([A-Za-z][A-Za-z0-9._:-]{0,24})\s+([A-Za-z0-9]+)\s*$")
 _CHART_INTENT_RE = re.compile(r"\b(chart|charts|candle|candles|candlestick|candlesticks|plot|graph)\b", re.IGNORECASE)
 _NATURAL_HORIZON_PATTERNS: tuple[tuple[ChartHorizon, re.Pattern[str]], ...] = (
+    ("1m", re.compile(r"\b(1m|1\s*min|1\s*minute|one\s*minute)\b", re.IGNORECASE)),
+    ("5m", re.compile(r"\b(5m|5\s*min|5\s*minute|five\s*minute)s?\b", re.IGNORECASE)),
+    ("15m", re.compile(r"\b(15m|15\s*min|15\s*minute|fifteen\s*minute)s?\b", re.IGNORECASE)),
+    ("30m", re.compile(r"\b(30m|30\s*min|30\s*minute|thirty\s*minute)s?\b", re.IGNORECASE)),
+    ("4h", re.compile(r"\b(4h|4\s*hour|four\s*hour)s?\b", re.IGNORECASE)),
+    ("2h", re.compile(r"\b(2h|2\s*hour|two\s*hour)s?\b", re.IGNORECASE)),
     ("h", re.compile(r"\b(hourly|hour|1h|60m)\b", re.IGNORECASE)),
     ("d", re.compile(r"\b(daily|day|1d)\b", re.IGNORECASE)),
     ("m", re.compile(r"\b(monthly|month|1mo)\b", re.IGNORECASE)),
@@ -63,7 +73,13 @@ class _TechnicalSummary:
 
 
 _HORIZONS: dict[ChartHorizon, _HorizonConfig] = {
+    "1m": _HorizonConfig("1m", "1m", "1m", 12, 360),
+    "5m": _HorizonConfig("5m", "5m", "5m", 24, 288),
+    "15m": _HorizonConfig("15m", "15m", "15m", 24 * 3, 288),
+    "30m": _HorizonConfig("30m", "30m", "30m", 24 * 7, 336),
     "h": _HorizonConfig("hourly", "1h", "1h", 24 * 7, 180),
+    "2h": _HorizonConfig("2h", "2h", "2h", 24 * 30, 360),
+    "4h": _HorizonConfig("4h", "4h", "4h", 24 * 90, 540),
     "d": _HorizonConfig("daily", "1d", "1d", 24 * 185, 190),
     "m": _HorizonConfig("monthly", "1M", "1M", 24 * 365 * 5, 90),
     "y": _HorizonConfig("yearly", "1M", "1M", 24 * 365 * 12, 160),
@@ -84,7 +100,10 @@ def parse_chart_command(content: str) -> ChartCommand | None:
     match = _CHART_COMMAND_RE.match(str(content or "").strip())
     if match is None:
         return None
-    return ChartCommand(symbol=_canonical_chart_symbol(match.group(1)), horizon=match.group(2).lower())  # type: ignore[arg-type]
+    horizon = _normalize_chart_horizon(match.group(2))
+    if horizon is None:
+        return None
+    return ChartCommand(symbol=_canonical_chart_symbol(match.group(1)), horizon=horizon)
 
 
 def parse_chart_prompt(content: str) -> ChartCommand | None:
@@ -95,9 +114,10 @@ def parse_chart_prompt(content: str) -> ChartCommand | None:
     if horizon is None:
         return None
     intent = parse_market_intent(text)
-    if len(intent.symbols) != 1:
+    symbols = intent.symbols or _single_chart_prompt_symbol(text)
+    if len(symbols) != 1:
         return None
-    return ChartCommand(symbol=_canonical_chart_symbol(intent.symbols[0]), horizon=horizon)
+    return ChartCommand(symbol=_canonical_chart_symbol(symbols[0]), horizon=horizon)
 
 
 class ChartingService:
@@ -484,6 +504,73 @@ def _infer_natural_chart_horizon(text: str) -> ChartHorizon | None:
         if pattern.search(text):
             return horizon
     return None
+
+
+def _normalize_chart_horizon(value: str) -> ChartHorizon | None:
+    normalized = value.strip().lower()
+    aliases: dict[str, ChartHorizon] = {
+        "1min": "1m",
+        "5min": "5m",
+        "15min": "15m",
+        "30min": "30m",
+        "1h": "h",
+        "60m": "h",
+        "hour": "h",
+        "hourly": "h",
+        "1d": "d",
+        "day": "d",
+        "daily": "d",
+        "1mo": "m",
+        "month": "m",
+        "monthly": "m",
+        "1y": "y",
+        "year": "y",
+        "yearly": "y",
+    }
+    normalized = aliases.get(normalized, normalized)
+    return normalized if normalized in _HORIZONS else None  # type: ignore[return-value]
+
+
+_CHART_SYMBOL_TOKEN_RE = re.compile(r"\$?([A-Za-z][A-Za-z0-9._:-]{1,24})")
+_CHART_PROMPT_STOP_WORDS = STOP_TICKER_WORDS | {
+    "CANDLE",
+    "CANDLES",
+    "CANDLESTICK",
+    "CANDLESTICKS",
+    "FIVE",
+    "FIFTEEN",
+    "FOUR",
+    "GRAPH",
+    "HOURLY",
+    "ME",
+    "MIN",
+    "MINS",
+    "MINUTE",
+    "MINUTES",
+    "MONTHLY",
+    "ONE",
+    "PLOT",
+    "PLEASE",
+    "RENDER",
+    "SHOW",
+    "THIRTY",
+    "TWO",
+    "YEARLY",
+}
+
+
+def _single_chart_prompt_symbol(text: str) -> list[str]:
+    candidates: list[str] = []
+    for match in _CHART_SYMBOL_TOKEN_RE.finditer(text):
+        token = match.group(1).strip()
+        upper = token.upper()
+        if upper in _CHART_PROMPT_STOP_WORDS:
+            continue
+        if _normalize_chart_horizon(token) is not None:
+            continue
+        if upper not in candidates:
+            candidates.append(upper)
+    return candidates
 
 
 def _safe_filename(symbol: str) -> str:
