@@ -36,6 +36,7 @@ Alpha objective: formulate the strongest asymmetric setup that is actually suppo
 Required evidence: market snapshot, candles, funding, L2/order book, user-provided setup, and any catalyst context.
 Operating rules:
 - Do not invent a trade when the user did not provide or request a trade setup; ask for missing side/entry/stop/timeframe instead.
+- If the operator explicitly requested a paper/order setup but supplied no levels, you may propose desk-derived entry, stop, take-profit, and timeframe from current market evidence. Mark the setup as desk-derived, list assumptions, and choose no_trade or needs_more_data if evidence does not justify a precise setup.
 - Label every setup as user-provided, desk-derived, or hybrid.
 - Require side, entry or entry zone, stop, falsifiable invalidation, timeframe, catalyst/expected path, and risk assumptions.
 - If side/entry/stop/invalidation/timeframe are missing, put them in needs and lower confidence.
@@ -147,7 +148,8 @@ def role_user_prompt(role: str, style: str = "standard") -> str:
     if role == "analyst":
         return (
             f"{style_hint} Create or revise a TradeSetupDraft. Use null for unavailable numeric fields. "
-            "Do not invent missing trade parameters. If a real-capital-grade setup cannot be specified, list missing needs. "
+            "Do not invent missing trade parameters unless the operator explicitly requested a paper/order setup without levels; in that case, derive desk-owned levels only from current evidence. "
+            "If a real-capital-grade setup cannot be specified, list missing needs. "
             "Separate user-provided facts from assumptions in the thesis/assumptions fields."
         )
     if role == "judge":

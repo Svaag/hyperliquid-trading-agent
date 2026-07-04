@@ -9,19 +9,37 @@ from hyperliquid_trading_agent.app.paper.schemas import PaperTradeDraftRequest
 
 _NUMBER = r"(\d+(?:\.\d+)?)"
 _SYMBOL = r"([A-Za-z][A-Za-z0-9:_-]{1,31})"
+_RESERVED_SYMBOLS = {
+    "ACCOUNT",
+    "ENTRY",
+    "MARKET",
+    "ORDER",
+    "PAPER",
+    "PORTFOLIO",
+    "PRESSURE",
+    "QTY",
+    "RISK",
+    "SIZE",
+    "STOP",
+    "TRADE",
+}
 
 
 class PaperDiscordCommand(BaseModel):
-    action: Literal["draft", "confirm", "cancel", "close", "portfolio", "positions", "orders"]
+    action: Literal["draft", "confirm", "cancel", "close", "portfolio", "positions", "orders", "council_send"]
     order_id: str | None = None
     position_ref: str | None = None
     proposal_id: str | None = None
     draft: PaperTradeDraftRequest | None = None
+    symbol: str | None = None
+    side: Literal["long", "short"] | None = None
     actor: str = "discord"
     price: float | None = Field(default=None, gt=0)
+    risk_pct: float | None = Field(default=None, gt=0)
     reason: str = ""
     close_opposite: bool = False
     error: str = ""
+    raw_prompt: str = ""
 
 
 def parse_paper_discord_command(prompt: str) -> PaperDiscordCommand | None:
@@ -51,11 +69,12 @@ def parse_paper_discord_command(prompt: str) -> PaperDiscordCommand | None:
 
     if "paper" not in lowered:
         return None
-    side_match = re.search(r"\b(long|short)\b", lowered)
+    side_match = re.search(r"\b(long|short|buy|sell)\b", lowered)
     if side_match is None:
         return None
-    side = side_match.group(1)
-    symbol = _extract_symbol(normalized, side)
+    side_word = side_match.group(1)
+    side = "long" if side_word in {"long", "buy"} else "short"
+    symbol = _extract_symbol(normalized, side_word)
     if symbol is None:
         return PaperDiscordCommand(action="draft", error="Missing symbol. Example: `paper long BTC entry 65000 stop 64000 risk 0.25`.")
     entry = _labeled_number(normalized, ("entry", "entry px", "entry price"))
@@ -63,10 +82,19 @@ def parse_paper_discord_command(prompt: str) -> PaperDiscordCommand | None:
     take_profit = _labeled_number(normalized, ("tp", "take profit", "target", "take-profit"))
     risk_pct = _labeled_number(normalized, ("risk", "risk pct", "risk percent"))
     quantity = _labeled_number(normalized, ("size", "qty", "quantity"))
-    market = bool(re.search(r"\bmarket\b", lowered))
+    market = bool(re.search(r"\bmarket\b", lowered)) or (side_word in {"buy", "sell"} and entry is None)
     close_opposite = "close opposite" in lowered or "flip" in lowered
+    if entry is None and stop is None and take_profit is None:
+        return PaperDiscordCommand(
+            action="council_send",
+            symbol=symbol,
+            side=side,  # type: ignore[arg-type]
+            risk_pct=risk_pct,
+            close_opposite=close_opposite,
+            raw_prompt=normalized,
+        )
     if stop is None:
-        return PaperDiscordCommand(action="draft", error="Missing stop. Include `stop <price>`.")
+        return PaperDiscordCommand(action="draft", error=f"Missing stop for paper {side} {symbol}. Include `stop <price>`.")
     if entry is None and not market:
         return PaperDiscordCommand(action="draft", error="Missing entry. Include `entry <price>` or `market`.")
     try:
@@ -124,12 +152,13 @@ def _extract_symbol(prompt: str, side: str) -> str | None:
     patterns = [
         rf"\b{side}\s+(?:on\s+)?{_SYMBOL}\b",
         rf"\bpaper\s+{side}\s+(?:on\s+)?{_SYMBOL}\b",
+        rf"\b{side}\s+{_SYMBOL}\s+(?:for|in|into)\s+(?:your\s+|my\s+|the\s+)?paper\s+(?:portfolio|account)\b",
     ]
     for pattern in patterns:
         match = re.search(pattern, prompt, flags=re.IGNORECASE)
         if match:
             symbol = match.group(1).upper()
-            if symbol not in {"ENTRY", "MARKET", "STOP", "RISK", "SIZE", "QTY"}:
+            if symbol not in _RESERVED_SYMBOLS:
                 return symbol
     return None
 

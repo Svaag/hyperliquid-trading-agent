@@ -228,6 +228,8 @@ class DiscordTradingBot:
         if repository is None:
             return "Paper command routing is unavailable in this Discord worker. No live trade was placed."
 
+        if command.action == "council_send":
+            return await self._handle_council_paper_send(command, user_id=user_id)
         if command.action == "draft":
             command_type = "paper_trade_draft"
             if command.draft is not None:
@@ -255,6 +257,74 @@ class DiscordTradingBot:
         )
         return await self._paper_command_response(command, queued)
 
+    async def _handle_council_paper_send(self, command: PaperDiscordCommand, *, user_id: str | None) -> str:
+        repository = self._repository()
+        if repository is None:
+            return "Paper command routing is unavailable in this Discord worker. No live trade was placed."
+        if not self.settings.high_stakes_debate_enabled:
+            return "Agent Council is disabled for this runtime. Set HIGH_STAKES_DEBATE_ENABLED=true to derive levels before paper-send. No live trade was placed."
+        if not command.symbol or not command.side:
+            return "Missing symbol or side for Agent Council paper-send. No live trade was placed."
+
+        proposal_payload: dict[str, Any] = {
+            "prompt": _council_paper_order_prompt(command),
+            "dry_run": True,
+            "force_debate": True,
+        }
+        if command.risk_pct is not None:
+            proposal_payload["risk_pct"] = command.risk_pct
+        proposal_command = await repository.enqueue_worker_command(
+            target_role=ServiceRole.AGENT.value,
+            command_type="trade_proposal",
+            payload=proposal_payload,
+            requested_by="discord_bot",
+        )
+        proposal_state = await self._wait_worker_command(proposal_command, timeout_seconds=_council_timeout_seconds(self.settings))
+        proposal_status = str(proposal_state.get("status") or "")
+        proposal_id = str(proposal_state.get("command_id") or "")
+        if proposal_status != "completed":
+            return _worker_not_completed_message("Agent Council", proposal_id, proposal_status, proposal_state)
+
+        proposal_result = proposal_state.get("result") if isinstance(proposal_state.get("result"), dict) else {}
+        proposal = proposal_result.get("proposal") if isinstance(proposal_result.get("proposal"), dict) else {}
+        response_status = str(proposal_result.get("status") or proposal.get("status") or "")
+        if response_status != "paper_ready":
+            content = str(proposal_result.get("content") or "Agent Council did not return a paper-ready setup.")
+            return f"{content}\n\nNo paper order was sent."
+        mismatch = _proposal_mismatch(command, proposal)
+        if mismatch:
+            content = str(proposal_result.get("content") or "Agent Council returned a proposal that did not match the requested order.")
+            return f"{content}\n\nCouncil paper-send blocked: {mismatch}. No paper order was sent."
+
+        draft_payload = _paper_payload_from_council_proposal(command, proposal, proposal_result, user_id=user_id)
+        draft_command = await repository.enqueue_worker_command(
+            target_role=ServiceRole.TRADER.value,
+            command_type="paper_trade_draft",
+            payload=draft_payload,
+            requested_by="discord_bot",
+        )
+        draft_state = await self._wait_worker_command(draft_command, timeout_seconds=_paper_mutation_timeout_seconds(self.settings))
+        if str(draft_state.get("status") or "") != "completed":
+            return _worker_not_completed_message("Paper draft", str(draft_state.get("command_id") or ""), str(draft_state.get("status") or ""), draft_state)
+        draft_result = draft_state.get("result") if isinstance(draft_state.get("result"), dict) else {}
+        order = draft_result.get("order") if isinstance(draft_result.get("order"), dict) else {}
+        order_id = str(order.get("id") or "")
+        if not order_id:
+            return "Agent Council produced levels, but the paper draft returned no order id. No paper order was sent."
+
+        confirm_command = await repository.enqueue_worker_command(
+            target_role=ServiceRole.TRADER.value,
+            command_type="paper_trade_confirm",
+            payload={"order_id": order_id, "actor": user_id or "discord", "close_opposite": command.close_opposite},
+            requested_by="discord_bot",
+        )
+        confirm_state = await self._wait_worker_command(confirm_command, timeout_seconds=_paper_mutation_timeout_seconds(self.settings))
+        if str(confirm_state.get("status") or "") != "completed":
+            return _worker_not_completed_message("Paper confirm", str(confirm_state.get("command_id") or ""), str(confirm_state.get("status") or ""), confirm_state)
+        confirm_result = confirm_state.get("result") if isinstance(confirm_state.get("result"), dict) else {}
+        confirmation = format_paper_result(PaperDiscordCommand(action="confirm", order_id=order_id), confirm_result)
+        return _format_council_paper_sent(command, proposal_result, proposal, confirmation)
+
     async def _paper_command_response(self, paper_command: PaperDiscordCommand, queued: dict[str, Any]) -> str:
         repository = self._repository()
         command_id = str(queued.get("command_id") or "")
@@ -273,6 +343,22 @@ class DiscordTradingBot:
                 return f"Paper command `{command_id}` {status}: {current.get('last_error') or 'unknown error'}. No live trade was placed."
             await asyncio.sleep(1.0)
         return f"Accepted paper command `{command_id}`; it is still pending. Check `/commands/{command_id}`. No live trade was placed."
+
+    async def _wait_worker_command(self, queued: dict[str, Any], *, timeout_seconds: float) -> dict[str, Any]:
+        repository = self._repository()
+        command_id = str(queued.get("command_id") or "")
+        if repository is None or not command_id:
+            return queued
+        if str(queued.get("status") or "") == "accepted_unpersisted":
+            return queued
+        deadline = asyncio.get_running_loop().time() + max(1.0, timeout_seconds)
+        current = queued
+        while asyncio.get_running_loop().time() < deadline:
+            current = await repository.get_worker_command(command_id) or current
+            if str(current.get("status") or "") in {"completed", "failed", "cancelled"}:
+                return current
+            await asyncio.sleep(1.0)
+        return current
 
     async def _handle_paper_read(self, command: PaperDiscordCommand) -> str:
         repository = self._repository()
@@ -376,6 +462,117 @@ def _format_paper_orders_dict(orders: list[dict[str, Any]]) -> str:
             f"qty `{float(item.get('quantity') or 0):.6g}` px `{float(fill):.6g}` source `{(item.get('metadata') or {}).get('source', '-')}`"
         )
     return "\n".join(lines)
+
+
+def _council_paper_order_prompt(command: PaperDiscordCommand) -> str:
+    side_word = "buy/long" if command.side == "long" else "sell/short"
+    original = command.raw_prompt or f"{side_word} {command.symbol} for paper portfolio"
+    risk = f"\nOperator risk override: {command.risk_pct:g}%." if command.risk_pct is not None else ""
+    flip = "\nOperator allows closing an opposite paper position before opening the new side." if command.close_opposite else ""
+    return (
+        f"Operator requested a PAPER-ONLY portfolio order proposal: {side_word} {command.symbol}.\n"
+        "The operator supplied no entry, stop, or take-profit levels. Agent Council must debate whether current evidence supports a desk-derived setup.\n"
+        "If evidence supports the trade, return paper_ready with precise coin, side, entry, stop, take_profit, timeframe, thesis, and invalidation. "
+        "If edge, liquidity, invalidation, or risk/reward are not good enough, return no_trade, needs_more_data, or manual_review_required.\n"
+        "This is local paper portfolio simulation only. exchange_actions must remain empty; do not claim live execution.\n"
+        f"Original Discord request: {original}.{risk}{flip}"
+    )
+
+
+def _proposal_mismatch(command: PaperDiscordCommand, proposal: dict[str, Any]) -> str:
+    requested_symbol = str(command.symbol or "").upper()
+    proposed_symbol = str(proposal.get("coin") or "").upper()
+    requested_side = str(command.side or "").lower()
+    proposed_side = str(proposal.get("side") or "").lower()
+    if not proposed_symbol or proposed_symbol != requested_symbol:
+        return f"proposal symbol `{proposed_symbol or 'missing'}` did not match requested `{requested_symbol}`"
+    if not proposed_side or proposed_side != requested_side:
+        return f"proposal side `{proposed_side or 'missing'}` did not match requested `{requested_side}`"
+    if _positive_float(proposal.get("entry")) is None:
+        return "proposal entry was missing or invalid"
+    if _positive_float(proposal.get("stop")) is None:
+        return "proposal stop was missing or invalid"
+    return ""
+
+
+def _paper_payload_from_council_proposal(
+    command: PaperDiscordCommand,
+    proposal: dict[str, Any],
+    proposal_result: dict[str, Any],
+    *,
+    user_id: str | None,
+) -> dict[str, Any]:
+    metadata = {
+        "source": "agent_council",
+        "council_proposal_id": proposal_result.get("proposal_id"),
+        "council_run_id": proposal_result.get("run_id"),
+        "original_prompt": command.raw_prompt,
+        "paper_only": True,
+        "exchange_actions": [],
+    }
+    payload: dict[str, Any] = {
+        "symbol": str(proposal.get("coin") or command.symbol or "").upper(),
+        "side": str(proposal.get("side") or command.side or "").lower(),
+        "entry": _positive_float(proposal.get("entry")),
+        "stop": _positive_float(proposal.get("stop")),
+        "take_profit": _positive_float(proposal.get("take_profit")),
+        "risk_pct": _positive_float(proposal.get("risk_pct")) or command.risk_pct,
+        "thesis": str(proposal.get("thesis") or proposal.get("judge_summary") or "Agent Council desk-derived paper setup.")[:1000],
+        "actor": user_id or "discord",
+        "source": "agent_council",
+        "proposal_id": proposal_result.get("proposal_id"),
+        "close_opposite": command.close_opposite,
+        "metadata": metadata,
+    }
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def _format_council_paper_sent(
+    command: PaperDiscordCommand,
+    proposal_result: dict[str, Any],
+    proposal: dict[str, Any],
+    confirmation: str,
+) -> str:
+    proposal_id = str(proposal_result.get("proposal_id") or "-")
+    run_id = str(proposal_result.get("run_id") or "-")
+    tp = _fmt_optional(proposal.get("take_profit"))
+    summary = str(proposal.get("judge_summary") or proposal_result.get("status") or "Agent Council returned paper_ready.")
+    return (
+        "Agent Council returned `paper_ready` for the no-level paper order.\n"
+        f"Setup: {command.symbol} {command.side} entry `{_fmt_optional(proposal.get('entry'))}` stop `{_fmt_optional(proposal.get('stop'))}` TP `{tp}`.\n"
+        f"Council: proposal `{proposal_id}` run `{run_id}`. {summary[:240]}\n"
+        f"{confirmation}"
+    )
+
+
+def _worker_not_completed_message(label: str, command_id: str, status: str, state: dict[str, Any]) -> str:
+    status_text = status or "unknown"
+    if status_text in {"failed", "cancelled"}:
+        return f"{label} command `{command_id}` {status_text}: {state.get('last_error') or 'unknown error'}. No paper order was sent."
+    if status_text == "accepted_unpersisted":
+        return f"{label} command was accepted, but persistent worker polling is unavailable. No paper order was sent."
+    return f"{label} command `{command_id}` is still `{status_text}`. Check `/commands/{command_id}`. No paper order was sent."
+
+
+def _council_timeout_seconds(settings: Settings) -> float:
+    return min(240.0, max(30.0, float(getattr(settings, "high_stakes_timeout_seconds", 90)) + 30.0))
+
+
+def _paper_mutation_timeout_seconds(settings: Settings) -> float:
+    return min(45.0, max(10.0, float(getattr(settings, "discord_command_timeout_seconds", 30.0))))
+
+
+def _positive_float(value: object) -> float | None:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _fmt_optional(value: object) -> str:
+    number = _positive_float(value)
+    return "n/a" if number is None else f"{number:.6g}"
 
 
 async def _referenced_message_content(message, bot_user) -> str:

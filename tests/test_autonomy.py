@@ -318,6 +318,27 @@ def test_parse_paper_discord_commands():
     assert close.position_ref == "BTC"
     assert close.price == 101
 
+    natural_no_levels = parse_paper_discord_command("buy VVV for your paper portfolio")
+    assert natural_no_levels is not None
+    assert natural_no_levels.action == "council_send"
+    assert natural_no_levels.symbol == "VVV"
+    assert natural_no_levels.side == "long"
+
+    natural_buy = parse_paper_discord_command("buy VVV for your paper portfolio stop 12")
+    assert natural_buy is not None
+    assert natural_buy.draft is not None
+    assert natural_buy.draft.symbol == "VVV"
+    assert natural_buy.draft.side == "long"
+    assert natural_buy.draft.market is True
+    assert natural_buy.draft.stop == 12
+
+    natural_sell = parse_paper_discord_command("sell VVV for the paper portfolio stop 14")
+    assert natural_sell is not None
+    assert natural_sell.draft is not None
+    assert natural_sell.draft.symbol == "VVV"
+    assert natural_sell.draft.side == "short"
+    assert natural_sell.draft.market is True
+
 
 def test_discord_autonomy_command_parser_and_alert_format():
     flip_command = parse_autonomy_command("approve flip sig_abc")

@@ -19,6 +19,7 @@ from hyperliquid_trading_agent.app.discord_bot import (
 from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
 from hyperliquid_trading_agent.app.hyperliquid.ws_worker import HyperliquidWebSocketWorker, SubscriptionSpec
 from hyperliquid_trading_agent.app.main import create_app
+from hyperliquid_trading_agent.app.paper.discord import parse_paper_discord_command
 from hyperliquid_trading_agent.app.paper.schemas import PaperTradeRequest
 from hyperliquid_trading_agent.app.paper.simulator import PaperTradeSimulator
 
@@ -462,6 +463,89 @@ def test_discord_authorization_channel_and_role():
 
     assert bot.is_authorized(DiscordContext(guild_id=1, channel_id=42, author_id=3), role_ids={7}) is True
     assert bot.is_authorized(DiscordContext(guild_id=1, channel_id=42, author_id=3), role_ids={8}) is False
+
+
+@pytest.mark.asyncio
+async def test_discord_no_level_paper_order_runs_council_then_sends_paper_trade():
+    class CouncilPaperRepository:
+        enabled = True
+
+        def __init__(self):
+            self.commands = {}
+            self.enqueued = []
+
+        async def enqueue_worker_command(self, *, target_role, command_type, payload=None, requested_by=None, idempotency_key=None):
+            command_id = f"cmd_{len(self.commands) + 1}"
+            self.enqueued.append((target_role, command_type, payload or {}))
+            result = {}
+            if command_type == "trade_proposal":
+                result = {
+                    "run_id": "run_1",
+                    "proposal_id": "prop_1",
+                    "status": "paper_ready",
+                    "content": "Council approved paper setup.",
+                    "proposal": {
+                        "status": "paper_ready",
+                        "coin": "VVV",
+                        "side": "long",
+                        "entry": 13.0,
+                        "stop": 12.4,
+                        "take_profit": 14.2,
+                        "thesis": "desk-derived setup",
+                        "judge_summary": "Evidence supports a paper scout.",
+                    },
+                }
+            elif command_type == "paper_trade_draft":
+                result = {
+                    "order": {
+                        "id": "ord_1",
+                        "symbol": payload["symbol"],
+                        "side": payload["side"],
+                        "quantity": 1.5,
+                        "requested_px": payload["entry"],
+                        "stop_px": payload["stop"],
+                        "status": "new",
+                    }
+                }
+            elif command_type == "paper_trade_confirm":
+                result = {
+                    "order": {"id": payload["order_id"], "status": "filled"},
+                    "position": {
+                        "id": "pos_1",
+                        "symbol": "VVV",
+                        "side": "long",
+                        "quantity": 1.5,
+                        "avg_entry_px": 13.01,
+                        "status": "open",
+                    },
+                }
+            self.commands[command_id] = {"command_id": command_id, "status": "completed", "result": result}
+            return self.commands[command_id]
+
+        async def get_worker_command(self, command_id):
+            return self.commands.get(command_id)
+
+    repo = CouncilPaperRepository()
+    runner = type("Runner", (), {"repository": repo})()
+    settings = Settings(
+        environment="test",
+        paper_trading_enabled=True,
+        high_stakes_debate_enabled=True,
+        discord_admin_user_ids="1",
+        _env_file=None,
+    )
+    bot = DiscordTradingBot(settings=settings, runner=runner)
+    command = parse_paper_discord_command("buy VVV for your paper portfolio")
+
+    assert command is not None
+    response = await bot._handle_paper_command(command, user_id="1", role_ids=set())
+
+    assert "Agent Council returned `paper_ready`" in response
+    assert "Confirmed paper order" in response
+    assert [item[1] for item in repo.enqueued] == ["trade_proposal", "paper_trade_draft", "paper_trade_confirm"]
+    assert repo.enqueued[1][2]["symbol"] == "VVV"
+    assert repo.enqueued[1][2]["entry"] == 13.0
+    assert repo.enqueued[2][2]["order_id"] == "ord_1"
 
 
 class FakeUser:
