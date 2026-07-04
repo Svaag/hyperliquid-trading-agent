@@ -14,6 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from hyperliquid_trading_agent.app.markets.non_market import is_non_market_symbol
+from hyperliquid_trading_agent.app.tradfi.company_aliases import company_aliases_in_text
 
 Provider = Literal["hyperliquid", "alpaca", "alpha_vantage", "tradfi", "static"]
 TRADFI_PROVIDERS: set[str] = {"alpaca", "alpha_vantage", "tradfi"}
@@ -172,27 +173,6 @@ COMMODITY_SYMBOLS: set[str] = {
     "WTI",
 }
 
-_COMPANY_NAME_TO_TICKER: dict[str, str] = {
-    "apple": "AAPL",
-    "nvidia": "NVDA",
-    "microsoft": "MSFT",
-    "amazon": "AMZN",
-    "google": "GOOGL",
-    "alphabet": "GOOGL",
-    "meta": "META",
-    "facebook": "META",
-    "tesla": "TSLA",
-    "netflix": "NFLX",
-    "amd": "AMD",
-    "intel": "INTC",
-    "spy": "SPY",
-    "qqq": "QQQ",
-    "iwm": "IWM",
-    "dow": "DIA",
-    "spacex": "SPCX",
-    "space x": "SPCX",
-}
-
 _NAMESPACED_SYMBOL_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]{1,16}:[A-Za-z][A-Za-z0-9._-]{0,16})\b")
 _UPPER_SYMBOL_RE = re.compile(r"(?<![A-Za-z0-9:_$])\$?([A-Z][A-Z0-9.]{0,12})(?![A-Za-z0-9:_])")
 
@@ -215,6 +195,8 @@ class MarketIntent(BaseModel):
     wants_candles: bool = False
     wants_compare: bool = False
     wants_news: bool = False
+    wants_sec_filing: bool = False
+    filing_forms: list[str] = Field(default_factory=list)
     wants_paper: bool = False
 
     @property
@@ -281,8 +263,8 @@ def parse_market_intent(text: str) -> MarketIntent:
         if token not in symbols:
             symbols.append(token)
 
-    for name, ticker in _COMPANY_NAME_TO_TICKER.items():
-        if name in lowered and ticker not in symbols:
+    for ticker in company_aliases_in_text(text):
+        if ticker not in symbols:
             symbols.append(ticker)
 
     commodity_topics: list[str] = []
@@ -301,11 +283,13 @@ def parse_market_intent(text: str) -> MarketIntent:
     wants_orderbook = any(term in lowered for term in [" orderbook ", " order book ", " l2 ", " depth ", " bid ", " ask "])
     wants_candles = any(term in lowered for term in [" chart ", " candle ", " candles ", " trend ", " 1h ", " 4h ", " daily "])
     wants_compare = any(term in lowered for term in [" compare ", " versus ", " vs ", " side by side "])
-    wants_news = any(term in lowered for term in [" news ", " headline ", " macro ", " fed ", " cpi ", " fomc ", " ppi "]) or any(term in lowered for term in FILING_HINTS)
+    filing_forms = _infer_filing_forms(text)
+    wants_sec_filing = bool(filing_forms) or any(term in lowered for term in FILING_HINTS)
+    wants_news = any(term in lowered for term in [" news ", " headline ", " macro ", " fed ", " cpi ", " fomc ", " ppi "]) or wants_sec_filing
     wants_paper = any(term in lowered for term in [" paper ", " simulate ", " position size ", " risk 1", " risk:"])
 
     wants_hyperliquid = any(term in lowered for term in HYPERLIQUID_HINTS) or wants_funding or wants_orderbook
-    wants_equity = any(term in lowered for term in EQUITY_HINTS)
+    wants_equity = any(term in lowered for term in EQUITY_HINTS) or wants_sec_filing
     wants_etf = any(term in lowered for term in ETF_HINTS)
     wants_options = any(term in lowered for term in OPTIONS_HINTS)
     wants_tradfi = wants_equity or wants_etf or wants_options
@@ -331,6 +315,8 @@ def parse_market_intent(text: str) -> MarketIntent:
         wants_candles=wants_candles,
         wants_compare=wants_compare,
         wants_news=wants_news,
+        wants_sec_filing=wants_sec_filing,
+        filing_forms=filing_forms,
         wants_paper=wants_paper,
     )
 
@@ -507,6 +493,25 @@ def _open_interest_bonus(value: float | None) -> float:
     if value is None or value <= 0:
         return 0.0
     return max(0.0, min(10.0, (math.log10(value) - 2.0) * 1.5))
+
+
+def _infer_filing_forms(text: str) -> list[str]:
+    lowered = f" {text.lower()} "
+    out: list[str] = []
+
+    def add(form: str) -> None:
+        if form not in out:
+            out.append(form)
+
+    if re.search(r"(?<![a-z0-9])(?:form\s+)?10\s*-?\s*q(?![a-z0-9])", lowered) or " quarterly " in lowered or " quarterly report " in lowered:
+        add("10-Q")
+    if re.search(r"(?<![a-z0-9])(?:form\s+)?10\s*-?\s*k(?![a-z0-9])", lowered) or " annual " in lowered or " annual report " in lowered:
+        add("10-K")
+    if re.search(r"(?<![a-z0-9])(?:form\s+)?8\s*-?\s*k(?![a-z0-9])", lowered) or " current report " in lowered:
+        add("8-K")
+    if re.search(r"(?<![a-z0-9])(?:form\s+)?s\s*-?\s*1(?![a-z0-9])", lowered) or " prospectus " in lowered or " registration statement " in lowered:
+        add("S-1")
+    return out
 
 
 def _has_non_uppercase_topic(text: str, topic: str) -> bool:

@@ -565,6 +565,12 @@ class Settings(BaseSettings):
     alpaca_trading_enabled: bool = False  # gated like HYPERLIQUID_EXCHANGE_ENABLED
     alpaca_data_feed: Literal["iex", "sip", "delayed_sip"] = "iex"  # IEX = free
 
+    # SEC EDGAR (public, keyless; set User-Agent contact for production)
+    sec_edgar_user_agent: str = "hyperliquid-trading-agent/0.1 sec-edgar-contact@example.com"
+    sec_edgar_timeout_seconds: float = 10.0
+    sec_edgar_company_cache_ttl_seconds: int = 86_400
+    sec_edgar_submissions_cache_ttl_seconds: int = 300
+
     # Equity-specific autonomy (separate from crypto)
     autonomy_equity_enabled: bool = False
     autonomy_equity_universe: str = ""  # e.g. AAPL,NVDA,MSFT,SPY,QQQ

@@ -62,9 +62,21 @@ def test_parse_edgar_and_sec_forms_are_not_symbols():
 
     assert access.symbols == []
     assert access.wants_news is True
+    assert access.wants_sec_filing is True
     assert filing.symbols == ["AAPL"]
     assert filing.wants_tradfi is True
     assert filing.wants_news is True
+    assert filing.wants_sec_filing is True
+    assert filing.filing_forms == ["10-K"]
+
+
+def test_parse_circle_quarterly_report_edgar_routes_to_crcl_10q():
+    intent = parse_market_intent("link me latest Circle quarterly earnings report from edgar")
+
+    assert intent.symbols == ["CRCL"]
+    assert intent.wants_tradfi is True
+    assert intent.wants_sec_filing is True
+    assert intent.filing_forms == ["10-Q"]
 
 
 def test_msft_stock_prefers_nasdaq_equity_over_hip3():
@@ -109,6 +121,18 @@ def test_plain_msft_is_ambiguous_and_routes_both_equity_and_top_hip3():
     assert "MSFT" in plan.tradfi_symbols
     assert "xyz:MSFT" in plan.hyperliquid_symbols
     assert any(candidate.dex == "cash" for candidate in route.candidates)
+
+
+def test_crcl_edgar_filing_intent_prefers_equity_over_hip3():
+    plan = _route(
+        "CRCL quarterly report EDGAR",
+        {"CRCL": [_eq("CRCL", "CRCL", name="Circle Internet Group, Inc."), _hl("CRCL", "xyz:CRCL", liq=5_000_000)]},
+    )
+
+    assert plan.routes[0].ambiguous is False
+    assert plan.routes[0].selected[0].provider == "alpaca"
+    assert plan.tradfi_symbols == ["CRCL"]
+    assert plan.hyperliquid_symbols == []
 
 
 def test_duplicate_hip3_symbol_ranks_by_liquidity_but_keeps_ambiguity():
@@ -295,6 +319,64 @@ class RoutedFakeTools:
         return ToolResult(tool="get_candles", data=[], source="fake", timestamp_ms=1, freshness="live")
 
 
+class EdgarRoutedFakeTools:
+    tradfi = object()
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    async def resolve_market_intent(self, prompt: str) -> ToolResult:
+        self.calls.append(f"resolve_market_intent:{prompt}")
+        if "perp" in prompt.lower() or "hyperliquid" in prompt.lower():
+            hl_symbols = ["xyz:CRCL"]
+            tradfi_symbols: list[str] = []
+        else:
+            hl_symbols = []
+            tradfi_symbols = ["CRCL"]
+        return ToolResult(
+            tool="resolve_market_intent",
+            data={"hyperliquid_symbols": hl_symbols, "tradfi_symbols": tradfi_symbols, "ambiguous_queries": [], "routes": []},
+            source="fake",
+            timestamp_ms=1,
+            freshness="live",
+        )
+
+    async def get_sec_filings(self, query, symbols=None, forms=None, limit=5):
+        self.calls.append(f"get_sec_filings:{','.join(symbols or [])}:{','.join(forms or [])}")
+        return ToolResult(
+            tool="get_sec_filings",
+            data={
+                "query": query,
+                "company": {"ticker": "CRCL", "cik": "0001828242", "title": "Circle Internet Group, Inc.", "matched_by": "ticker:CRCL"},
+                "forms_requested": forms or [],
+                "filings": [
+                    {
+                        "form": "10-Q",
+                        "filing_date": "2026-05-11",
+                        "report_date": "2026-03-31",
+                        "accession_number": "0001828242-26-000010",
+                        "primary_document": "crcl-20260331.htm",
+                        "primary_doc_description": "10-Q",
+                        "document_url": "https://www.sec.gov/Archives/edgar/data/1828242/000182824226000010/crcl-20260331.htm",
+                        "filing_detail_url": "https://www.sec.gov/Archives/edgar/data/1828242/000182824226000010/0001828242-26-000010-index.html",
+                    }
+                ],
+                "note": "",
+            },
+            source="fake-sec",
+            timestamp_ms=1,
+            freshness="live",
+        )
+
+    async def get_market_snapshot(self, coins, intervals=None, include_l2=False):
+        self.calls.append(f"get_market_snapshot:{','.join(coins)}")
+        return ToolResult(tool="get_market_snapshot", data={"assets": {coin: {"mid": "1", "context": {}} for coin in coins}}, source="fake", timestamp_ms=1, freshness="live")
+
+    async def get_market_snapshot_tradfi(self, symbols):
+        self.calls.append(f"get_market_snapshot_tradfi:{','.join(symbols)}")
+        return ToolResult(tool="get_market_snapshot_tradfi", data={}, source="fake", timestamp_ms=1, freshness="live")
+
+
 async def test_runner_uses_intent_router_for_stock_vs_hyperliquid_collision():
     tools = RoutedFakeTools()
     runner = TradingAgentRunner(tools=tools, model_gateway=FailingGateway(), settings=Settings(tradfi_enabled=True))  # type: ignore[arg-type]
@@ -323,3 +405,49 @@ async def test_runner_uses_tradfi_for_btc_etf_not_crypto_perp():
     assert "get_market_snapshot_tradfi" in names
     assert "get_market_snapshot" not in names
     assert "get_market_snapshot_tradfi:BTC" in tools.calls
+
+
+async def test_runner_edgar_filing_request_uses_sec_tool_without_market_snapshots():
+    tools = EdgarRoutedFakeTools()
+    runner = TradingAgentRunner(tools=tools, model_gateway=FailingGateway(), settings=Settings(tradfi_enabled=True))  # type: ignore[arg-type]
+
+    response = await runner.answer("link me latest Circle quarterly earnings report from edgar", context=AgentContext(source="test"))
+
+    names = [item.tool for item in response.tool_results]
+    assert names == ["resolve_market_intent", "get_sec_filings"]
+    assert any(call.startswith("get_sec_filings:CRCL:10-Q") for call in tools.calls)
+    assert not any(call.startswith("get_market_snapshot") for call in tools.calls)
+    assert response.model_used == "local:sec-edgar-router"
+    assert "Latest CRCL 10-Q" in response.content
+    assert "sec.gov/Archives/edgar/data/1828242" in response.content
+
+
+async def test_runner_carries_prior_edgar_intent_for_terse_crcl_followup():
+    tools = EdgarRoutedFakeTools()
+    runner = TradingAgentRunner(tools=tools, model_gateway=FailingGateway(), settings=Settings(tradfi_enabled=True))  # type: ignore[arg-type]
+    context = AgentContext(
+        source="test",
+        conversation_context="Recent thread memory:\nUser: link me latest Circle quarterly earnings report from edgar\nAssistant: stale answer",
+    )
+
+    response = await runner.answer("CRCL", context=context)
+
+    assert response.model_used == "local:sec-edgar-router"
+    assert any(call.startswith("get_sec_filings:CRCL:10-Q") for call in tools.calls)
+    assert not any(call.startswith("get_market_snapshot") for call in tools.calls)
+    assert "Which CRCL" not in response.content
+
+
+async def test_runner_explicit_perp_read_overrides_prior_edgar_context():
+    tools = EdgarRoutedFakeTools()
+    runner = TradingAgentRunner(tools=tools, model_gateway=FailingGateway(), settings=Settings(tradfi_enabled=True))  # type: ignore[arg-type]
+    context = AgentContext(
+        source="test",
+        conversation_context="Recent thread memory:\nUser: link me latest Circle quarterly earnings report from edgar",
+    )
+
+    response = await runner.answer("CRCL perp read", context=context)
+
+    assert response.model_used != "local:sec-edgar-router"
+    assert not any(call.startswith("get_sec_filings") for call in tools.calls)
+    assert "get_market_snapshot:xyz:CRCL" in tools.calls

@@ -20,8 +20,10 @@ from hyperliquid_trading_agent.app.agent.tools import AgentTools, ToolResult
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.logging import get_logger
+from hyperliquid_trading_agent.app.markets.resolution import parse_market_intent
 from hyperliquid_trading_agent.app.paper.schemas import PaperTradeRequest
 from hyperliquid_trading_agent.app.security import redact_text
+from hyperliquid_trading_agent.app.tradfi.company_aliases import company_aliases_in_text
 
 log = get_logger(__name__)
 
@@ -117,6 +119,20 @@ class TradingAgentRunner:
             if high_stakes is not None:
                 return high_stakes
             tool_results = await self._gather_context(redacted_prompt, context)
+            sec_answer = _sec_filing_direct_answer(redacted_prompt, tool_results)
+            if sec_answer is not None:
+                await self._audit(
+                    "request_answered",
+                    context,
+                    {
+                        "prompt": redacted_prompt,
+                        "model": "local:sec-edgar-router",
+                        "provider": "local",
+                        "tool_count": len(tool_results),
+                        "latency_ms": int((time.perf_counter() - started) * 1000),
+                    },
+                )
+                return AgentResponse(content=sec_answer, tool_results=tool_results, model_used="local:sec-edgar-router")
             model_context = {
                 "prompt": contextual_prompt,
                 "current_prompt": redacted_prompt,
@@ -212,15 +228,17 @@ class TradingAgentRunner:
     async def _gather_context(self, prompt: str, context: AgentContext) -> list[ToolResult]:
         lowered = prompt.lower()
         results: list[ToolResult] = []
+        routing_prompt = _filing_contextual_routing_prompt(prompt, context)
+        filing_intent = parse_market_intent(routing_prompt)
         current_coins = extract_coins(prompt)
         coins = current_coins or _conversation_context_coins(context)
-        tool_prompt = prompt if current_coins else _with_symbol_hints(prompt, coins)
+        tool_prompt = routing_prompt if filing_intent.wants_sec_filing else (prompt if current_coins else _with_symbol_hints(prompt, coins))
         addresses = ADDRESS_RE.findall(prompt)
 
         include_l2 = any(term in lowered for term in ["order book", "book", "depth", "bid", "ask", "liquidity"])
         wants_cause = any(term in lowered for term in ["why", "breakout", "breaking out", "ripping", "ripped", "pump", "pumping", "dump", "dumping", "catalyst", "narrative", "mainnet", "staking", "airdrop"])
         wants_market = wants_cause or any(term in lowered for term in ["trade", "market", "price", "read", "setup", "long", "short", "funding", "liquidation", "book"])
-        wants_news = wants_cause or any(
+        wants_news = filing_intent.wants_sec_filing or wants_cause or any(
             term in lowered
             for term in ["news", "macro", "fed", "fomc", "cpi", "ppi", "rates", "headline", "cycle", "economy", "edgar", "filing", "filings", "sec filing", "sec filings", "10-k", "10-q", "8-k"]
         )
@@ -259,14 +277,15 @@ class TradingAgentRunner:
                 "implied volatility",
             ]
         )
-        stock_tickers = _extract_stock_tickers(prompt)
+        wants_tradfi = wants_tradfi or filing_intent.wants_sec_filing
+        stock_tickers = _extract_stock_tickers(routing_prompt if filing_intent.wants_sec_filing else prompt)
         tradfi_available = getattr(self.tools, "tradfi", None) is not None
-        wants_equity = tradfi_available and (wants_tradfi or (stock_tickers and not coins) or any(t.upper() in ["AAPL", "NVDA", "MSFT", "TSLA", "SPY", "QQQ", "IWM", "AMZN", "GOOGL", "META"] for t in stock_tickers))
+        wants_equity = tradfi_available and (wants_tradfi or (stock_tickers and not coins) or any(t.upper() in ["AAPL", "NVDA", "MSFT", "TSLA", "SPY", "QQQ", "IWM", "AMZN", "GOOGL", "META", "CRCL"] for t in stock_tickers))
 
         resolution_data: dict[str, Any] | None = None
         hl_symbols = coins
         tradfi_symbols = stock_tickers if wants_equity else []
-        should_resolve = bool(wants_market or wants_tradfi or wants_funding or wants_candles or coins or stock_tickers)
+        should_resolve = bool(wants_market or wants_tradfi or wants_funding or wants_candles or coins or stock_tickers or filing_intent.symbols)
         if should_resolve and callable(getattr(self.tools, "resolve_market_intent", None)):
             resolution = await self.tools.resolve_market_intent(tool_prompt)
             results.append(resolution)
@@ -274,6 +293,18 @@ class TradingAgentRunner:
                 resolution_data = resolution.data
                 hl_symbols = [str(item) for item in resolution_data.get("hyperliquid_symbols", [])]
                 tradfi_symbols = [str(item) for item in resolution_data.get("tradfi_symbols", [])]
+
+        if filing_intent.wants_sec_filing:
+            sec_symbols = _sec_filing_symbols(tradfi_symbols, stock_tickers, filing_intent.symbols)
+            if not tradfi_symbols:
+                tradfi_symbols = sec_symbols
+            if callable(getattr(self.tools, "get_sec_filings", None)):
+                results.append(await self.tools.get_sec_filings(tool_prompt, symbols=sec_symbols, forms=filing_intent.filing_forms, limit=5))
+            if not _explicit_market_data_request(prompt):
+                hl_symbols = []
+                wants_market = False
+                wants_funding = False
+                wants_candles = False
 
         if wants_market or hl_symbols:
             if resolution_data is not None:
@@ -296,7 +327,7 @@ class TradingAgentRunner:
                 results.append(await self.tools.get_public_user_state(address))
                 if any(term in lowered for term in ["fill", "trade history", "recent trades"]):
                     results.append(await self.tools.get_recent_fills(address, lookback_hours=48))
-        if wants_news:
+        if wants_news and not filing_intent.wants_sec_filing:
             results.append(await self.tools.search_market_news(tool_prompt, lookback_hours=24))
         if wants_docs:
             results.append(await self.tools.search_hyperliquid_docs(tool_prompt))
@@ -312,14 +343,14 @@ class TradingAgentRunner:
                     )
                 )
         # TradFi / equity tools
-        resolved_wants_equity = bool(tradfi_symbols) or wants_equity
+        resolved_wants_equity = (bool(tradfi_symbols) or wants_equity) and not filing_intent.wants_sec_filing
         if resolved_wants_equity and tradfi_symbols:
             results.append(await self.tools.get_market_snapshot_tradfi(tradfi_symbols[:10]))
         options_flow_enabled = bool(getattr(self.settings, "options_flow_effective_enabled", False)) if self.settings is not None else False
         if resolved_wants_equity and options_flow_enabled and any(term in lowered for term in ["option", "call", "put", "flow", "greeks"]):
             for ticker in tradfi_symbols[:3]:
                 results.append(await self.tools.analyze_options_flow(ticker))
-        if resolved_wants_equity and any(term in lowered for term in ["earning", "dividend", "split", "corporate"]):
+        if resolved_wants_equity and not filing_intent.wants_sec_filing and any(term in lowered for term in ["earning", "dividend", "split", "corporate"]):
             for ticker in tradfi_symbols[:3]:
                 results.append(await self.tools.get_corporate_actions(ticker))
         if resolved_wants_equity and any(term in lowered for term in ["compare", "vs", "versus", "side by side"]):
@@ -386,7 +417,6 @@ _STOCK_CACHE: set[str] = {"AAPL","NVDA","MSFT","AMZN","GOOGL","META","TSLA","BRK
 
 def _extract_stock_tickers(text: str) -> list[str]:
     """Extract likely stock tickers from text. Excludes known crypto coins."""
-    lowered = text.lower()
     # Find all-caps tokens and dollar-prefixed tokens
     tickers = set()
     for match in re.finditer(r"\$?\b([A-Z]{1,5})\b", text):
@@ -398,14 +428,9 @@ def _extract_stock_tickers(text: str) -> list[str]:
         if token in {"THE", "AND", "FOR", "ALL", "NEW", "NOW", "TOP", "LOW", "HIGH", "BIG", "BUY", "SELL", "LONG", "SHORT", "RISK", "NOTE", "CALL", "PUT"}:
             continue
         tickers.add(token)
-    # Also catch known stocks by name
-    name_map = {"apple": "AAPL", "nvidia": "NVDA", "microsoft": "MSFT", "amazon": "AMZN",
-                "google": "GOOGL", "alphabet": "GOOGL", "meta": "META", "facebook": "META",
-                "tesla": "TSLA", "netflix": "NFLX", "amd": "AMD", "intel": "INTC",
-                "spy": "SPY", "qqq": "QQQ", "iwm": "IWM", "dow": "DIA"}
-    for name, ticker in name_map.items():
-        if name in lowered:
-            tickers.add(ticker)
+    # Also catch known stocks by company/name alias.
+    for ticker in company_aliases_in_text(text):
+        tickers.add(ticker)
     return sorted(tickers)[:15]
 
 
@@ -419,6 +444,93 @@ def _with_symbol_hints(prompt: str, coins: list[str]) -> str:
     if not coins:
         return prompt
     return f"{prompt}\n\nPrior resolved symbols for reference only: {', '.join(coins)}"
+
+
+def _filing_contextual_routing_prompt(prompt: str, context: AgentContext) -> str:
+    prior = _prior_user_filing_intent(context)
+    if not prior or not _is_terse_entity_followup(prompt):
+        return prompt
+    return f"{prompt}\n\nPrior user filing request for routing only:\n{prior}"
+
+
+def _prior_user_filing_intent(context: AgentContext) -> str | None:
+    memory = (context.conversation_context or "").strip()
+    if not memory:
+        return None
+    for raw_line in reversed(memory.splitlines()):
+        line = raw_line.strip()
+        if not line.lower().startswith("user:"):
+            continue
+        content = line.split(":", 1)[1].strip()
+        if _looks_like_filing_request(content):
+            return content[:1000]
+    return None
+
+
+def _is_terse_entity_followup(prompt: str) -> bool:
+    lowered = f" {prompt.lower()} "
+    if any(term in lowered for term in [" perp ", " hyperliquid ", " funding ", " orderbook ", " order book ", " price ", " quote ", " stock ", " equity ", " read ", " trade ", " chart ", " candle ", " l2 "]):
+        return False
+    tokens = re.findall(r"[A-Za-z$][A-Za-z0-9.$-]*", prompt)
+    return 1 <= len(tokens) <= 3
+
+
+def _looks_like_filing_request(text: str) -> bool:
+    lowered = f" {text.lower()} "
+    return any(
+        term in lowered
+        for term in [
+            " edgar ",
+            " sec filing ",
+            " sec filings ",
+            " filing ",
+            " filings ",
+            " 10-q ",
+            " 10-k ",
+            " 8-k ",
+            " s-1 ",
+            " quarterly report ",
+            " annual report ",
+        ]
+    )
+
+
+def _explicit_market_data_request(prompt: str) -> bool:
+    lowered = f" {prompt.lower()} "
+    return any(
+        term in lowered
+        for term in [
+            " perp ",
+            " hyperliquid ",
+            " funding ",
+            " orderbook ",
+            " order book ",
+            " price ",
+            " quote ",
+            " market read ",
+            " read ",
+            " setup ",
+            " trade ",
+            " long ",
+            " short ",
+            " chart ",
+            " candle ",
+            " depth ",
+            " bid ",
+            " ask ",
+            " oi ",
+        ]
+    )
+
+
+def _sec_filing_symbols(*groups: list[str]) -> list[str]:
+    out: list[str] = []
+    for group in groups:
+        for symbol in group or []:
+            cleaned = str(symbol or "").split(":", 1)[-1].strip().upper().lstrip("$")
+            if cleaned and cleaned not in out:
+                out.append(cleaned)
+    return out[:8]
 
 
 def _edgar_capability_answer(prompt: str, settings: Settings | None) -> str | None:
@@ -506,6 +618,45 @@ def _infer_lookback_hours(interval: str) -> int:
 
 def _ensure_non_empty(content: str, prompt: str, tool_results: list[ToolResult]) -> str:
     return content.strip() or _fallback_answer(prompt, tool_results, model_error="empty model response")
+
+
+def _sec_filing_direct_answer(prompt: str, tool_results: list[ToolResult]) -> str | None:
+    sec_results = [result for result in tool_results if result.tool == "get_sec_filings" and isinstance(result.data, dict)]
+    if not sec_results:
+        return None
+    data = sec_results[-1].data
+    company = data.get("company") if isinstance(data.get("company"), dict) else None
+    forms = [str(item) for item in data.get("forms_requested") or []]
+    filings = data.get("filings") if isinstance(data.get("filings"), list) else []
+    form_label = "/".join(forms) if forms else "filing"
+    if not company:
+        return (
+            f"I could not resolve a public SEC EDGAR company for this request ({form_label}). "
+            "I'm not going to fabricate a filing link. Try a ticker or exact company name."
+        )
+    ticker = str(company.get("ticker") or "").upper()
+    title = str(company.get("title") or ticker)
+    if not filings:
+        return (
+            f"I found {ticker or title} on SEC EDGAR, but no recent {form_label} matched in the submissions feed. "
+            "I'm not going to fabricate a filing link."
+        )
+    filing = filings[0] if isinstance(filings[0], dict) else {}
+    form = str(filing.get("form") or form_label)
+    filing_date = str(filing.get("filing_date") or "unknown filing date")
+    report_date = str(filing.get("report_date") or "unknown report period")
+    detail_url = str(filing.get("filing_detail_url") or "")
+    document_url = str(filing.get("document_url") or "")
+    description = str(filing.get("primary_doc_description") or filing.get("primary_document") or "primary document")
+    lines = [
+        f"Latest {ticker or title} {form} on SEC EDGAR: filed {filing_date}, report period {report_date}.",
+    ]
+    if detail_url:
+        lines.append(f"Filing page: {detail_url}")
+    if document_url:
+        lines.append(f"Primary document ({description}): {document_url}")
+    lines.append("I only pulled SEC filing metadata/links here; I did not infer financial line items from the filing text.")
+    return "\n".join(lines)[:4000]
 
 
 def _fallback_answer(prompt: str, tool_results: list[ToolResult], model_error: str = "") -> str:

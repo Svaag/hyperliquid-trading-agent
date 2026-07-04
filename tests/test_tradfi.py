@@ -31,6 +31,7 @@ from hyperliquid_trading_agent.app.tradfi.schemas import (
     StockSnapshot,
     StockTrade,
 )
+from hyperliquid_trading_agent.app.tradfi.sec_edgar import SecEdgarClient
 
 # --- Schemas ------------------------------------------------------------------
 
@@ -150,6 +151,85 @@ def test_tradfi_client_calendar():
         events = await client.get_calendar(date(2026, 6, 16), date(2026, 6, 20))
         assert len(events) == 1
         assert events[0].event_type == "trading_day"
+    import anyio
+    anyio.run(run)
+
+
+class _FakeSecResponse:
+    def __init__(self, data):
+        self._data = data
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._data
+
+
+class _FakeSecHttp:
+    def __init__(self):
+        self.calls = []
+        self.company_payload = {
+            "0": {"cik_str": 1828242, "ticker": "CRCL", "title": "Circle Internet Group, Inc."},
+            "1": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
+        }
+        self.submissions_payload = {
+            "filings": {
+                "recent": {
+                    "accessionNumber": ["0001828242-26-000010", "0001828242-26-000009"],
+                    "filingDate": ["2026-05-11", "2026-04-01"],
+                    "reportDate": ["2026-03-31", "2026-03-20"],
+                    "form": ["10-Q", "8-K"],
+                    "primaryDocument": ["crcl-20260331.htm", "crcl-8k.htm"],
+                    "primaryDocDescription": ["10-Q", "8-K"],
+                }
+            }
+        }
+
+    async def get(self, url, headers=None):
+        self.calls.append((url, headers or {}))
+        if "company_tickers" in url:
+            return _FakeSecResponse(self.company_payload)
+        return _FakeSecResponse(self.submissions_payload)
+
+    async def aclose(self):
+        return None
+
+
+def test_sec_edgar_client_resolves_crcl_and_latest_10q_links():
+    async def run():
+        http = _FakeSecHttp()
+        client = SecEdgarClient(http_client=http)  # type: ignore[arg-type]
+
+        result = await client.latest_filings("CRCL quarterly report EDGAR", forms=["10-Q"], limit=1)
+
+        assert result.company is not None
+        assert result.company.ticker == "CRCL"
+        assert result.company.cik == "0001828242"
+        assert result.forms_requested == ["10-Q"]
+        assert len(result.filings) == 1
+        filing = result.filings[0]
+        assert filing.filing_detail_url == "https://www.sec.gov/Archives/edgar/data/1828242/000182824226000010/0001828242-26-000010-index.html"
+        assert filing.document_url == "https://www.sec.gov/Archives/edgar/data/1828242/000182824226000010/crcl-20260331.htm"
+        assert http.calls[0][1]["User-Agent"]
+
+    import anyio
+    anyio.run(run)
+
+
+def test_sec_edgar_client_resolves_circle_alias_and_does_not_fabricate_missing_form():
+    async def run():
+        client = SecEdgarClient(http_client=_FakeSecHttp())  # type: ignore[arg-type]
+
+        company = await client.resolve_company("Circle quarterly report")
+        missing = await client.latest_filings("Circle S-1 EDGAR", forms=["S-1"], limit=1)
+
+        assert company is not None
+        assert company.ticker == "CRCL"
+        assert missing.company is not None
+        assert missing.filings == []
+        assert missing.note == "no_matching_filings"
+
     import anyio
     anyio.run(run)
 

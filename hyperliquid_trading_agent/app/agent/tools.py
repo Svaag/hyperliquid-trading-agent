@@ -21,6 +21,7 @@ from hyperliquid_trading_agent.app.paper.schemas import PaperTradeRequest
 from hyperliquid_trading_agent.app.paper.simulator import PaperTradeSimulator
 from hyperliquid_trading_agent.app.tradfi.client import TradFiClient
 from hyperliquid_trading_agent.app.tradfi.options_flow import OptionsFlowDetector
+from hyperliquid_trading_agent.app.tradfi.sec_edgar import SecEdgarClient
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,7 @@ class AgentTools:
         paper: PaperTradeSimulator | None = None,
         tradfi: TradFiClient | None = None,
         options_flow: OptionsFlowDetector | None = None,
+        sec_edgar: SecEdgarClient | None = None,
     ):
         self.hyperliquid = hyperliquid
         self.news = news
@@ -55,6 +57,7 @@ class AgentTools:
         self.paper = paper or PaperTradeSimulator()
         self.tradfi = tradfi
         self.options_flow = options_flow
+        self.sec_edgar = sec_edgar
         self._hip3_symbol_cache: dict[str, str | None] = {}
 
     async def get_market_snapshot(self, coins: list[str], intervals: list[str] | None = None, include_l2: bool = False) -> ToolResult:
@@ -186,6 +189,30 @@ class AgentTools:
             return (await self.news.current_context(query, lookback_hours=lookback_hours)).to_dict()
 
         return await self._run_tool("search_market_news", {"query": query, "lookback_hours": lookback_hours}, run, "rss+optional-search+x")
+
+    async def get_sec_filings(
+        self,
+        query: str,
+        symbols: list[str] | None = None,
+        forms: list[str] | None = None,
+        limit: int = 5,
+    ) -> ToolResult:
+        async def run() -> dict[str, Any]:
+            client = self._sec_edgar_client()
+            result = await client.latest_filings(query, symbols=symbols or [], forms=forms or [], limit=limit)
+            return result.model_dump(mode="json")
+
+        return await self._run_tool(
+            "get_sec_filings",
+            {"query": query[:500], "symbols": symbols or [], "forms": forms or [], "limit": limit},
+            run,
+            "sec-edgar:data.sec.gov",
+        )
+
+    def _sec_edgar_client(self) -> SecEdgarClient:
+        if self.sec_edgar is None:
+            self.sec_edgar = SecEdgarClient(settings=getattr(self.hyperliquid, "settings", None))
+        return self.sec_edgar
 
     async def simulate_paper_trade(
         self,
