@@ -396,6 +396,7 @@ def test_extract_coins_guardrails_and_discord_helpers():
     assert extract_coins("APP Hunter says DEX/LIT has data") == ["LIT"]
     assert extract_coins("do you have access to SEC EDGAR?") == []
     assert extract_coins("AAPL 10-K in EDGAR?") == ["AAPL"]
+    assert extract_coins("VVV perp has 24h volume $7.38M and OI $1.57M") == ["VVV"]
     assert classify_request("read on FOOBAR?").allowed is True
     assert classify_request("do you have access to edgar?").allowed is True
     assert _message_prompt_without_mentions("<@123> BTC plan") == "BTC plan"
@@ -546,6 +547,52 @@ async def test_discord_no_level_paper_order_runs_council_then_sends_paper_trade(
     assert repo.enqueued[1][2]["symbol"] == "VVV"
     assert repo.enqueued[1][2]["entry"] == 13.0
     assert repo.enqueued[2][2]["order_id"] == "ord_1"
+
+
+@pytest.mark.asyncio
+async def test_discord_portfolio_command_reads_paper_state_not_agent_chat():
+    class PaperReadRepository:
+        enabled = True
+
+        async def get_latest_portfolio_snapshot(self):
+            return {
+                "equity_usd": 10_250.0,
+                "cash_usd": 9_950.0,
+                "realized_pnl_usd": 20.0,
+                "unrealized_pnl_usd": 230.0,
+                "total_pnl_usd": 250.0,
+                "gross_exposure_usd": 900.0,
+                "net_exposure_usd": 900.0,
+                "drawdown_pct": 0.0,
+                "sharpe": None,
+            }
+
+        async def list_paper_positions(self, status=None, limit=20):
+            return [
+                {
+                    "id": "pos_1",
+                    "symbol": "VVV",
+                    "side": "long",
+                    "status": "open",
+                    "quantity": 70,
+                    "avg_entry_px": 12.82,
+                    "mark_px": 12.9,
+                    "unrealized_pnl_usd": 5.6,
+                    "realized_pnl_usd": 0,
+                }
+            ]
+
+    runner = type("Runner", (), {"repository": PaperReadRepository()})()
+    bot = DiscordTradingBot(settings=Settings(environment="test", _env_file=None), runner=runner)
+    command = parse_paper_discord_command("portfolio")
+
+    assert command is not None
+    response = await bot._handle_paper_command(command, user_id="1", role_ids=set())
+
+    assert "**Paper portfolio**" in response
+    assert "**Paper positions**" in response
+    assert "VVV long open" in response
+    assert "Quick tape read" not in response
 
 
 class FakeUser:

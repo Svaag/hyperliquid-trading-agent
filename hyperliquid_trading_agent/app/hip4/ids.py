@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+OUTCOME_ASSET_ID_OFFSET = 100_000_000
+
 
 @dataclass(frozen=True)
 class OutcomeAssetId:
@@ -48,7 +50,7 @@ def balance_token(outcome_id: int, side: int) -> str:
 
 
 def exchange_asset_id(outcome_id: int, side: int) -> int:
-    return 100_000_000 + encoding(outcome_id, side)
+    return OUTCOME_ASSET_ID_OFFSET + encoding(outcome_id, side)
 
 
 def parse_coin(value: str) -> OutcomeAssetId:
@@ -63,6 +65,35 @@ def parse_balance_token(value: str) -> OutcomeAssetId:
     if not raw.startswith("+"):
         raise ValueError("HIP-4 balance token must start with '+'")
     return _parse_encoding(raw[1:])
+
+
+def parse_identifier(value: str) -> OutcomeAssetId:
+    """Parse a HIP-4 side identifier.
+
+    Supported forms mirror Hyperliquid's current HIP-4 conventions:
+    `#20` for book coins, `+20` for balance tokens, `20` for bare encodings,
+    and `100000020` for exchange asset ids.
+    """
+
+    raw = value.strip()
+    if raw.startswith("#"):
+        return parse_coin(raw)
+    if raw.startswith("+"):
+        return parse_balance_token(raw)
+    if not raw.isdigit():
+        raise ValueError("HIP-4 identifier must be numeric or start with '#' / '+'")
+    numeric = int(raw)
+    if numeric >= OUTCOME_ASSET_ID_OFFSET:
+        numeric -= OUTCOME_ASSET_ID_OFFSET
+    return _parse_encoding(str(numeric))
+
+
+def outcome_asset_id_from_identifier(value: str) -> int | None:
+    try:
+        asset = parse_identifier(value)
+    except ValueError:
+        return None
+    return asset.exchange_asset_id
 
 
 def _parse_encoding(raw: str) -> OutcomeAssetId:

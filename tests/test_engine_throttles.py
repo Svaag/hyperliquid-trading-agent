@@ -79,6 +79,7 @@ async def test_strategy_throttle_blocks_recent_dominance_with_minimum_samples() 
     now_ms = 10 * 60 * 60 * 1000
     settings = Settings(
         environment="test",
+        engine_paper_enabled=True,
         engine_strategy_throttle_lookback_hours=24,
         engine_strategy_max_allocation_share_pct=55,
         engine_strategy_max_allocations_per_loop=3,
@@ -100,3 +101,30 @@ async def test_strategy_throttle_blocks_recent_dominance_with_minimum_samples() 
     status = throttles.status()
     assert status["reason_counts"]["recent_allocation_share"] == 1
     assert status["last_recent_share_pct"]["support_resistance_reversion_v2"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_strategy_throttle_reports_recent_dominance_but_allows_shadow_observation() -> None:
+    now_ms = 10 * 60 * 60 * 1000
+    settings = Settings(
+        environment="test",
+        engine_shadow_enabled=True,
+        engine_paper_enabled=False,
+        engine_strategy_throttle_lookback_hours=24,
+        engine_strategy_max_allocation_share_pct=55,
+        engine_strategy_max_allocations_per_loop=3,
+    )
+    recent_allocations = [_allocation("support_resistance_reversion_v2", now_ms - 1_000 - idx) for idx in range(8)]
+    throttles = StrategyThrottleController(settings)
+
+    allowed, reasons, metadata = await throttles.allow_allocation(
+        _candidate("support_resistance_reversion_v2"),
+        current_loop_allocations=[],
+        repository=FakeAllocationRepo(recent_allocations),
+        timestamp_ms=now_ms,
+    )
+
+    assert allowed is True
+    assert reasons == []
+    assert metadata["throttle_reason"] == "recent_allocation_share_report_only"
+    assert metadata["shadow_observation_report_only"] is True

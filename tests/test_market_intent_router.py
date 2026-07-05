@@ -135,6 +135,20 @@ def test_crcl_edgar_filing_intent_prefers_equity_over_hip3():
     assert plan.hyperliquid_symbols == []
 
 
+def test_paper_portfolio_order_prefers_crypto_paper_unless_equity_is_explicit():
+    candidates = {"VVV": [_eq("VVV", "VVV", name="Valvoline Inc."), _hl("VVV", "VVV", cls="crypto_perp", dex="", liq=7_000_000, oi=1_500_000)]}
+
+    paper = _route("buy VVV for your paper portfolio", candidates)
+    assert paper.routes[0].ambiguous is False
+    assert paper.hyperliquid_symbols == ["VVV"]
+    assert paper.tradfi_symbols == []
+
+    equity = _route("buy VVV stock for your equity paper portfolio", candidates)
+    assert equity.routes[0].ambiguous is False
+    assert equity.tradfi_symbols == ["VVV"]
+    assert equity.hyperliquid_symbols == []
+
+
 def test_duplicate_hip3_symbol_ranks_by_liquidity_but_keeps_ambiguity():
     plan = _route(
         "NVDA perp read",

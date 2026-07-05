@@ -97,7 +97,7 @@ def test_diversity_controller_hard_caps_strategy_family_and_symbol_strategy():
     rows += [_row("s2", "f1", "ETH", 100, now - 100 - idx) for idx in range(3)]
     candidate = _candidate("s1", "f1", "BTC")
     allocation = _allocation(candidate, notional=100)
-    controller = PortfolioDiversityController(Settings(environment="test", engine_diversity_min_window_samples=10))
+    controller = PortfolioDiversityController(Settings(environment="test", engine_paper_enabled=True, engine_diversity_min_window_samples=10))
     repo = FakeDiversityRepo(rows)
 
     async def run():
@@ -111,13 +111,33 @@ def test_diversity_controller_hard_caps_strategy_family_and_symbol_strategy():
     anyio.run(run)
 
 
+def test_diversity_controller_reports_but_allows_concentration_in_shadow_observation():
+    now = 10_000_000
+    rows = [_row("s1", "f1", "BTC", 100, now - idx) for idx in range(10)]
+    candidate = _candidate("s1", "f1", "BTC")
+    allocation = _allocation(candidate, notional=100)
+    controller = PortfolioDiversityController(
+        Settings(environment="test", engine_shadow_enabled=True, engine_paper_enabled=False, engine_diversity_min_window_samples=10)
+    )
+    repo = FakeDiversityRepo(rows)
+
+    async def run():
+        result = await controller.apply(candidate, allocation, current_loop_allocations=[], repository=repo, timestamp_ms=now)
+        assert result.status == "allocate"
+        assert "strategy_hard_share_exceeded" in result.metadata["diversity"]["reason_codes"]
+        assert "shadow_observation_report_only" in result.metadata["diversity"]["reason_codes"]
+        assert repo.events[0]["decision"] == "allow"
+
+    anyio.run(run)
+
+
 def test_diversity_controller_target_throttles_at_45_pct():
     now = 10_000_000
     rows = [_row("s1", "f1", "BTC", 100, now - idx) for idx in range(5)]
     rows += [_row("s2", "f2", "ETH", 100, now - 100 - idx) for idx in range(6)]
     candidate = _candidate("s1", "f1", "ETH")
     allocation = _allocation(candidate, notional=10)
-    controller = PortfolioDiversityController(Settings(environment="test", engine_diversity_min_window_samples=10))
+    controller = PortfolioDiversityController(Settings(environment="test", engine_paper_enabled=True, engine_diversity_min_window_samples=10))
     repo = FakeDiversityRepo(rows)
 
     async def run():

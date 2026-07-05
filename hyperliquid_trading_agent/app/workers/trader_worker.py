@@ -10,6 +10,7 @@ from hyperliquid_trading_agent.app.autonomy.service import AutonomousTradingLoop
 from hyperliquid_trading_agent.app.config import ServiceRole, Settings
 from hyperliquid_trading_agent.app.engine.bandit import OfflineContextualBanditReporter
 from hyperliquid_trading_agent.app.engine.newswire_bridge import EngineNewsConsumer
+from hyperliquid_trading_agent.app.engine.pnl_loop import EnginePnLAttributionLoopService
 from hyperliquid_trading_agent.app.engine.replay_compare import EngineReplayComparisonService
 from hyperliquid_trading_agent.app.engine.service import InstitutionalEngineService
 from hyperliquid_trading_agent.app.engine.strategy_performance import refresh_strategy_regime_performance
@@ -44,6 +45,7 @@ class TraderWorker(BaseWorker):
         self._memory_service: MemoryService | None = None
         self._engine_service: InstitutionalEngineService | None = None
         self._engine_hyperliquid: HyperliquidClient | None = None
+        self._engine_pnl_attribution: EnginePnLAttributionLoopService | None = None
         self._engine_loop_task: asyncio.Task | None = None
         self._engine_loop_last_result: dict[str, Any] | None = None
         self._engine_loop_last_error: str | None = None
@@ -53,6 +55,7 @@ class TraderWorker(BaseWorker):
 
     async def run(self) -> None:
         await self._start_engine_loop()
+        await self._start_engine_pnl_attribution()
         await self._start_engine_newsfeed()
         tasks = [asyncio.create_task(self.command_loop(self._command_handlers()), name="trader-command-loop")]
         if self._engine_loop_task is not None:
@@ -131,6 +134,17 @@ class TraderWorker(BaseWorker):
         self._engine_loop_task = asyncio.create_task(self._run_engine_loop(), name="trader-engine-shadow-loop")
         log.info("trader_engine_loop_started", interval_seconds=self.settings.engine_loop_interval_seconds)
 
+    async def _start_engine_pnl_attribution(self) -> None:
+        if not self.settings.engine_enabled:
+            return
+        if self._engine_pnl_attribution is None:
+            self._engine_pnl_attribution = EnginePnLAttributionLoopService(
+                settings=self.settings,
+                repository=self.repository,
+                hyperliquid=self._get_hyperliquid_client(),
+            )
+        await self._engine_pnl_attribution.start()
+
     async def _run_engine_loop(self) -> None:
         interval = max(5, int(self.settings.engine_loop_interval_seconds))
         while not self._stop.is_set():
@@ -170,6 +184,9 @@ class TraderWorker(BaseWorker):
         return self._engine_service
 
     async def _shutdown_engine_runtime(self) -> None:
+        if self._engine_pnl_attribution is not None:
+            await self._engine_pnl_attribution.stop()
+            self._engine_pnl_attribution = None
         if self._engine_hyperliquid is not None:
             await self._engine_hyperliquid.close()
             self._engine_hyperliquid = None
@@ -548,6 +565,7 @@ class TraderWorker(BaseWorker):
         return {
             "trader": {"command_count": self.command_count, "last_command_type": self.last_command_type, "execution_authority": "paper-only/settings-gated"},
             "engine_loop": self._engine_loop_metadata(),
+            "engine_pnl_attribution": self._engine_pnl_attribution_metadata(),
             "engine_newsfeed": self._engine_newsfeed_metadata(),
         }
 
@@ -562,6 +580,9 @@ class TraderWorker(BaseWorker):
             "last_error": self._engine_loop_last_error,
             "service": self._engine_service.status() if self._engine_service is not None else {},
         }
+
+    def _engine_pnl_attribution_metadata(self) -> dict[str, Any]:
+        return self._engine_pnl_attribution.status() if self._engine_pnl_attribution is not None else {"enabled": bool(self.settings.engine_pnl_attribution_enabled), "running": False}
 
     def _engine_newsfeed_metadata(self) -> dict[str, Any]:
         enabled = bool(self.settings.engine_enabled and self.settings.engine_newsfeed_enabled)

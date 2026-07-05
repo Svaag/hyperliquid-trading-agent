@@ -146,7 +146,7 @@ class DiscordTradingBot:
             referenced_message = await _resolve_referenced_message(message)
             autonomy_command = parse_autonomy_command(prompt, referenced_message=referenced_message) if (prompt or referenced_message is not None) else None
             prediction_market_command = parse_prediction_market_discord_command(prompt, referenced_message=referenced_message) if prompt else None
-            paper_command = parse_paper_discord_command(prompt) if prompt else None
+            paper_command = parse_paper_discord_command(prompt, referenced_message=referenced_message) if prompt else None
             autonomy_alert_channel = bool(self.settings.autonomy_alert_channel_id and str(channel_id) == str(self.settings.autonomy_alert_channel_id))
             prediction_market_context_reply = (
                 prediction_market_command is not None
@@ -430,7 +430,15 @@ class DiscordTradingBot:
             return "Paper portfolio storage is unavailable."
         if command.action == "portfolio":
             snapshot = await repository.get_latest_portfolio_snapshot()
-            return _format_paper_snapshot_dict(snapshot) if snapshot else "No paper portfolio snapshot yet."
+            if snapshot:
+                content = _format_paper_snapshot_dict(snapshot)
+            else:
+                portfolio = await _maybe_get_or_create_paper_portfolio(repository, self.settings)
+                content = _format_paper_portfolio_dict(portfolio) if portfolio else "No paper portfolio snapshot yet."
+            positions = _open_position_dicts(await _maybe_list_paper_positions(repository, limit=20))
+            if positions:
+                content += "\n\n" + _format_paper_positions_dict(positions)
+            return content
         if command.action == "positions":
             return _format_paper_positions_dict(await repository.list_paper_positions(limit=20))
         if command.action == "orders":
@@ -590,6 +598,23 @@ def _format_paper_snapshot_dict(snapshot: dict[str, Any]) -> str:
     )
 
 
+def _format_paper_portfolio_dict(portfolio: dict[str, Any]) -> str:
+    initial = float(portfolio.get("initial_equity_usd") or 0)
+    cash = float(portfolio.get("cash_usd") or initial)
+    realized = float(portfolio.get("realized_pnl_usd") or 0)
+    equity = cash
+    return (
+        "**Paper portfolio**\n"
+        f"Equity: `${equity:,.2f}`\n"
+        f"Cash/Treasury: `${cash:,.2f}`\n"
+        f"Realized PnL: `${realized:,.2f}`\n"
+        "Unrealized PnL: `$0.00`\n"
+        f"Total PnL: `${equity - initial:,.2f}`\n"
+        "Gross exposure: `$0.00` | Net: `$0.00`\n"
+        "Max drawdown: `0.00%` | Sharpe: `n/a`"
+    )
+
+
 def _format_paper_positions_dict(positions: list[dict[str, Any]]) -> str:
     if not positions:
         return "No paper positions."
@@ -602,6 +627,31 @@ def _format_paper_positions_dict(positions: list[dict[str, Any]]) -> str:
             f"uPnL `${float(item.get('unrealized_pnl_usd') or 0):,.2f}` rPnL `${float(item.get('realized_pnl_usd') or 0):,.2f}`"
         )
     return "\n".join(lines)
+
+
+async def _maybe_get_or_create_paper_portfolio(repository: Any, settings: Settings) -> dict[str, Any] | None:
+    create_or_get = getattr(repository, "create_or_get_paper_portfolio", None)
+    if not callable(create_or_get):
+        return None
+    return await create_or_get(
+        name="default",
+        initial_equity_usd=settings.autonomy_paper_initial_equity_usd,
+        mode=settings.autonomy_mode,
+    )
+
+
+async def _maybe_list_paper_positions(repository: Any, *, limit: int) -> list[dict[str, Any]]:
+    list_positions = getattr(repository, "list_paper_positions", None)
+    if not callable(list_positions):
+        return []
+    try:
+        return await list_positions(status="open", limit=limit)
+    except TypeError:
+        return await list_positions(limit=limit)
+
+
+def _open_position_dicts(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [item for item in positions if str(item.get("status") or "open") == "open"]
 
 
 def _format_paper_orders_dict(orders: list[dict[str, Any]]) -> str:

@@ -79,7 +79,7 @@ class EnginePnLAttributionLoopService:
         active = [item for item in positions if item.get("position_state") in {"open", "approved", "de_risking", "trailing", "time_stop_pending"}]
         created = 0
         closed = 0
-        matured_outcomes = await self.candidate_outcomes.refresh_matured_outcomes(marks=mids, timestamp_ms=ts, limit=1000)
+        matured_outcomes = await self.candidate_outcomes.refresh_matured_outcomes(marks=mids, timestamp_ms=ts, limit=5000)
         for position in active:
             asset = str(position.get("asset") or "").upper()
             mark_px = _f(mids.get(asset))

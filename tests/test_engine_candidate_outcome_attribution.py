@@ -29,6 +29,12 @@ class FakeOutcomeRepository:
             rows = [row for row in rows if row.get("terminal_state") == terminal_state]
         return rows[: kwargs.get("limit", 100)]
 
+    async def list_due_candidate_outcome_attributions(self, **kwargs):
+        timestamp_ms = int(kwargs["timestamp_ms"])
+        rows = [row for row in self.outcomes.values() if row.get("terminal_state") == "pending" and int(row.get("window_end_ms") or 0) <= timestamp_ms]
+        rows = sorted(rows, key=lambda row: int(row.get("window_end_ms") or 0))
+        return rows[: kwargs.get("limit", 1000)]
+
     async def list_feature_values(self, **kwargs):
         rows = self.features
         if kwargs.get("asset"):

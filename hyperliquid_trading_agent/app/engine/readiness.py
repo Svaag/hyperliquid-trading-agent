@@ -5,6 +5,7 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.engine.attribution import OUTCOME_WINDOWS_MS
 from hyperliquid_trading_agent.app.engine.replay_compare import latest_engine_replay_comparison
 from hyperliquid_trading_agent.app.engine.validation_report import build_engine_validation_report
 
@@ -162,21 +163,26 @@ async def build_paper_readiness_scorecard(
     start_ms = max(generated_at_ms - window_ms, int(getattr(settings, "engine_readiness_clean_window_start_ms", 0) or 0))
     service_status = await _engine_service_status(repository, settings, engine_service, generated_at_ms=generated_at_ms)
 
-    report = await build_engine_validation_report(repository, limit=limit)
-    candidates_all = await repository.list_alpha_candidates(limit=limit)
-    ev_all = await repository.list_ev_estimates(limit=limit)
-    allocations_all = await repository.list_allocation_decisions(limit=limit)
-    intents_all = await repository.list_order_intents(limit=limit)
-    reports_all = await repository.list_execution_reports(limit=limit)
-    risk_all = await repository.list_risk_gateway_decisions(limit=limit)
+    expanded_limit = max(limit, int(settings.engine_readiness_min_candidates), int(settings.engine_readiness_min_shadow_intents))
+    evidence_limit = max(expanded_limit * 2, 5000)
+    risk_limit = max(expanded_limit * 5, 5000)
+    outcome_limit = max(expanded_limit * (len(OUTCOME_WINDOWS_MS) + 2), 10_000)
+
+    report = await build_engine_validation_report(repository, limit=expanded_limit)
+    candidates_all = await repository.list_alpha_candidates(limit=expanded_limit)
+    ev_all = await repository.list_ev_estimates(limit=expanded_limit)
+    allocations_all = await repository.list_allocation_decisions(limit=expanded_limit)
+    intents_all = await repository.list_order_intents(limit=expanded_limit)
+    reports_all = await repository.list_execution_reports(limit=expanded_limit)
+    risk_all = await repository.list_risk_gateway_decisions(limit=risk_limit)
     risk_rejects_all = [item for item in risk_all if item.get("decision") == "reject"]
-    positions_all = await repository.list_position_theses(limit=limit)
-    pnl_all = await repository.list_pnl_attribution(limit=limit)
-    council_all = await _maybe_list(repository, "list_council_reviews", limit=limit)
-    candidate_evidence_links_all = await _maybe_list(repository, "list_candidate_evidence_links", limit=limit)
-    candidate_outcomes_all = await _maybe_list(repository, "list_candidate_outcome_attributions", limit=limit)
-    portfolio_concentration_events_all = await _maybe_list(repository, "list_portfolio_concentration_events", limit=limit)
-    strategy_regime_performance_all = await _maybe_list(repository, "list_strategy_regime_performance", limit=limit)
+    positions_all = await repository.list_position_theses(limit=expanded_limit)
+    pnl_all = await repository.list_pnl_attribution(limit=expanded_limit)
+    council_all = await _maybe_list(repository, "list_council_reviews", limit=evidence_limit)
+    candidate_evidence_links_all = await _maybe_list(repository, "list_candidate_evidence_links", limit=evidence_limit)
+    candidate_outcomes_all = await _maybe_list(repository, "list_candidate_outcome_attributions", limit=outcome_limit)
+    portfolio_concentration_events_all = await _maybe_list(repository, "list_portfolio_concentration_events", limit=evidence_limit)
+    strategy_regime_performance_all = await _maybe_list(repository, "list_strategy_regime_performance", limit=evidence_limit)
     latest_replay_comparison = await latest_engine_replay_comparison(repository)
 
     candidates = _in_window(candidates_all, start_ms, "created_at_ms")

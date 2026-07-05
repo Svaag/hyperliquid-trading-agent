@@ -1459,6 +1459,24 @@ class Repository:
             filters.append(CandidateOutcomeAttributionRecord.terminal_state == terminal_state)
         return await self._list_engine_records(CandidateOutcomeAttributionRecord, order_by=CandidateOutcomeAttributionRecord.window_end_ms, limit=limit, filters=filters)
 
+    async def list_due_candidate_outcome_attributions(self, *, timestamp_ms: int, limit: int = 1000) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        try:
+            async with self.sessionmaker() as session:
+                stmt = (
+                    select(CandidateOutcomeAttributionRecord)
+                    .where(CandidateOutcomeAttributionRecord.terminal_state == "pending")
+                    .where(CandidateOutcomeAttributionRecord.window_end_ms <= int(timestamp_ms))
+                    .order_by(CandidateOutcomeAttributionRecord.window_end_ms.asc())
+                    .limit(limit)
+                )
+                result = await session.execute(stmt)
+                return [_engine_record_to_dict(item) for item in result.scalars().all()]
+        except Exception as exc:  # pragma: no cover
+            log.warning("candidate_outcome_due_list_failed", error=type(exc).__name__)
+            return []
+
     async def record_replay_result_link(self, link: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
             ReplayResultLinkRecord(

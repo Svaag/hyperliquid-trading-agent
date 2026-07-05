@@ -91,6 +91,8 @@ def is_non_market_symbol(
         return True
     if symbol in NON_MARKET_SYMBOLS:
         return True
+    if symbol == "OI" and _is_open_interest_fragment(text, start, end):
+        return True
     return _is_sec_form_fragment(text, start, end)
 
 
@@ -101,3 +103,13 @@ def _is_sec_form_fragment(text: str | None, start: int | None, end: int | None) 
         if start < match.end() and end > match.start():
             return True
     return False
+
+
+def _is_open_interest_fragment(text: str | None, start: int | None, end: int | None) -> bool:
+    if text is None or start is None or end is None:
+        return False
+    window = text[max(0, start - 24) : min(len(text), end + 24)].lower()
+    if any(term in window for term in ["open interest", "funding/oi", "volume/oi", "funding oi", "volume oi"]):
+        return True
+    after = text[end : min(len(text), end + 16)]
+    return re.match(r"\s*[:=]?\s*\$?\d", after) is not None

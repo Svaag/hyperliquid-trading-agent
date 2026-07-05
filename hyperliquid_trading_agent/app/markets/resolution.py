@@ -288,11 +288,11 @@ def parse_market_intent(text: str) -> MarketIntent:
     wants_news = any(term in lowered for term in [" news ", " headline ", " macro ", " fed ", " cpi ", " fomc ", " ppi "]) or wants_sec_filing
     wants_paper = any(term in lowered for term in [" paper ", " simulate ", " position size ", " risk 1", " risk:"])
 
-    wants_hyperliquid = any(term in lowered for term in HYPERLIQUID_HINTS) or wants_funding or wants_orderbook
     wants_equity = any(term in lowered for term in EQUITY_HINTS) or wants_sec_filing
     wants_etf = any(term in lowered for term in ETF_HINTS)
     wants_options = any(term in lowered for term in OPTIONS_HINTS)
     wants_tradfi = wants_equity or wants_etf or wants_options
+    wants_hyperliquid = any(term in lowered for term in HYPERLIQUID_HINTS) or wants_funding or wants_orderbook or (wants_paper and not wants_tradfi)
     wants_commodity = bool(commodity_topics)
     wants_crypto = any(symbol in KNOWN_CRYPTO_SYMBOLS for symbol in symbols) or any(term in lowered for term in [" crypto ", " token ", " coin "])
     wants_market = any(term in lowered for term in [" market ", " price ", " read ", " setup ", " trade ", " long ", " short "])

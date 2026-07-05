@@ -28,6 +28,7 @@ class PortfolioDiversityController:
         self.family_hard_share_pct = float(getattr(settings, "engine_diversity_family_hard_share_pct", 60.0))
         self.symbol_strategy_hard_share_pct = float(getattr(settings, "engine_diversity_symbol_strategy_hard_share_pct", 35.0))
         self.min_window_samples = int(getattr(settings, "engine_diversity_min_window_samples", 10))
+        self.shadow_observation = bool(getattr(settings, "engine_shadow_enabled", False) and not getattr(settings, "engine_paper_enabled", False))
 
     def status(self) -> dict[str, Any]:
         return {
@@ -38,6 +39,7 @@ class PortfolioDiversityController:
             "family_hard_share_pct": self.family_hard_share_pct,
             "symbol_strategy_hard_share_pct": self.symbol_strategy_hard_share_pct,
             "min_window_samples": self.min_window_samples,
+            "shadow_observation_report_only": self.shadow_observation,
         }
 
     async def apply(
@@ -99,6 +101,8 @@ class PortfolioDiversityController:
         current_strategy_share = float(window.get("strategy_notional", {}).get(candidate.strategy_id, 0.0)) / max(float(window.get("total_notional", 0.0)), 1.0) * 100.0
         if not reasons and samples >= self.min_window_samples and current_strategy_share >= self.strategy_target_share_pct:
             reasons.append("strategy_target_share_throttle")
+        if reasons and self.shadow_observation:
+            return self._decision(True, [*reasons, "shadow_observation_report_only"], candidate, allocation, timestamp_ms=timestamp_ms, window=window, projected={**projected, "shadow_observation_report_only": True})
         return self._decision(not reasons, reasons, candidate, allocation, timestamp_ms=timestamp_ms, window=window, projected=projected)
 
     async def _window_allocations(self, *, repository: Any | None, current_loop_allocations: list[AllocationDecision], timestamp_ms: int) -> list[dict[str, Any]]:

@@ -400,7 +400,11 @@ def extract_coins(text: str) -> list[str]:
         for match in UPPERCASE_TICKER_RE.finditer(text)
         if not is_non_market_ticker(match.group(0), text=text, start=match.start(), end=match.end())
     }
-    candidates = {coin for coin in re.findall(r"\b[A-Z][A-Z0-9]{1,12}\b", text.upper()) if not is_non_market_ticker(coin)}
+    candidates = {
+        match.group(0).upper()
+        for match in UPPERCASE_TICKER_RE.finditer(text.upper())
+        if not is_non_market_ticker(match.group(0), text=text, start=match.start(), end=match.end())
+    }
     coins = list(uppercase_tickers | {coin for coin in candidates if coin in COMMON_COINS or coin.startswith("@")})
     # Also catch bitcoin/ethereum spelled out.
     lowered = text.lower()

@@ -3,13 +3,11 @@ from __future__ import annotations
 import hashlib
 import re
 import time
-from decimal import Decimal
 from typing import Any
 
 from hyperliquid_trading_agent.app.config import Settings
-from hyperliquid_trading_agent.app.hip4.ids import coin, parse_coin
-from hyperliquid_trading_agent.app.hip4.orderbook import parse_l2_book
-from hyperliquid_trading_agent.app.hip4.registry import parse_outcomes
+from hyperliquid_trading_agent.app.hip4.client import Hip4InfoClient
+from hyperliquid_trading_agent.app.hip4.market_data import Hip4MarketData, Hip4SideQuote
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.prediction_markets.schemas import PredictionMarketQuote
 
@@ -52,10 +50,12 @@ _QUERY_STOPWORDS = {
 
 
 class PredictionMarketCatalog:
-    def __init__(self, *, settings: Settings, repository: Any, hyperliquid: Any | None = None):
+    def __init__(self, *, settings: Settings, repository: Any, hyperliquid: Any | None = None, hip4_market_data: Hip4MarketData | None = None):
         self.settings = settings
         self.repository = repository
-        self.hyperliquid = hyperliquid
+        self.hip4_market_data = hip4_market_data
+        if self.hip4_market_data is None and hyperliquid is not None:
+            self.hip4_market_data = Hip4MarketData(hip4_client=Hip4InfoClient(settings=settings, hyperliquid=hyperliquid))
 
     async def search(self, query: str = "", *, venue: str | None = None, limit: int = 10, strict: bool = True) -> list[PredictionMarketQuote]:
         items = await self._signals(limit=max(100, limit * 8), venue=venue)
@@ -91,65 +91,50 @@ class PredictionMarketCatalog:
         return await list_signals(limit=limit, venue=venue)
 
     async def _live_hip4_quotes(self, *, query: str, limit: int, strict: bool) -> list[PredictionMarketQuote]:
-        if self.hyperliquid is None:
+        if self.hip4_market_data is None:
             return []
         tokens = _query_terms(query)
         if not tokens:
             return []
         try:
-            payload = await self.hyperliquid.outcome_meta()
+            outcomes = await self.hip4_market_data.list_outcomes(query=query, strict=strict)
         except Exception as exc:  # pragma: no cover - external API behavior
             log.warning("prediction_market_hip4_outcome_meta_failed", error=type(exc).__name__)
             return []
-        outcomes = parse_outcomes(payload if isinstance(payload, dict) else {})
-        matches = [item for item in outcomes if not item.settled and _outcome_matches_terms(item, tokens, strict=strict)]
         quotes: list[PredictionMarketQuote] = []
-        for outcome in matches[: max(1, limit)]:
+        for outcome in outcomes[: max(1, limit)]:
             quotes.extend(await self._quotes_for_hip4_outcome(outcome))
         return quotes
 
     async def _resolve_live_hip4_ref(self, ref: str) -> PredictionMarketQuote | None:
-        parsed = _parse_hip4_ref(ref)
-        if parsed is None or self.hyperliquid is None:
+        if self.hip4_market_data is None:
             return None
-        outcome_id, side = parsed
         try:
-            payload = await self.hyperliquid.outcome_meta()
+            resolved = await self.hip4_market_data.resolve_identifier(ref)
         except Exception as exc:  # pragma: no cover
             log.warning("prediction_market_hip4_ref_outcome_meta_failed", error=type(exc).__name__)
-            payload = {}
-        outcomes = {item.outcome_id: item for item in parse_outcomes(payload if isinstance(payload, dict) else {})}
-        outcome = outcomes.get(outcome_id)
-        if outcome is None:
-            outcome = _SyntheticOutcome(outcome_id=outcome_id)
-        quotes = await self._quotes_for_hip4_outcome(outcome, sides=[side] if side is not None else [0])
+            return None
+        if resolved is None:
+            return None
+        quotes = await self._quotes_for_hip4_outcome(resolved.outcome, sides=[resolved.side] if resolved.side is not None else [0])
         return quotes[0] if quotes else None
 
     async def _quotes_for_hip4_outcome(self, outcome: Any, *, sides: list[int] | None = None) -> list[PredictionMarketQuote]:
-        if self.hyperliquid is None:
+        if self.hip4_market_data is None:
             return []
         quotes: list[PredictionMarketQuote] = []
         for side in sides or [0, 1]:
             try:
-                book = parse_l2_book(coin(int(outcome.outcome_id), side), await self.hyperliquid.l2_book(coin(int(outcome.outcome_id), side)), source="rest")
+                side_quote = await self.hip4_market_data.quote_outcome_side(outcome, side)
             except Exception as exc:  # pragma: no cover - external API behavior
                 log.warning("prediction_market_hip4_l2_book_failed", outcome_id=getattr(outcome, "outcome_id", None), side=side, error=type(exc).__name__)
                 continue
-            quote = _quote_from_hip4_book(outcome, side=side, book=book, settings=self.settings)
+            if side_quote is None:
+                continue
+            quote = _quote_from_hip4_side_quote(side_quote, settings=self.settings)
             if quote is not None and _fresh_enough(quote, self.settings):
                 quotes.append(quote)
         return quotes
-
-
-class _SyntheticOutcome:
-    def __init__(self, *, outcome_id: int):
-        self.outcome_id = outcome_id
-        self.name = f"HIP-4 outcome {outcome_id}"
-        self.description = ""
-        self.side0_name = "Side 0"
-        self.side1_name = "Side 1"
-        self.settled = False
-        self.raw = {}
 
 
 def quote_id_for(*, venue: str, market_id: str, outcome_id: str | None) -> str:
@@ -196,19 +181,18 @@ def _quote_from_signal(signal: dict[str, Any], *, settings: Settings) -> Predict
     )
 
 
-def _quote_from_hip4_book(outcome: Any, *, side: int, book: Any, settings: Settings) -> PredictionMarketQuote | None:
-    data = book.model_dump(mode="json") if hasattr(book, "model_dump") else dict(book or {})
-    best_bid = _top_price(data.get("bids"))
-    best_ask = _top_price(data.get("asks"))
-    implied = _mid_price(best_bid, best_ask)
-    price = best_ask if best_ask is not None else implied if implied is not None else best_bid
+def _quote_from_hip4_side_quote(item: Hip4SideQuote, *, settings: Settings) -> PredictionMarketQuote | None:
+    best_bid = _optional_float(item.best_bid)
+    best_ask = _optional_float(item.best_ask)
+    implied = _optional_float(item.mid_price)
+    price = _optional_float(item.buy_price)
     if price is None or price <= 0 or price > 1:
         return None
-    outcome_id = int(getattr(outcome, "outcome_id"))
+    outcome_id = item.outcome.outcome_id
+    side = item.side
     now_ms = int(time.time() * 1000)
-    as_of_ms = int(data.get("as_of_ms") or now_ms)
-    side_name = str(getattr(outcome, "side0_name", "Side 0") if side == 0 else getattr(outcome, "side1_name", "Side 1"))
-    question = str(getattr(outcome, "name", "") or f"HIP-4 outcome {outcome_id}")
+    as_of_ms = int(item.book.as_of_ms or now_ms)
+    question = item.outcome.name or f"HIP-4 outcome {outcome_id}"
     return PredictionMarketQuote(
         quote_id=quote_id_for(venue="hip4", market_id=str(outcome_id), outcome_id=f"{outcome_id}:{side}"),
         signal_id=f"pm_hip4_live_{outcome_id}_{side}_{as_of_ms}",
@@ -216,26 +200,26 @@ def _quote_from_hip4_book(outcome: Any, *, side: int, book: Any, settings: Setti
         market_id=str(outcome_id),
         question=question,
         outcome_id=f"{outcome_id}:{side}",
-        outcome_name=side_name,
+        outcome_name=item.outcome_name,
         side="yes",
         implied_probability=implied,
         best_bid=best_bid,
         best_ask=best_ask,
         price=price,
-        liquidity_usd=_levels_liquidity(data),
+        liquidity_usd=_optional_float(item.liquidity_usd),
         volume_usd=None,
         status="open",
         as_of_ms=as_of_ms,
         staleness_ms=max(0, now_ms - as_of_ms),
         symbols=[],
-        topics=_hip4_topics(outcome),
+        topics=_hip4_topics(item.outcome),
         metadata={
             "source_signal": {
                 "source": "hyperliquid_info",
                 "adapter": "hip4_live",
-                "coin": data.get("coin") or coin(outcome_id, side),
+                "coin": item.coin,
                 "side": side,
-                "outcome": getattr(outcome, "raw", {}) or {},
+                "outcome": item.outcome.raw or {},
                 "paper_only": True,
                 "execution_authority": "none",
             },
@@ -325,32 +309,6 @@ def _quote_matches_ref(quote: PredictionMarketQuote, ref: str) -> bool:
     return ref in values or quote.quote_id.startswith(ref) or quote.signal_id.startswith(ref)
 
 
-def _parse_hip4_ref(ref: str) -> tuple[int, int | None] | None:
-    raw = ref.strip().lower()
-    raw = raw.removeprefix("hip4:")
-    raw = raw.removeprefix("hl:")
-    if raw.startswith("#"):
-        try:
-            asset = parse_coin(raw)
-            return asset.outcome_id, asset.side
-        except ValueError:
-            return None
-    match = re.fullmatch(r"(\d+)(?::([01]))?", raw)
-    if match:
-        return int(match.group(1)), int(match.group(2)) if match.group(2) is not None else None
-    match = re.fullmatch(r"(\d+)([01])", raw)
-    if match:
-        return int(match.group(1)), int(match.group(2))
-    return None
-
-
-def _outcome_matches_terms(outcome: Any, tokens: list[str], *, strict: bool = True) -> bool:
-    text = _outcome_haystack(outcome)
-    if strict:
-        return all(token in text for token in tokens)
-    return all(token in text for token in tokens) or any(token in text for token in tokens[:3])
-
-
 def _outcome_haystack(outcome: Any) -> str:
     text = " ".join(
         [
@@ -364,44 +322,6 @@ def _outcome_haystack(outcome: Any) -> str:
     if "round of 16" in text:
         text = f"{text} r16"
     return text
-
-
-def _top_price(levels: Any) -> float | None:
-    if not isinstance(levels, list) or not levels:
-        return None
-    level = levels[0]
-    raw = level.get("px") if isinstance(level, dict) else getattr(level, "px", None)
-    value = _optional_float(raw)
-    return None if value is None else max(0.0, min(1.0, value))
-
-
-def _mid_price(best_bid: float | None, best_ask: float | None) -> float | None:
-    if best_bid is not None and best_ask is not None:
-        return max(0.0, min(1.0, (best_bid + best_ask) / 2.0))
-    return best_bid if best_bid is not None else best_ask
-
-
-def _levels_liquidity(data: dict[str, Any]) -> float | None:
-    total = Decimal("0")
-    for side in ("bids", "asks"):
-        for level in data.get(side) or []:
-            if isinstance(level, dict):
-                px = _decimal(level.get("px"))
-                sz = _decimal(level.get("sz"))
-            else:
-                px = _decimal(getattr(level, "px", None))
-                sz = _decimal(getattr(level, "sz", None))
-            total += px * sz
-    return float(total) if total > 0 else None
-
-
-def _decimal(value: Any) -> Decimal:
-    try:
-        if value is None or value == "":
-            return Decimal("0")
-        return Decimal(str(value))
-    except Exception:
-        return Decimal("0")
 
 
 def _hip4_topics(outcome: Any) -> list[str]:

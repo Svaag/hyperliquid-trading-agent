@@ -106,7 +106,11 @@ def extract_route_coins(text: str) -> list[str]:
         for match in TOKEN_RE.finditer(text)
         if not _excluded_route_token(match.group(0), text=text, start=match.start(), end=match.end())
     }
-    candidates = {coin for coin in TOKEN_RE.findall(text.upper()) if not _excluded_route_token(coin)}
+    candidates = {
+        match.group(0).upper()
+        for match in TOKEN_RE.finditer(text.upper())
+        if not _excluded_route_token(match.group(0), text=text, start=match.start(), end=match.end())
+    }
     coins = list(uppercase_tickers | {coin for coin in candidates if coin in COMMON_COINS or coin.startswith("@")})
     lowered = text.lower()
     if "bitcoin" in lowered:

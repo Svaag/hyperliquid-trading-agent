@@ -313,6 +313,8 @@ async def test_prediction_market_catalog_searches_live_hip4_books_by_match_text(
     brazil_first = await catalog.search("Brazil against Norway", limit=2)
     norway_first = await catalog.search("Norway against Brazil", limit=2)
     by_ref = await catalog.resolve("#7391")
+    by_asset_id = await catalog.resolve("100007391")
+    by_outcome_ref = await catalog.resolve("hip4:739")
 
     assert [quote.outcome_name for quote in brazil_first[:2]] == ["Brazil", "Norway"]
     assert brazil_first[0].market_id == "739"
@@ -322,6 +324,8 @@ async def test_prediction_market_catalog_searches_live_hip4_books_by_match_text(
     assert by_ref is not None
     assert by_ref.outcome_name == "Norway"
     assert by_ref.price == pytest.approx(0.31)
+    assert by_asset_id is not None and by_asset_id.outcome_name == "Norway"
+    assert by_outcome_ref is not None and by_outcome_ref.outcome_name == "Brazil"
 
 
 @pytest.mark.asyncio

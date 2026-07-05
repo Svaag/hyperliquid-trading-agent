@@ -318,6 +318,26 @@ def test_parse_paper_discord_commands():
     assert close.position_ref == "BTC"
     assert close.price == 101
 
+    portfolio = parse_paper_discord_command("portfolio")
+    assert portfolio is not None
+    assert portfolio.action == "portfolio"
+
+    vague_approval = parse_paper_discord_command("approve trade")
+    assert vague_approval is not None
+    assert vague_approval.action == "confirm"
+    assert vague_approval.order_id is None
+    assert "Missing paper order id" in vague_approval.error
+
+    from types import SimpleNamespace
+
+    reply_approval = parse_paper_discord_command(
+        "approve",
+        referenced_message=SimpleNamespace(content="Drafted paper order `abc123`: VVV long. Confirm with `confirm paper ord_123`."),
+    )
+    assert reply_approval is not None
+    assert reply_approval.action == "confirm"
+    assert reply_approval.order_id == "ord_123"
+
     natural_no_levels = parse_paper_discord_command("buy VVV for your paper portfolio")
     assert natural_no_levels is not None
     assert natural_no_levels.action == "council_send"

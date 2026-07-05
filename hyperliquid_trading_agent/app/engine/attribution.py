@@ -175,7 +175,15 @@ class CandidateOutcomeAttributionService:
         if not callable(list_rows):
             return []
         ts = timestamp_ms or now_ms()
-        pending = await list_rows(terminal_state="pending", limit=limit)
+        list_due_rows = getattr(self.repository, "list_due_candidate_outcome_attributions", None)
+        if callable(list_due_rows):
+            pending = await list_due_rows(timestamp_ms=ts, limit=limit)
+        else:
+            pending = await list_rows(terminal_state="pending", limit=limit)
+            pending = sorted(
+                [row for row in pending if int(row.get("window_end_ms") or 0) <= ts],
+                key=lambda row: int(row.get("window_end_ms") or 0),
+            )
         matured: list[CandidateOutcomeAttribution] = []
         mid_row_cache: dict[str, list[dict[str, Any]]] = {}
         for row in pending:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -9,6 +9,7 @@ from hyperliquid_trading_agent.app.paper.schemas import PaperTradeDraftRequest
 
 _NUMBER = r"(\d+(?:\.\d+)?)"
 _SYMBOL = r"([A-Za-z][A-Za-z0-9:_-]{1,31})"
+_PAPER_CONFIRM_RE = re.compile(r"\bconfirm\s+paper\s+([a-zA-Z0-9_:-]+)\b", re.IGNORECASE)
 _RESERVED_SYMBOLS = {
     "ACCOUNT",
     "ENTRY",
@@ -42,17 +43,27 @@ class PaperDiscordCommand(BaseModel):
     raw_prompt: str = ""
 
 
-def parse_paper_discord_command(prompt: str) -> PaperDiscordCommand | None:
+def parse_paper_discord_command(prompt: str, referenced_message: Any = None) -> PaperDiscordCommand | None:
     normalized = " ".join(prompt.strip().split())
     lowered = normalized.lower()
     if not lowered:
         return None
-    if lowered in {"paper portfolio", "portfolio paper"}:
+    if lowered in {"portfolio", "paper portfolio", "portfolio paper", "my portfolio", "my paper portfolio", "show portfolio", "show paper portfolio"}:
         return PaperDiscordCommand(action="portfolio")
-    if lowered in {"paper positions", "positions paper"}:
+    if lowered in {"positions", "paper positions", "positions paper", "open positions", "paper open positions", "show positions", "show paper positions"}:
         return PaperDiscordCommand(action="positions")
-    if lowered in {"paper orders", "orders paper"}:
+    if lowered in {"orders", "paper orders", "orders paper", "open orders", "paper open orders", "show orders", "show paper orders"}:
         return PaperDiscordCommand(action="orders")
+    inferred_order_id = _infer_paper_order_id_from_message(referenced_message)
+    if lowered in {"approve", "approve.", "approve!", "confirm", "confirm.", "confirm!"} and inferred_order_id:
+        return PaperDiscordCommand(action="confirm", order_id=inferred_order_id)
+    if lowered in {"approve trade", "approve paper", "approve paper trade", "confirm trade", "confirm paper trade"}:
+        if inferred_order_id:
+            return PaperDiscordCommand(action="confirm", order_id=inferred_order_id)
+        return PaperDiscordCommand(
+            action="confirm",
+            error="Missing paper order id. Use `confirm paper <order_id>` from a drafted paper order. I will not approve a trade from analysis text alone.",
+        )
 
     match = re.match(r"^confirm\s+paper\s+([a-zA-Z0-9_:-]+)(?:\s+close\s+opposite)?$", lowered)
     if match:
@@ -161,6 +172,14 @@ def _extract_symbol(prompt: str, side: str) -> str | None:
             if symbol not in _RESERVED_SYMBOLS:
                 return symbol
     return None
+
+
+def _infer_paper_order_id_from_message(message: Any) -> str | None:
+    if message is None:
+        return None
+    content = str(getattr(message, "content", "") or "")
+    match = _PAPER_CONFIRM_RE.search(content)
+    return match.group(1) if match else None
 
 
 def _labeled_number(prompt: str, labels: tuple[str, ...]) -> float | None:

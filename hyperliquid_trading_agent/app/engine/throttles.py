@@ -75,6 +75,7 @@ class StrategyThrottleController:
         if not self.settings.engine_strategy_throttles_enabled:
             return True, [], {}
         strategy_id = candidate.strategy_id
+        shadow_observation = bool(self.settings.engine_shadow_enabled and not self.settings.engine_paper_enabled)
         current_count = sum(1 for item in current_loop_allocations if item.status in {"allocate", "reduce", "require_debate"} and _candidate_strategy_hint(item) == strategy_id)
         self.last_decision_at_ms = timestamp_ms
         if current_count >= self.settings.engine_strategy_max_allocations_per_loop:
@@ -92,11 +93,19 @@ class StrategyThrottleController:
         }
         min_samples = max(2, self.settings.engine_strategy_max_allocations_per_loop * 2)
         if recent["total_count"] >= min_samples and recent_share > self.settings.engine_strategy_max_allocation_share_pct:
+            if shadow_observation:
+                allowed = {**metadata, "throttle_reason": "recent_allocation_share_report_only", "shadow_observation_report_only": True}
+                self._record_event({"type": "allocation_allowed", "strategy_id": strategy_id, "reason": "recent_allocation_share_report_only", "timestamp_ms": timestamp_ms, **allowed})
+                return True, [], allowed
             self.cooldowns[strategy_id] = max(self.cooldowns[strategy_id], self.settings.engine_strategy_throttle_cooldown_loops)
             blocked = {**metadata, "throttle_reason": "recent_allocation_share"}
             self._record_event({"type": "allocation_throttled", "strategy_id": strategy_id, "reason": "recent_allocation_share", "timestamp_ms": timestamp_ms, **blocked})
             return False, ["strategy_throttle"], blocked
         if self.cooldowns.get(strategy_id, 0) > 0:
+            if shadow_observation:
+                allowed = {**metadata, "throttle_reason": "cooldown_report_only", "remaining_loops": self.cooldowns[strategy_id], "shadow_observation_report_only": True}
+                self._record_event({"type": "allocation_allowed", "strategy_id": strategy_id, "reason": "cooldown_report_only", "timestamp_ms": timestamp_ms, **allowed})
+                return True, [], allowed
             self.cooldowns[strategy_id] -= 1
             blocked = {**metadata, "throttle_reason": "cooldown", "remaining_loops": self.cooldowns[strategy_id]}
             self._record_event({"type": "allocation_throttled", "strategy_id": strategy_id, "reason": "cooldown", "timestamp_ms": timestamp_ms, **blocked})

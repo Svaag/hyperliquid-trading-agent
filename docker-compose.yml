@@ -138,6 +138,7 @@ services:
       SERVICE_ROLE: trader
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-hlagent}:${POSTGRES_PASSWORD:-hlagent}@postgres:5432/${POSTGRES_DB:-hlagent}
       NEWSWIRE_ENABLED: "false"
+      ENGINE_PNL_ATTRIBUTION_ENABLED: "${ENGINE_PNL_ATTRIBUTION_ENABLED:-true}"
       DISCORD_BOT_ENABLED: "false"
       DISCORD_PUBLISHER_ENABLED: "false"
     command: hyperliquid-trading-agent-runtime trader
