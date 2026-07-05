@@ -8,7 +8,10 @@ import pytest
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.discord_bot import DiscordContext, DiscordTradingBot
 from hyperliquid_trading_agent.app.prediction_markets.catalog import PredictionMarketCatalog
-from hyperliquid_trading_agent.app.prediction_markets.discord import parse_prediction_market_discord_command
+from hyperliquid_trading_agent.app.prediction_markets.discord import (
+    format_prediction_market_result,
+    parse_prediction_market_discord_command,
+)
 from hyperliquid_trading_agent.app.prediction_markets.paper import PredictionMarketPaperService
 from hyperliquid_trading_agent.app.prediction_markets.schemas import (
     PredictionMarketBetDraftRequest,
@@ -211,6 +214,38 @@ async def test_prediction_market_paper_draft_confirm_settle_leaderboard():
     assert settled["count"] == 1
     assert leaderboard[0].won == 1
     assert leaderboard[0].total_pnl_usd == pytest.approx(150.0)
+
+
+@pytest.mark.asyncio
+async def test_prediction_market_paper_no_match_returns_related_markets_without_draft():
+    repo = FakePredictionRepo(
+        [
+            _signal(signal_id="brazil_wc", market_id="br_wc", question="Will Brazil win the 2026 FIFA World Cup?", outcome_name="Yes", topics=["soccer", "world cup"]),
+            _signal(signal_id="norway_wc", market_id="no_wc", question="Will Norway win the 2026 FIFA World Cup?", outcome_name="Yes", topics=["soccer", "world cup"]),
+        ]
+    )
+    service = PredictionMarketPaperService(
+        settings=Settings(environment="test", prediction_market_paper_enabled=True, _env_file=None),
+        repository=repo,
+    )
+    command = parse_prediction_market_discord_command("bet yes on Brazil against Norway")
+    assert command is not None
+
+    result = await service.draft_bet(
+        PredictionMarketBetDraftRequest(
+            discord_guild_id="g1",
+            discord_user_id="u1",
+            side=command.side,
+            query=command.query,
+        )
+    )
+    message = format_prediction_market_result(command, {"result": result})
+
+    assert result["error"] == "no_match"
+    assert len(result["suggestions"]) == 2
+    assert repo.drafts == {}
+    assert "No prediction market matched" in message
+    assert "Related markets:" in message
 
 
 def test_discord_prediction_market_draft_queues_for_authorized_non_admin_user():

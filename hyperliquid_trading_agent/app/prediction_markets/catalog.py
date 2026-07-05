@@ -1,11 +1,47 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from typing import Any
 
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.prediction_markets.schemas import PredictionMarketQuote
+
+_QUERY_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "against",
+    "beating",
+    "beat",
+    "beats",
+    "bet",
+    "buy",
+    "defeat",
+    "defeating",
+    "defeats",
+    "for",
+    "in",
+    "market",
+    "no",
+    "of",
+    "on",
+    "or",
+    "paper",
+    "pm",
+    "predict",
+    "prediction",
+    "the",
+    "to",
+    "versus",
+    "vs",
+    "will",
+    "win",
+    "winning",
+    "wins",
+    "yes",
+}
 
 
 class PredictionMarketCatalog:
@@ -109,18 +145,38 @@ def _dedupe_latest(quotes: list[PredictionMarketQuote]) -> list[PredictionMarket
 
 
 def _matches_query(quote: PredictionMarketQuote, query: str) -> bool:
-    haystack = " ".join([quote.question, quote.outcome_name, quote.venue, quote.market_id, " ".join(quote.symbols), " ".join(quote.topics)]).lower()
-    tokens = [token for token in query.lower().replace("$", " ").split() if token]
+    haystack = _quote_haystack(quote)
+    tokens = _query_terms(query) or [token for token in re.findall(r"[a-z0-9]+", query.lower()) if token]
     return all(token in haystack for token in tokens) or any(token in haystack for token in tokens[:3])
 
 
 def _rank_key(quote: PredictionMarketQuote, query: str) -> tuple[float, int, float, int]:
-    text = f"{quote.question} {quote.outcome_name} {' '.join(quote.symbols)} {' '.join(quote.topics)}".lower()
-    tokens = [token for token in query.lower().split() if token]
+    text = _quote_haystack(quote)
+    tokens = _query_terms(query)
     relevance = sum(1.0 for token in tokens if token in text)
     venue_priority = 2 if quote.venue == "hip4" else 1
     liquidity = float(quote.liquidity_usd or 0.0)
     return (relevance, venue_priority, liquidity, quote.as_of_ms)
+
+
+def quote_matches_required_terms(quote: PredictionMarketQuote, query: str) -> bool:
+    tokens = _query_terms(query)
+    if not tokens:
+        return True
+    haystack = _quote_haystack(quote)
+    return all(token in haystack for token in tokens)
+
+
+def required_query_terms(query: str) -> list[str]:
+    return _query_terms(query)
+
+
+def _quote_haystack(quote: PredictionMarketQuote) -> str:
+    return " ".join([quote.question, quote.outcome_name, quote.venue, quote.market_id, " ".join(quote.symbols), " ".join(quote.topics)]).lower()
+
+
+def _query_terms(query: str) -> list[str]:
+    return [token for token in re.findall(r"[a-z0-9]+", query.lower().replace("$", " ")) if token and token not in _QUERY_STOPWORDS]
 
 
 def _optional_float(value: Any) -> float | None:

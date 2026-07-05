@@ -301,7 +301,7 @@ class Settings(BaseSettings):
     prediction_market_paper_max_stake_usd: float = 1_000.0
     prediction_market_paper_draft_ttl_seconds: int = 300
     prediction_market_paper_settlement_sweep_seconds: int = 300
-    prediction_market_search_max_staleness_seconds: int = 300
+    prediction_market_search_max_staleness_seconds: int = 604_800
 
     autonomy_enabled: bool = False
     autonomy_mode: Literal["paper_signoff"] = "paper_signoff"

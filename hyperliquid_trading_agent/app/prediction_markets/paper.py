@@ -6,7 +6,11 @@ from typing import Any
 from uuid import uuid4
 
 from hyperliquid_trading_agent.app.config import Settings
-from hyperliquid_trading_agent.app.prediction_markets.catalog import PredictionMarketCatalog
+from hyperliquid_trading_agent.app.prediction_markets.catalog import (
+    PredictionMarketCatalog,
+    quote_matches_required_terms,
+    required_query_terms,
+)
 from hyperliquid_trading_agent.app.prediction_markets.schemas import (
     PredictionMarketBetDraft,
     PredictionMarketBetDraftRequest,
@@ -63,8 +67,17 @@ class PredictionMarketPaperService:
 
     async def draft_bet(self, request: PredictionMarketBetDraftRequest) -> dict[str, Any]:
         self._require_enabled()
-        account = await self.account(discord_guild_id=request.discord_guild_id, discord_user_id=request.discord_user_id)
-        quote = await self._resolve_quote(request)
+        try:
+            quote = await self._resolve_quote(request)
+        except ValueError as exc:
+            suggestions = await self.catalog.search(request.query, limit=5) if request.query else []
+            return {
+                "error": "no_match",
+                "message": str(exc),
+                "query": request.query,
+                "market_ref": request.market_ref,
+                "suggestions": [quote.model_dump(mode="json") for quote in suggestions],
+            }
         stake = float(request.stake_usd or self.settings.prediction_market_paper_default_stake_usd)
         if stake <= 0:
             raise ValueError("stake must be positive")
@@ -73,6 +86,7 @@ class PredictionMarketPaperService:
         price = _side_price(quote, request.side)
         if price <= 0 or price > 1:
             raise ValueError("quote price is not executable for paper betting")
+        account = await self.account(discord_guild_id=request.discord_guild_id, discord_user_id=request.discord_user_id)
         shares = stake / price
         now = _now_ms()
         draft = PredictionMarketBetDraft(
@@ -345,9 +359,14 @@ class PredictionMarketPaperService:
             if quote is not None:
                 return quote
             raise ValueError("prediction-market quote not found")
-        matches = await self.catalog.search(request.query, limit=3)
+        if not request.query.strip() or not required_query_terms(request.query):
+            raise ValueError("missing prediction-market query")
+        matches = await self.catalog.search(request.query, limit=8)
         if not matches:
             raise ValueError("no prediction market matched the request")
+        matches = [quote for quote in matches if quote_matches_required_terms(quote, request.query)]
+        if not matches:
+            raise ValueError("no prediction market matched all request terms")
         if len(matches) > 1 and _rank_collision(matches):
             raise ValueError("multiple prediction markets matched; use `pm search` and include the market id")
         return matches[0]

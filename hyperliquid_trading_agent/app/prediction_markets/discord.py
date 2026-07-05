@@ -150,6 +150,22 @@ def format_prediction_market_leaderboard(rows: list[dict[str, Any]]) -> str:
 def format_prediction_market_result(command: PredictionMarketDiscordCommand, result: dict[str, Any]) -> str:
     payload = result.get("result") if isinstance(result.get("result"), dict) else result
     if command.action == "draft":
+        if payload.get("error") == "no_match":
+            lines = [
+                f"No prediction market matched `{payload.get('query') or command.query}` closely enough. No live trade was placed.",
+            ]
+            suggestions = payload.get("suggestions") if isinstance(payload.get("suggestions"), list) else []
+            if suggestions:
+                lines.append("Related markets:")
+                for idx, quote in enumerate(suggestions[:5], start=1):
+                    lines.append(
+                        f"{idx}. `pm:{quote.get('quote_id')}` `{quote.get('venue')}` {str(quote.get('question') or '')[:120]} "
+                        f"| {quote.get('outcome_name') or 'YES'} px `{float(quote.get('price') or 0):.3f}`"
+                    )
+                lines.append("Use `pm search <topic>` or include one of those `pm:` ids.")
+            else:
+                lines.append("Try `pm search <topic>` first, then bet with the `pm:` id.")
+            return "\n".join(lines)
         draft = payload.get("draft") or {}
         if not draft:
             return "Prediction-market paper draft did not return a draft. No live trade was placed."
