@@ -57,16 +57,16 @@ class PredictionMarketCatalog:
         self.repository = repository
         self.hyperliquid = hyperliquid
 
-    async def search(self, query: str = "", *, venue: str | None = None, limit: int = 10) -> list[PredictionMarketQuote]:
+    async def search(self, query: str = "", *, venue: str | None = None, limit: int = 10, strict: bool = True) -> list[PredictionMarketQuote]:
         items = await self._signals(limit=max(100, limit * 8), venue=venue)
         quotes = [_quote_from_signal(item, settings=self.settings) for item in items]
         quotes = [quote for quote in quotes if quote is not None and _fresh_enough(quote, self.settings)]
         if venue is None or venue == "hip4":
-            quotes.extend(await self._live_hip4_quotes(query=query, limit=max(limit * 2, 8)))
+            quotes.extend(await self._live_hip4_quotes(query=query, limit=max(limit * 2, 8), strict=strict))
         quotes = _dedupe_latest(quotes)
         query = query.strip()
         if query:
-            quotes = [quote for quote in quotes if _matches_query(quote, query)]
+            quotes = [quote for quote in quotes if _matches_query(quote, query, strict=strict)]
         ranked = sorted(quotes, key=lambda quote: _rank_key(quote, query), reverse=True)
         return ranked[: max(1, limit)]
 
@@ -90,7 +90,7 @@ class PredictionMarketCatalog:
             return []
         return await list_signals(limit=limit, venue=venue)
 
-    async def _live_hip4_quotes(self, *, query: str, limit: int) -> list[PredictionMarketQuote]:
+    async def _live_hip4_quotes(self, *, query: str, limit: int, strict: bool) -> list[PredictionMarketQuote]:
         if self.hyperliquid is None:
             return []
         tokens = _query_terms(query)
@@ -102,7 +102,7 @@ class PredictionMarketCatalog:
             log.warning("prediction_market_hip4_outcome_meta_failed", error=type(exc).__name__)
             return []
         outcomes = parse_outcomes(payload if isinstance(payload, dict) else {})
-        matches = [item for item in outcomes if not item.settled and _outcome_matches_terms(item, tokens)]
+        matches = [item for item in outcomes if not item.settled and _outcome_matches_terms(item, tokens, strict=strict)]
         quotes: list[PredictionMarketQuote] = []
         for outcome in matches[: max(1, limit)]:
             quotes.extend(await self._quotes_for_hip4_outcome(outcome))
@@ -264,9 +264,11 @@ def _dedupe_latest(quotes: list[PredictionMarketQuote]) -> list[PredictionMarket
     return list(by_key.values())
 
 
-def _matches_query(quote: PredictionMarketQuote, query: str) -> bool:
+def _matches_query(quote: PredictionMarketQuote, query: str, *, strict: bool = True) -> bool:
     haystack = _quote_haystack(quote)
     tokens = _query_terms(query) or [token for token in re.findall(r"[a-z0-9]+", query.lower()) if token]
+    if strict:
+        return all(token in haystack for token in tokens)
     return all(token in haystack for token in tokens) or any(token in haystack for token in tokens[:3])
 
 
@@ -342,8 +344,10 @@ def _parse_hip4_ref(ref: str) -> tuple[int, int | None] | None:
     return None
 
 
-def _outcome_matches_terms(outcome: Any, tokens: list[str]) -> bool:
+def _outcome_matches_terms(outcome: Any, tokens: list[str], *, strict: bool = True) -> bool:
     text = _outcome_haystack(outcome)
+    if strict:
+        return all(token in text for token in tokens)
     return all(token in text for token in tokens) or any(token in text for token in tokens[:3])
 
 

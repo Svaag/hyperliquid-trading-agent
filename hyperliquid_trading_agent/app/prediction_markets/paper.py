@@ -70,7 +70,7 @@ class PredictionMarketPaperService:
         try:
             quote = await self._resolve_quote(request)
         except ValueError as exc:
-            suggestions = await self.catalog.search(request.query, limit=5) if request.query else []
+            suggestions = await self.catalog.search(request.query, limit=5, strict=False) if request.query else []
             return {
                 "error": "no_match",
                 "message": str(exc),

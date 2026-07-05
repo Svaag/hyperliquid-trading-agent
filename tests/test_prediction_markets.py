@@ -10,7 +10,9 @@ from hyperliquid_trading_agent.app.discord_bot import DiscordContext, DiscordTra
 from hyperliquid_trading_agent.app.prediction_markets.catalog import PredictionMarketCatalog
 from hyperliquid_trading_agent.app.prediction_markets.discord import (
     format_prediction_market_result,
+    format_prediction_market_search,
     parse_prediction_market_discord_command,
+    parse_prediction_market_reaction,
 )
 from hyperliquid_trading_agent.app.prediction_markets.paper import PredictionMarketPaperService
 from hyperliquid_trading_agent.app.prediction_markets.schemas import (
@@ -146,7 +148,35 @@ class FakePredictionRepo:
     async def enqueue_worker_command(self, *, target_role, command_type, payload=None, requested_by=None, idempotency_key=None):
         command_id = f"cmd_{len(self.commands) + 1}"
         self.enqueued.append((target_role, command_type, payload or {}))
-        result = {"draft": {"draft_id": "pmd_1", "venue": "hip4", "side": "yes", "stake_usd": 100, "price": 0.4}}
+        if command_type == "prediction_market_bet_confirm":
+            result = {
+                "position": {
+                    "position_id": "pmp_1",
+                    "venue": "hip4",
+                    "market_id": "739",
+                    "outcome_id": "739:0",
+                    "outcome_name": "Brazil",
+                    "question": "World Cup Round of 16: Brazil vs Norway",
+                    "side": "yes",
+                    "cost_usd": 100,
+                    "avg_entry_price": 0.4,
+                    "shares": 250,
+                }
+            }
+        elif command_type == "prediction_market_bet_cancel":
+            result = {"draft": {"draft_id": (payload or {}).get("draft_id") or "pmd_1", "outcome_name": "Brazil", "question": "World Cup Round of 16: Brazil vs Norway"}}
+        else:
+            result = {
+                "draft": {
+                    "draft_id": "pmd_1",
+                    "venue": "hip4",
+                    "side": "yes",
+                    "stake_usd": 100,
+                    "price": 0.4,
+                    "outcome_name": "Brazil",
+                    "question": "World Cup Round of 16: Brazil vs Norway",
+                }
+            }
         self.commands[command_id] = {"command_id": command_id, "status": "completed", "result": {"result": result}}
         return self.commands[command_id]
 
@@ -221,6 +251,22 @@ def test_prediction_market_discord_parser_natural_bet_and_search():
     assert hip4_ref_bet.query == ""
 
 
+def test_prediction_market_discord_parser_short_confirm_cancel_and_bets_alias():
+    referenced = type("Message", (), {"content": "Drafted: **Brazil** on World Cup Round of 16: Brazil vs Norway\n| draft `pmd_8e981c4a80024f37`"})()
+
+    confirm = parse_prediction_market_discord_command("yes", referenced_message=referenced)
+    ok = parse_prediction_market_discord_command("ok", referenced_message=referenced)
+    cancel = parse_prediction_market_discord_command("no", referenced_message=referenced)
+    bets = parse_prediction_market_discord_command("bets")
+    reaction = parse_prediction_market_reaction("✅", referenced_message=referenced)
+
+    assert confirm is not None and confirm.action == "confirm" and confirm.draft_id == "pmd_8e981c4a80024f37"
+    assert ok is not None and ok.action == "confirm" and ok.draft_id == "pmd_8e981c4a80024f37"
+    assert cancel is not None and cancel.action == "cancel" and cancel.draft_id == "pmd_8e981c4a80024f37"
+    assert bets is not None and bets.action == "portfolio"
+    assert reaction is not None and reaction.action == "confirm" and reaction.draft_id == "pmd_8e981c4a80024f37"
+
+
 @pytest.mark.asyncio
 async def test_prediction_market_catalog_ranks_hip4_before_other_venues():
     repo = FakePredictionRepo(
@@ -234,6 +280,29 @@ async def test_prediction_market_catalog_ranks_hip4_before_other_venues():
     quotes = await catalog.search("BTC 100k", limit=2)
 
     assert [quote.venue for quote in quotes] == ["hip4", "polymarket"]
+
+
+@pytest.mark.asyncio
+async def test_prediction_market_catalog_strict_search_filters_outrights_from_match_query():
+    repo = FakePredictionRepo(
+        [
+            _signal(signal_id="usa_match", market_id="m_usa", question="World Cup Round of 16: USA vs Belgium", outcome_id="usa", outcome_name="USA", liquidity_usd=100_000),
+            _signal(signal_id="belgium_match", market_id="m_bel", question="World Cup Round of 16: USA vs Belgium", outcome_id="belgium", outcome_name="Belgium", liquidity_usd=90_000),
+            _signal(signal_id="usa_outright", market_id="usa_wc", question="Will USA win the 2026 FIFA World Cup?", outcome_id="yes", outcome_name="Yes", liquidity_usd=2_000_000),
+            _signal(signal_id="belgium_outright", market_id="bel_wc", question="Will Belgium win the 2026 FIFA World Cup?", outcome_id="yes", outcome_name="Yes", liquidity_usd=1_000_000),
+        ]
+    )
+    catalog = PredictionMarketCatalog(settings=Settings(environment="test", _env_file=None), repository=repo)
+
+    quotes = await catalog.search("USA Belgium", limit=10)
+    formatted = format_prediction_market_search(quotes)
+
+    assert [quote.outcome_name for quote in quotes] == ["USA", "Belgium"]
+    assert "Will USA win the 2026 FIFA World Cup?" not in formatted
+    assert "**1. World Cup Round of 16: USA vs Belgium**" in formatted
+    assert "- **USA** @ `" in formatted
+    assert "- **Belgium** @ `" in formatted
+    assert "id `pm:" in formatted
 
 
 @pytest.mark.asyncio
@@ -345,9 +414,31 @@ def test_discord_prediction_market_draft_queues_for_authorized_non_admin_user():
 
         response = await bot._handle_prediction_market_command(command, context=DiscordContext(guild_id=42, channel_id=7, author_id=11), user_id="11", role_ids=set())
 
-        assert "Drafted prediction-market paper bet" in response
+        assert "Drafted:" in response
+        assert "World Cup Round of 16: Brazil vs Norway" in response
+        assert "No live trade was placed" not in response
         assert repo.enqueued[0][1] == "prediction_market_bet_draft"
         assert repo.enqueued[0][2]["discord_guild_id"] == "42"
         assert repo.enqueued[0][2]["discord_user_id"] == "11"
+
+    anyio.run(run)
+
+
+def test_discord_prediction_market_short_reply_confirms_referenced_draft():
+    async def run():
+        repo = FakePredictionRepo()
+        runner = type("Runner", (), {"repository": repo})()
+        bot = DiscordTradingBot(settings=Settings(environment="test", prediction_market_paper_enabled=True, _env_file=None), runner=runner)
+        referenced = type("Message", (), {"content": "Drafted: **Brazil** on World Cup Round of 16: Brazil vs Norway\n| draft `pmd_8e981c4a80024f37`"})()
+        command = parse_prediction_market_discord_command("ok", referenced_message=referenced)
+        assert command is not None
+
+        response = await bot._handle_prediction_market_command(command, context=DiscordContext(guild_id=42, channel_id=7, author_id=11), user_id="11", role_ids=set())
+
+        assert response.startswith("Confirmed: **Brazil** on World Cup Round of 16: Brazil vs Norway")
+        assert "position `pmp_1`" in response
+        assert "No live trade was placed" not in response
+        assert repo.enqueued[0][1] == "prediction_market_bet_confirm"
+        assert repo.enqueued[0][2]["draft_id"] == "pmd_8e981c4a80024f37"
 
     anyio.run(run)

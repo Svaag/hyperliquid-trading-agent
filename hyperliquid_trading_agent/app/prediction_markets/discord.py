@@ -12,11 +12,16 @@ from hyperliquid_trading_agent.app.prediction_markets.schemas import (
 
 _NUMBER = r"(\d+(?:\.\d+)?)"
 _PM_REF_RE = re.compile(r"\bpm:?(pm_[a-f0-9]{4,}|[a-z0-9_:-]{6,})\b", re.IGNORECASE)
+_DRAFT_ID_RE = re.compile(r"\b(pmd_[a-z0-9_:-]+)\b", re.IGNORECASE)
 _HIP4_REF_RE = re.compile(r"(?:\bhip4:(?:#)?\d+(?::[01])?\b|#\d+[01]\b)", re.IGNORECASE)
 _YES_WORD_RE = re.compile(r"\byes\b", re.IGNORECASE)
 _NO_WORD_RE = re.compile(r"\bno\b", re.IGNORECASE)
 _NATURAL_YES_RE = re.compile(r"\b(?:win|wins|winning|beat|beats|beating|defeat|defeats|defeating)\b", re.IGNORECASE)
 _BETTING_WORD_RE = re.compile(r"\b(?:bet|buy|paper|pm|prediction|predict|market)\b", re.IGNORECASE)
+_CONFIRM_REPLY_WORDS = {"confirm", "confirmed", "ok", "okay", "yes", "y", "yep", "yeah", "sure", "approve", "approved", "do it", "go", "go ahead", "looks good", "✅", "☑️"}
+_CANCEL_REPLY_WORDS = {"cancel", "cancel it", "no", "n", "nope", "nah", "reject", "rejected", "deny", "denied", "stop", "❌", "✖️", "✕", "🚫", "👎"}
+_CONFIRM_REACTION_EMOJIS = {"✅", "☑️"}
+_CANCEL_REACTION_EMOJIS = {"❌", "✖️", "✕", "🚫", "👎"}
 
 
 class PredictionMarketDiscordCommand(BaseModel):
@@ -37,8 +42,14 @@ def parse_prediction_market_discord_command(prompt: str, referenced_message: Any
     if not lowered:
         return None
     ref = _infer_market_ref(referenced_message)
+    draft_id = _infer_draft_id(referenced_message)
 
-    if lowered in {"pm portfolio", "prediction portfolio", "prediction-market portfolio", "my prediction portfolio", "my pm portfolio"}:
+    if draft_id:
+        action = _reply_confirmation_action(lowered)
+        if action is not None:
+            return PredictionMarketDiscordCommand(action=action, draft_id=draft_id)
+
+    if lowered in {"bets", "my bets", "pm bets", "prediction bets", "prediction-market bets", "pm portfolio", "prediction portfolio", "prediction-market portfolio", "my prediction portfolio", "my pm portfolio"}:
         return PredictionMarketDiscordCommand(action="portfolio")
     if lowered in {"pm positions", "prediction positions", "prediction-market positions", "my prediction positions"}:
         return PredictionMarketDiscordCommand(action="positions")
@@ -57,7 +68,13 @@ def parse_prediction_market_discord_command(prompt: str, referenced_message: Any
     match = re.match(r"^confirm\s+pm\s+([a-zA-Z0-9_:-]+)$", normalized, flags=re.IGNORECASE)
     if match:
         return PredictionMarketDiscordCommand(action="confirm", draft_id=match.group(1))
+    match = re.match(r"^(?:confirm|ok|okay|yes|y|approve|approved)\s+(?:pm\s+)?(pmd_[a-zA-Z0-9_:-]+)$", normalized, flags=re.IGNORECASE)
+    if match:
+        return PredictionMarketDiscordCommand(action="confirm", draft_id=match.group(1))
     match = re.match(r"^cancel\s+pm\s+([a-zA-Z0-9_:-]+)$", normalized, flags=re.IGNORECASE)
+    if match:
+        return PredictionMarketDiscordCommand(action="cancel", draft_id=match.group(1))
+    match = re.match(r"^(?:cancel|no|n|nope|reject|deny)\s+(?:pm\s+)?(pmd_[a-zA-Z0-9_:-]+)$", normalized, flags=re.IGNORECASE)
     if match:
         return PredictionMarketDiscordCommand(action="cancel", draft_id=match.group(1))
     match = re.match(r"^pm\s+close\s+([a-zA-Z0-9_:-]+)$", normalized, flags=re.IGNORECASE)
@@ -97,12 +114,18 @@ def format_prediction_market_search(quotes: list[PredictionMarketQuote]) -> str:
     if not quotes:
         return "No fresh prediction markets matched."
     lines = ["**Prediction markets**"]
-    for idx, quote in enumerate(quotes[:10], start=1):
-        lines.append(
-            f"{idx}. `pm:{quote.quote_id}` `{quote.venue}` {quote.question[:140]} "
-            f"| {quote.outcome_name or 'YES'} px `{quote.price:.3f}` liq `${float(quote.liquidity_usd or 0):,.0f}`"
-        )
-    return "\n".join(lines)
+    for idx, group in enumerate(_quote_groups(quotes[:10]), start=1):
+        head = group[0]
+        header_parts = [f"`{_venue_label(head.venue)}`"]
+        market_ids = {quote.market_id for quote in group if quote.market_id}
+        if len(market_ids) == 1:
+            header_parts.append(f"market `{next(iter(market_ids))}`")
+        outcome_lines = [
+            f"- **{quote.outcome_name or 'YES'}** @ `{quote.price:.3f}` | liq `{_usd(quote.liquidity_usd)}` | id `pm:{quote.quote_id}`"
+            for quote in group
+        ]
+        lines.append(f"**{idx}. {head.question[:150]}**\n{' | '.join(header_parts)}\n" + "\n".join(outcome_lines))
+    return "\n\n".join(lines)
 
 
 def format_prediction_market_portfolio(portfolio: dict[str, Any]) -> str:
@@ -153,7 +176,7 @@ def format_prediction_market_result(command: PredictionMarketDiscordCommand, res
     if command.action == "draft":
         if payload.get("error") == "no_match":
             lines = [
-                f"No prediction market matched `{payload.get('query') or command.query}` closely enough. No live trade was placed.",
+                f"No prediction market matched `{payload.get('query') or command.query}` closely enough.",
             ]
             suggestions = payload.get("suggestions") if isinstance(payload.get("suggestions"), list) else []
             if suggestions:
@@ -169,27 +192,79 @@ def format_prediction_market_result(command: PredictionMarketDiscordCommand, res
             return "\n".join(lines)
         draft = payload.get("draft") or {}
         if not draft:
-            return "Prediction-market paper draft did not return a draft. No live trade was placed."
+            return "Prediction-market paper draft did not return a draft."
+        subject = _bet_subject(draft)
+        question = _question_text(draft)
         return (
-            f"Drafted prediction-market paper bet `{draft.get('draft_id')}`: `{draft.get('venue')}` {draft.get('side')} "
-            f"`${float(draft.get('stake_usd') or 0):,.2f}` at `{float(draft.get('price') or 0):.3f}`.\n"
-            f"Confirm with `confirm pm {draft.get('draft_id')}`. No live trade was placed."
+            f"Drafted: **{subject}** on {question}\n"
+            f"Stake `${float(draft.get('stake_usd') or 0):,.2f}` at `{float(draft.get('price') or 0):.3f}` "
+            f"| draft `{draft.get('draft_id')}` | `{draft.get('venue')}`\n"
+            "Reply `confirm`, `ok`, `yes`, or react with ✅ to confirm. Reply `no` to cancel."
         )
     if command.action == "confirm":
         position = payload.get("position") or {}
+        subject = _bet_subject(position)
+        question = _question_text(position)
         return (
-            f"Confirmed prediction-market paper bet `{str(position.get('position_id') or '')[:10]}`: "
-            f"`{position.get('venue')}` {position.get('side')} shares `{float(position.get('shares') or 0):.4g}`. No live trade was placed."
+            f"Confirmed: **{subject}** on {question}\n"
+            f"Stake `${float(position.get('cost_usd') or 0):,.2f}` at `{float(position.get('avg_entry_price') or 0):.3f}` "
+            f"| shares `{float(position.get('shares') or 0):.4g}` | position `{str(position.get('position_id') or '')[:10]}`"
         )
     if command.action == "cancel":
         draft = payload.get("draft") or {}
-        return f"Cancelled prediction-market paper draft `{draft.get('draft_id') or command.draft_id}`. No live trade was placed."
+        detail = f": **{_bet_subject(draft)}** on {_question_text(draft)}" if draft else ""
+        return f"Cancelled prediction-market paper draft `{draft.get('draft_id') or command.draft_id}`{detail}."
     if command.action == "close":
         position = payload.get("position") or {}
         return f"Closed prediction-market paper position `{str(position.get('position_id') or command.position_ref)[:10]}` PnL `${float(position.get('realized_pnl_usd') or 0):,.2f}`."
     if command.action in {"settle", "settlement_sweep"}:
         return f"Applied prediction-market settlement to `{int(payload.get('count') or 0)}` open positions."
-    return "Prediction-market paper command completed. No live trade was placed."
+    return "Prediction-market paper command completed."
+
+
+def parse_prediction_market_reaction(emoji: str, referenced_message: Any = None) -> PredictionMarketDiscordCommand | None:
+    draft_id = _infer_draft_id(referenced_message)
+    if not draft_id:
+        return None
+    normalized = str(emoji).strip()
+    if normalized in _CONFIRM_REACTION_EMOJIS:
+        return PredictionMarketDiscordCommand(action="confirm", draft_id=draft_id)
+    if normalized in _CANCEL_REACTION_EMOJIS:
+        return PredictionMarketDiscordCommand(action="cancel", draft_id=draft_id)
+    return None
+
+
+def _bet_subject(item: dict[str, Any]) -> str:
+    outcome = str(item.get("outcome_name") or "YES").strip()
+    side = str(item.get("side") or "yes").lower()
+    if side == "no":
+        return f"NO on {outcome}" if outcome else "NO"
+    return outcome or "YES"
+
+
+def _question_text(item: dict[str, Any]) -> str:
+    question = str(item.get("question") or "").strip()
+    return question[:160] if question else "the selected market"
+
+
+def _venue_label(venue: str) -> str:
+    return "HIP-4" if venue.lower() == "hip4" else venue
+
+
+def _usd(value: Any) -> str:
+    return f"${float(value or 0):,.0f}"
+
+
+def _quote_groups(quotes: list[PredictionMarketQuote]) -> list[list[PredictionMarketQuote]]:
+    groups: list[list[PredictionMarketQuote]] = []
+    indexes: dict[tuple[str, str], int] = {}
+    for quote in quotes:
+        key = (quote.venue.lower(), quote.question.strip().lower())
+        if key not in indexes:
+            indexes[key] = len(groups)
+            groups.append([])
+        groups[indexes[key]].append(quote)
+    return groups
 
 
 def _looks_like_prediction_market_bet(lowered: str, ref: str | None) -> bool:
@@ -231,6 +306,22 @@ def _infer_market_ref(message: Any) -> str | None:
     if message is None:
         return None
     return _market_ref_from_text(str(getattr(message, "content", "") or ""))
+
+
+def _infer_draft_id(message: Any) -> str | None:
+    if message is None:
+        return None
+    content = str(getattr(message, "content", "") or "")
+    match = _DRAFT_ID_RE.search(content)
+    return match.group(1) if match else None
+
+
+def _reply_confirmation_action(lowered: str) -> Literal["confirm", "cancel"] | None:
+    if lowered in _CONFIRM_REPLY_WORDS:
+        return "confirm"
+    if lowered in _CANCEL_REPLY_WORDS:
+        return "cancel"
+    return None
 
 
 def _draft_query(prompt: str, *, side: str, market_ref: str | None) -> str:

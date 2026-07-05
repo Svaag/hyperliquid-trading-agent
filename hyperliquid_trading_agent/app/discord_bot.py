@@ -30,6 +30,7 @@ from hyperliquid_trading_agent.app.prediction_markets.discord import (
     format_prediction_market_result,
     format_prediction_market_search,
     parse_prediction_market_discord_command,
+    parse_prediction_market_reaction,
 )
 from hyperliquid_trading_agent.app.prediction_markets.paper import PredictionMarketPaperService
 from hyperliquid_trading_agent.app.tracking.commands import parse_tracking_command
@@ -147,7 +148,12 @@ class DiscordTradingBot:
             prediction_market_command = parse_prediction_market_discord_command(prompt, referenced_message=referenced_message) if prompt else None
             paper_command = parse_paper_discord_command(prompt) if prompt else None
             autonomy_alert_channel = bool(self.settings.autonomy_alert_channel_id and str(channel_id) == str(self.settings.autonomy_alert_channel_id))
-            if not mentioned and not thread_continuation and not (autonomy_command is not None and autonomy_alert_channel):
+            prediction_market_context_reply = (
+                prediction_market_command is not None
+                and prediction_market_command.action in {"confirm", "cancel"}
+                and _is_message_from_bot(referenced_message, self.client.user)
+            )
+            if not mentioned and not thread_continuation and not prediction_market_context_reply and not (autonomy_command is not None and autonomy_alert_channel):
                 return
             if not self.is_authorized(context, role_ids=role_ids) and not (autonomy_command is not None and autonomy_alert_channel):
                 DISCORD_MESSAGES.labels(result="unauthorized").inc()
@@ -238,6 +244,40 @@ class DiscordTradingBot:
                 DISCORD_MESSAGES.labels(result="error").inc()
                 log.exception("discord_message_failed", error=type(exc).__name__)
                 await message.reply("I hit an internal error while answering. No trade was placed.", mention_author=False)
+
+        @self.client.event
+        async def on_reaction_add(reaction, user):
+            if getattr(user, "bot", False) or self.client.user is None:
+                return
+            message = getattr(reaction, "message", None)
+            if not _is_message_from_bot(message, self.client.user):
+                return
+            command = parse_prediction_market_reaction(str(getattr(reaction, "emoji", "") or ""), referenced_message=message)
+            if command is None:
+                return
+            channel_id = _authorized_channel_id(message)
+            role_ids = {int(getattr(role, "id", 0)) for role in getattr(user, "roles", [])}
+            context = DiscordContext(
+                guild_id=getattr(getattr(message, "guild", None), "id", None),
+                channel_id=channel_id,
+                author_id=getattr(user, "id", None),
+            )
+            if not self.is_authorized(context, role_ids=role_ids):
+                DISCORD_MESSAGES.labels(result="unauthorized").inc()
+                return
+            try:
+                content = await self._handle_prediction_market_command(
+                    command,
+                    context=context,
+                    user_id=_maybe_str(getattr(user, "id", None)),
+                    role_ids=role_ids,
+                )
+                for chunk in _chunk(content, self.settings.discord_max_response_chars):
+                    await message.reply(chunk, mention_author=False)
+                DISCORD_MESSAGES.labels(result="prediction_market_reaction").inc()
+            except Exception as exc:  # pragma: no cover - Discord runtime behavior
+                DISCORD_MESSAGES.labels(result="error").inc()
+                log.exception("discord_reaction_failed", error=type(exc).__name__)
 
     async def _handle_paper_command(self, command: PaperDiscordCommand, *, user_id: str | None, role_ids: set[int]) -> str:
         if command.action in {"portfolio", "positions", "orders"}:
@@ -455,7 +495,7 @@ class DiscordTradingBot:
     ) -> str:
         repository = self._repository()
         if repository is None:
-            return "Prediction-market storage is unavailable. No live trade was placed."
+            return "Prediction-market storage is unavailable."
         service = PredictionMarketPaperService(settings=self.settings, repository=repository, hyperliquid=self.hyperliquid)
         guild_id = _maybe_str(context.guild_id) or "dm"
         discord_user_id = user_id or "unknown"
@@ -471,9 +511,9 @@ class DiscordTradingBot:
             return format_prediction_market_leaderboard([row.model_dump(mode="json") for row in await service.leaderboard(discord_guild_id=guild_id, limit=20)])
 
         if not self.settings.prediction_market_paper_enabled:
-            return "Prediction-market paper trading is disabled for this runtime. Set PREDICTION_MARKET_PAPER_ENABLED=true to use Discord prediction-market paper commands. No live trade was placed."
+            return "Prediction-market paper trading is disabled for this runtime. Set PREDICTION_MARKET_PAPER_ENABLED=true to use Discord prediction-market paper commands."
         if command.error:
-            return f"{command.error} No live trade was placed."
+            return command.error
         if command.action in {"settle", "settlement_sweep"} and not self._is_admin(user_id, role_ids):
             return "Not authorized for prediction-market settlement commands."
 
@@ -505,7 +545,7 @@ class DiscordTradingBot:
             command_type = "prediction_market_settlement_sweep"
             payload = {"actor": discord_user_id}
         else:
-            return "Unknown prediction-market paper command. No live trade was placed."
+            return "Unknown prediction-market paper command."
 
         queued = await repository.enqueue_worker_command(
             target_role=ServiceRole.TRADER.value,
@@ -519,7 +559,7 @@ class DiscordTradingBot:
         repository = self._repository()
         command_id = str(queued.get("command_id") or "")
         if repository is None or not command_id:
-            return "Prediction-market paper command was accepted, but status polling is unavailable. No live trade was placed."
+            return "Prediction-market paper command was accepted, but status polling is unavailable."
         timeout_seconds = min(30.0, max(5.0, float(getattr(self.settings, "discord_command_timeout_seconds", 30.0))))
         deadline = asyncio.get_running_loop().time() + timeout_seconds
         current = queued
@@ -530,9 +570,9 @@ class DiscordTradingBot:
                 result = current.get("result") if isinstance(current.get("result"), dict) else {}
                 return format_prediction_market_result(command, result)
             if status in {"failed", "cancelled"}:
-                return f"Prediction-market paper command `{command_id}` {status}: {current.get('last_error') or 'unknown error'}. No live trade was placed."
+                return f"Prediction-market paper command `{command_id}` {status}: {current.get('last_error') or 'unknown error'}."
             await asyncio.sleep(1.0)
-        return f"Accepted prediction-market paper command `{command_id}`; it is still pending. Check `/commands/{command_id}`. No live trade was placed."
+        return f"Accepted prediction-market paper command `{command_id}`; it is still pending. Check `/commands/{command_id}`."
 
 
 def _format_paper_snapshot_dict(snapshot: dict[str, Any]) -> str:
@@ -819,6 +859,14 @@ def _is_bot_thread(channel, bot_user) -> bool:
     if bot_id is None:
         return False
     return getattr(channel, "owner_id", None) == bot_id
+
+
+def _is_message_from_bot(message: Any, bot_user: Any) -> bool:
+    if message is None or bot_user is None:
+        return False
+    bot_id = getattr(bot_user, "id", None)
+    author_id = getattr(getattr(message, "author", None), "id", None)
+    return bot_id is not None and author_id is not None and author_id == bot_id
 
 
 def _thread_name(prompt: str) -> str:
