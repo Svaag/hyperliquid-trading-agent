@@ -12,6 +12,10 @@ from hyperliquid_trading_agent.app.prediction_markets.schemas import (
 
 _NUMBER = r"(\d+(?:\.\d+)?)"
 _PM_REF_RE = re.compile(r"\bpm:?(pm_[a-f0-9]{4,}|[a-z0-9_:-]{6,})\b", re.IGNORECASE)
+_YES_WORD_RE = re.compile(r"\byes\b", re.IGNORECASE)
+_NO_WORD_RE = re.compile(r"\bno\b", re.IGNORECASE)
+_NATURAL_YES_RE = re.compile(r"\b(?:win|wins|winning|beat|beats|beating|defeat|defeats|defeating)\b", re.IGNORECASE)
+_BETTING_WORD_RE = re.compile(r"\b(?:bet|buy|paper|pm|prediction|predict|market)\b", re.IGNORECASE)
 
 
 class PredictionMarketDiscordCommand(BaseModel):
@@ -174,14 +178,16 @@ def format_prediction_market_result(command: PredictionMarketDiscordCommand, res
 def _looks_like_prediction_market_bet(lowered: str, ref: str | None) -> bool:
     if ref:
         return any(term in lowered for term in ("bet", "buy", "paper", "pm", "prediction"))
-    return any(term in lowered for term in ("prediction", "predict", "market", "bet", "pm portfolio", "paper portfolio")) and any(term in lowered for term in (" yes", " no", " yes ", " no "))
+    return bool(_BETTING_WORD_RE.search(lowered)) and bool(_YES_WORD_RE.search(lowered) or _NO_WORD_RE.search(lowered) or _NATURAL_YES_RE.search(lowered))
 
 
 def _side(lowered: str) -> Literal["yes", "no"] | None:
-    if re.search(r"\byes\b", lowered):
+    if _YES_WORD_RE.search(lowered):
         return "yes"
-    if re.search(r"\bno\b", lowered):
+    if _NO_WORD_RE.search(lowered):
         return "no"
+    if _NATURAL_YES_RE.search(lowered):
+        return "yes"
     return None
 
 

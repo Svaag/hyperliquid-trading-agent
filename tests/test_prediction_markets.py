@@ -154,12 +154,28 @@ class FakePredictionRepo:
 def test_prediction_market_discord_parser_natural_bet_and_search():
     search = parse_prediction_market_discord_command("pm search BTC 100k")
     bet = parse_prediction_market_discord_command("bet $50 yes on BTC above 100k prediction market")
+    sports_bet = parse_prediction_market_discord_command("bet win on Brazil against Norway")
+    pm_sports_bet = parse_prediction_market_discord_command("pm win brazil against norway")
+    yes_sports_bet = parse_prediction_market_discord_command("bet yes on Brazil against Norway")
 
     assert search is not None and search.action == "search" and search.query == "BTC 100k"
     assert bet is not None and bet.action == "draft"
     assert bet.side == "yes"
     assert bet.stake_usd == 50
     assert "BTC" in bet.query
+    assert sports_bet is not None and sports_bet.action == "draft"
+    assert sports_bet.side == "yes"
+    assert sports_bet.stake_usd is None
+    assert "Brazil" in sports_bet.query
+    assert "Norway" in sports_bet.query
+    assert pm_sports_bet is not None and pm_sports_bet.action == "draft"
+    assert pm_sports_bet.side == "yes"
+    assert "brazil" in pm_sports_bet.query
+    assert "norway" in pm_sports_bet.query
+    assert yes_sports_bet is not None and yes_sports_bet.action == "draft"
+    assert yes_sports_bet.side == "yes"
+    assert "Brazil" in yes_sports_bet.query
+    assert "Norway" in yes_sports_bet.query
 
 
 @pytest.mark.asyncio
