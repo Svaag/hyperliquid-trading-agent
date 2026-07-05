@@ -25,10 +25,10 @@ from hyperliquid_trading_agent.app.prediction_markets.schemas import (
 
 
 class PredictionMarketPaperService:
-    def __init__(self, *, settings: Settings, repository: Any):
+    def __init__(self, *, settings: Settings, repository: Any, hyperliquid: Any | None = None):
         self.settings = settings
         self.repository = repository
-        self.catalog = PredictionMarketCatalog(settings=settings, repository=repository)
+        self.catalog = PredictionMarketCatalog(settings=settings, repository=repository, hyperliquid=hyperliquid)
 
     async def search(self, query: str = "", *, venue: str | None = None, limit: int = 10) -> list[PredictionMarketQuote]:
         return await self.catalog.search(query, venue=venue, limit=limit)

@@ -154,12 +154,49 @@ class FakePredictionRepo:
         return self.commands.get(command_id)
 
 
+class FakeHyperliquidHip4:
+    def __init__(self):
+        self.now = int(time.time() * 1000)
+
+    async def outcome_meta(self):
+        return {
+            "outcomes": [
+                {
+                    "outcome": 739,
+                    "name": "World Cup Round of 16: Brazil vs Norway",
+                    "description": "metadata=category:sports|subCategory:football",
+                    "sideSpecs": [{"name": "Brazil"}, {"name": "Norway"}],
+                    "quoteToken": "USDC",
+                }
+            ],
+            "questions": [],
+        }
+
+    async def l2_book(self, coin):
+        if coin == "#7390":
+            return self._book(coin, bid="0.69", ask="0.70")
+        if coin == "#7391":
+            return self._book(coin, bid="0.30", ask="0.31")
+        raise KeyError(coin)
+
+    def _book(self, coin, *, bid, ask):
+        return {
+            "coin": coin,
+            "time": self.now,
+            "levels": [
+                [{"px": bid, "sz": "100", "n": 1}],
+                [{"px": ask, "sz": "100", "n": 1}],
+            ],
+        }
+
+
 def test_prediction_market_discord_parser_natural_bet_and_search():
     search = parse_prediction_market_discord_command("pm search BTC 100k")
     bet = parse_prediction_market_discord_command("bet $50 yes on BTC above 100k prediction market")
     sports_bet = parse_prediction_market_discord_command("bet win on Brazil against Norway")
     pm_sports_bet = parse_prediction_market_discord_command("pm win brazil against norway")
     yes_sports_bet = parse_prediction_market_discord_command("bet yes on Brazil against Norway")
+    hip4_ref_bet = parse_prediction_market_discord_command("bet yes on #7390")
 
     assert search is not None and search.action == "search" and search.query == "BTC 100k"
     assert bet is not None and bet.action == "draft"
@@ -179,6 +216,9 @@ def test_prediction_market_discord_parser_natural_bet_and_search():
     assert yes_sports_bet.side == "yes"
     assert "Brazil" in yes_sports_bet.query
     assert "Norway" in yes_sports_bet.query
+    assert hip4_ref_bet is not None and hip4_ref_bet.action == "draft"
+    assert hip4_ref_bet.market_ref == "#7390"
+    assert hip4_ref_bet.query == ""
 
 
 @pytest.mark.asyncio
@@ -194,6 +234,25 @@ async def test_prediction_market_catalog_ranks_hip4_before_other_venues():
     quotes = await catalog.search("BTC 100k", limit=2)
 
     assert [quote.venue for quote in quotes] == ["hip4", "polymarket"]
+
+
+@pytest.mark.asyncio
+async def test_prediction_market_catalog_searches_live_hip4_books_by_match_text():
+    repo = FakePredictionRepo([])
+    catalog = PredictionMarketCatalog(settings=Settings(environment="test", _env_file=None), repository=repo, hyperliquid=FakeHyperliquidHip4())
+
+    brazil_first = await catalog.search("Brazil against Norway", limit=2)
+    norway_first = await catalog.search("Norway against Brazil", limit=2)
+    by_ref = await catalog.resolve("#7391")
+
+    assert [quote.outcome_name for quote in brazil_first[:2]] == ["Brazil", "Norway"]
+    assert brazil_first[0].market_id == "739"
+    assert brazil_first[0].outcome_id == "739:0"
+    assert brazil_first[0].price == pytest.approx(0.70)
+    assert [quote.outcome_name for quote in norway_first[:2]] == ["Norway", "Brazil"]
+    assert by_ref is not None
+    assert by_ref.outcome_name == "Norway"
+    assert by_ref.price == pytest.approx(0.31)
 
 
 @pytest.mark.asyncio
@@ -214,6 +273,34 @@ async def test_prediction_market_paper_draft_confirm_settle_leaderboard():
     assert settled["count"] == 1
     assert leaderboard[0].won == 1
     assert leaderboard[0].total_pnl_usd == pytest.approx(150.0)
+
+
+@pytest.mark.asyncio
+async def test_prediction_market_paper_drafts_live_hip4_match_side():
+    repo = FakePredictionRepo([])
+    service = PredictionMarketPaperService(
+        settings=Settings(environment="test", prediction_market_paper_enabled=True, prediction_market_paper_default_stake_usd=70, _env_file=None),
+        repository=repo,
+        hyperliquid=FakeHyperliquidHip4(),
+    )
+    command = parse_prediction_market_discord_command("bet win on Brazil against Norway")
+    assert command is not None
+
+    result = await service.draft_bet(
+        PredictionMarketBetDraftRequest(
+            discord_guild_id="g1",
+            discord_user_id="u1",
+            side=command.side,
+            query=command.query,
+            market_ref=command.market_ref,
+        )
+    )
+
+    assert "error" not in result
+    assert result["draft"]["market_id"] == "739"
+    assert result["draft"]["outcome_id"] == "739:0"
+    assert result["draft"]["outcome_name"] == "Brazil"
+    assert result["draft"]["price"] == pytest.approx(0.70)
 
 
 @pytest.mark.asyncio

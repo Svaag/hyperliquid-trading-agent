@@ -89,11 +89,14 @@ class DiscordBotWorker(BaseWorker):
             return
         self.runner = CommandBackedAgentRunner(repository=self.repository, settings=self.settings)
         charting_service = None
-        if self.settings.discord_chart_command_enabled:
+        if self.settings.discord_chart_command_enabled or self.settings.prediction_market_paper_enabled:
             self.hyperliquid = HyperliquidClient(settings=self.settings)
+        if self.settings.discord_chart_command_enabled:
+            if self.hyperliquid is None:
+                self.hyperliquid = HyperliquidClient(settings=self.settings)
             self.tradfi = await build_tradfi_client(self.settings)
             charting_service = ChartingService(settings=self.settings, hyperliquid=self.hyperliquid, tradfi=self.tradfi)
-        self.bot = DiscordTradingBot(settings=self.settings, runner=self.runner, charting_service=charting_service)
+        self.bot = DiscordTradingBot(settings=self.settings, runner=self.runner, charting_service=charting_service, hyperliquid=self.hyperliquid)
         self._bot_task = asyncio.create_task(self.bot.start(), name="discord-command-bot")
         stop_task = asyncio.create_task(self.wait_until_stopped(), name="discord-command-bot-stop")
         try:

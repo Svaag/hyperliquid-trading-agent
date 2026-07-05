@@ -62,12 +62,14 @@ class DiscordTradingBot:
         tracking_service: PositionTrackingService | None = None,
         autonomy_service: Any | None = None,
         charting_service: ChartingService | None = None,
+        hyperliquid: Any | None = None,
     ):
         self.settings = settings
         self.runner = runner
         self.tracking_service = tracking_service
         self.autonomy_service = autonomy_service
         self.charting_service = charting_service
+        self.hyperliquid = hyperliquid
         self.client = None
         if discord is not None:
             intents = discord.Intents.default()
@@ -454,7 +456,7 @@ class DiscordTradingBot:
         repository = self._repository()
         if repository is None:
             return "Prediction-market storage is unavailable. No live trade was placed."
-        service = PredictionMarketPaperService(settings=self.settings, repository=repository)
+        service = PredictionMarketPaperService(settings=self.settings, repository=repository, hyperliquid=self.hyperliquid)
         guild_id = _maybe_str(context.guild_id) or "dm"
         discord_user_id = user_id or "unknown"
 

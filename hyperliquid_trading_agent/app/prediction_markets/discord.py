@@ -12,6 +12,7 @@ from hyperliquid_trading_agent.app.prediction_markets.schemas import (
 
 _NUMBER = r"(\d+(?:\.\d+)?)"
 _PM_REF_RE = re.compile(r"\bpm:?(pm_[a-f0-9]{4,}|[a-z0-9_:-]{6,})\b", re.IGNORECASE)
+_HIP4_REF_RE = re.compile(r"(?:\bhip4:(?:#)?\d+(?::[01])?\b|#\d+[01]\b)", re.IGNORECASE)
 _YES_WORD_RE = re.compile(r"\byes\b", re.IGNORECASE)
 _NO_WORD_RE = re.compile(r"\bno\b", re.IGNORECASE)
 _NATURAL_YES_RE = re.compile(r"\b(?:win|wins|winning|beat|beats|beating|defeat|defeats|defeating)\b", re.IGNORECASE)
@@ -216,6 +217,9 @@ def _stake(prompt: str) -> float | None:
 
 
 def _market_ref_from_text(prompt: str) -> str | None:
+    hip4_match = _HIP4_REF_RE.search(prompt)
+    if hip4_match:
+        return hip4_match.group(0)
     match = _PM_REF_RE.search(prompt)
     if not match:
         return None

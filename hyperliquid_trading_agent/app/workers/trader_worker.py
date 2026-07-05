@@ -521,7 +521,7 @@ class TraderWorker(BaseWorker):
 
     def _get_prediction_market_paper_service(self) -> PredictionMarketPaperService:
         if self._prediction_market_paper is None:
-            self._prediction_market_paper = PredictionMarketPaperService(settings=self.settings, repository=self.repository)
+            self._prediction_market_paper = PredictionMarketPaperService(settings=self.settings, repository=self.repository, hyperliquid=self._get_hyperliquid_client())
         return self._prediction_market_paper
 
     def _get_memory_service(self) -> MemoryService:
