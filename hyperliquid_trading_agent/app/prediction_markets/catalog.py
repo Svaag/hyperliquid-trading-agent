@@ -29,6 +29,7 @@ _QUERY_STOPWORDS = {
     "for",
     "in",
     "market",
+    "more",
     "no",
     "of",
     "on",

@@ -18,6 +18,10 @@ _YES_WORD_RE = re.compile(r"\byes\b", re.IGNORECASE)
 _NO_WORD_RE = re.compile(r"\bno\b", re.IGNORECASE)
 _NATURAL_YES_RE = re.compile(r"\b(?:win|wins|winning|beat|beats|beating|defeat|defeats|defeating)\b", re.IGNORECASE)
 _BETTING_WORD_RE = re.compile(r"\b(?:bet|buy|paper|pm|prediction|predict|market)\b", re.IGNORECASE)
+_DRAFT_QUERY_FILLER_RE = re.compile(
+    r"\b(?:a|an|against|bet|buy|for|market|more|my|on|paper|pm|portfolio|predict|prediction|the|versus|vs)\b",
+    re.IGNORECASE,
+)
 _CONFIRM_REPLY_WORDS = {"confirm", "confirmed", "ok", "okay", "yes", "y", "yep", "yeah", "sure", "approve", "approved", "do it", "go", "go ahead", "looks good", "✅", "☑️"}
 _CANCEL_REPLY_WORDS = {"cancel", "cancel it", "no", "n", "nope", "nah", "reject", "rejected", "deny", "denied", "stop", "❌", "✖️", "✕", "🚫", "👎"}
 _CONFIRM_REACTION_EMOJIS = {"✅", "☑️"}
@@ -327,7 +331,8 @@ def _reply_confirmation_action(lowered: str) -> Literal["confirm", "cancel"] | N
 def _draft_query(prompt: str, *, side: str, market_ref: str | None) -> str:
     cleaned = re.sub(rf"\$\s*{_NUMBER}", " ", prompt)
     cleaned = re.sub(rf"\b{_NUMBER}\s*(?:usd|usdc|dollars?)\b", " ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\b(?:bet|buy|paper|portfolio|prediction|market|pm|on|for|my|the|a|an)\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = _DRAFT_QUERY_FILLER_RE.sub(" ", cleaned)
+    cleaned = _NATURAL_YES_RE.sub(" ", cleaned)
     cleaned = re.sub(rf"\b{side}\b", " ", cleaned, flags=re.IGNORECASE)
     if market_ref:
         cleaned = re.sub(re.escape(market_ref), " ", cleaned, flags=re.IGNORECASE)

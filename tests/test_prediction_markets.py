@@ -226,6 +226,8 @@ def test_prediction_market_discord_parser_natural_bet_and_search():
     sports_bet = parse_prediction_market_discord_command("bet win on Brazil against Norway")
     pm_sports_bet = parse_prediction_market_discord_command("pm win brazil against norway")
     yes_sports_bet = parse_prediction_market_discord_command("bet yes on Brazil against Norway")
+    stake_sports_bet = parse_prediction_market_discord_command("bet win brazil vs norway $100")
+    more_sports_bet = parse_prediction_market_discord_command("buy more brazil win vs norway")
     hip4_ref_bet = parse_prediction_market_discord_command("bet yes on #7390")
 
     assert search is not None and search.action == "search" and search.query == "BTC 100k"
@@ -240,12 +242,18 @@ def test_prediction_market_discord_parser_natural_bet_and_search():
     assert "Norway" in sports_bet.query
     assert pm_sports_bet is not None and pm_sports_bet.action == "draft"
     assert pm_sports_bet.side == "yes"
-    assert "brazil" in pm_sports_bet.query
-    assert "norway" in pm_sports_bet.query
+    assert pm_sports_bet.query == "brazil norway"
     assert yes_sports_bet is not None and yes_sports_bet.action == "draft"
     assert yes_sports_bet.side == "yes"
     assert "Brazil" in yes_sports_bet.query
     assert "Norway" in yes_sports_bet.query
+    assert stake_sports_bet is not None and stake_sports_bet.action == "draft"
+    assert stake_sports_bet.side == "yes"
+    assert stake_sports_bet.stake_usd == 100
+    assert stake_sports_bet.query == "brazil norway"
+    assert more_sports_bet is not None and more_sports_bet.action == "draft"
+    assert more_sports_bet.side == "yes"
+    assert more_sports_bet.query == "brazil norway"
     assert hip4_ref_bet is not None and hip4_ref_bet.action == "draft"
     assert hip4_ref_bet.market_ref == "#7390"
     assert hip4_ref_bet.query == ""
@@ -349,14 +357,22 @@ async def test_prediction_market_paper_draft_confirm_settle_leaderboard():
 
 
 @pytest.mark.asyncio
-async def test_prediction_market_paper_drafts_live_hip4_match_side():
+@pytest.mark.parametrize(
+    ("prompt", "expected_stake"),
+    [
+        ("bet win on Brazil against Norway", 70),
+        ("bet win brazil vs norway $100", 100),
+        ("buy more brazil win vs norway", 70),
+    ],
+)
+async def test_prediction_market_paper_drafts_live_hip4_match_side(prompt, expected_stake):
     repo = FakePredictionRepo([])
     service = PredictionMarketPaperService(
         settings=Settings(environment="test", prediction_market_paper_enabled=True, prediction_market_paper_default_stake_usd=70, _env_file=None),
         repository=repo,
         hyperliquid=FakeHyperliquidHip4(),
     )
-    command = parse_prediction_market_discord_command("bet win on Brazil against Norway")
+    command = parse_prediction_market_discord_command(prompt)
     assert command is not None
 
     result = await service.draft_bet(
@@ -366,6 +382,7 @@ async def test_prediction_market_paper_drafts_live_hip4_match_side():
             side=command.side,
             query=command.query,
             market_ref=command.market_ref,
+            stake_usd=command.stake_usd,
         )
     )
 
@@ -374,6 +391,7 @@ async def test_prediction_market_paper_drafts_live_hip4_match_side():
     assert result["draft"]["outcome_id"] == "739:0"
     assert result["draft"]["outcome_name"] == "Brazil"
     assert result["draft"]["price"] == pytest.approx(0.70)
+    assert result["draft"]["stake_usd"] == pytest.approx(expected_stake)
 
 
 @pytest.mark.asyncio
