@@ -474,6 +474,131 @@ class PredictionMarketCalibrationRecord(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class PredictionMarketPaperAccountRecord(TimestampMixin, Base):
+    __tablename__ = "prediction_market_paper_accounts"
+    __table_args__ = (
+        UniqueConstraint("discord_guild_id", "discord_user_id", name="uq_prediction_market_accounts_guild_user"),
+        Index("ix_prediction_market_accounts_guild", "discord_guild_id"),
+    )
+
+    account_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_id)
+    discord_guild_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    discord_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    initial_cash_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    cash_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    realized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PredictionMarketBetDraftRecord(TimestampMixin, Base):
+    __tablename__ = "prediction_market_bet_drafts"
+    __table_args__ = (
+        Index("ix_prediction_market_drafts_account_status", "account_id", "status"),
+        Index("ix_prediction_market_drafts_guild_user", "discord_guild_id", "discord_user_id"),
+        Index("ix_prediction_market_drafts_market", "venue", "market_id", "outcome_id"),
+    )
+
+    draft_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    account_id: Mapped[str] = mapped_column(ForeignKey("prediction_market_paper_accounts.account_id"), nullable=False)
+    discord_guild_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    discord_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    market_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    outcome_id: Mapped[str | None] = mapped_column(String(128))
+    outcome_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    stake_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    shares: Mapped[float] = mapped_column(Float, nullable=False)
+    quote_signal_id: Mapped[str | None] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="new")
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expires_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    confirmed_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    cancelled_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class PredictionMarketPositionRecord(TimestampMixin, Base):
+    __tablename__ = "prediction_market_positions"
+    __table_args__ = (
+        Index("ix_prediction_market_positions_account_status", "account_id", "status"),
+        Index("ix_prediction_market_positions_guild_user", "discord_guild_id", "discord_user_id"),
+        Index("ix_prediction_market_positions_market", "venue", "market_id", "outcome_id"),
+        Index("ix_prediction_market_positions_status", "status"),
+    )
+
+    position_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    account_id: Mapped[str] = mapped_column(ForeignKey("prediction_market_paper_accounts.account_id"), nullable=False)
+    discord_guild_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    discord_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    draft_id: Mapped[str | None] = mapped_column(String(64))
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    market_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    outcome_id: Mapped[str | None] = mapped_column(String(128))
+    outcome_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
+    shares: Mapped[float] = mapped_column(Float, nullable=False)
+    avg_entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    mark_price: Mapped[float | None] = mapped_column(Float)
+    current_value_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    realized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    unrealized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    opened_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    closed_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    settled_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    result: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class PredictionMarketFillRecord(TimestampMixin, Base):
+    __tablename__ = "prediction_market_fills"
+    __table_args__ = (
+        Index("ix_prediction_market_fills_account", "account_id"),
+        Index("ix_prediction_market_fills_position", "position_id"),
+        Index("ix_prediction_market_fills_created", "created_at_ms"),
+    )
+
+    fill_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    account_id: Mapped[str] = mapped_column(ForeignKey("prediction_market_paper_accounts.account_id"), nullable=False)
+    position_id: Mapped[str | None] = mapped_column(String(64))
+    draft_id: Mapped[str | None] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    market_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    outcome_id: Mapped[str | None] = mapped_column(String(128))
+    shares: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    cash_delta_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    realized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class PredictionMarketSettlementRecord(TimestampMixin, Base):
+    __tablename__ = "prediction_market_settlements"
+    __table_args__ = (
+        Index("ix_prediction_market_settlements_market", "venue", "market_id", "outcome_id"),
+        Index("ix_prediction_market_settlements_created", "created_at_ms"),
+    )
+
+    settlement_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    market_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    outcome_id: Mapped[str | None] = mapped_column(String(128))
+    settlement_fraction: Mapped[float] = mapped_column(Float, nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    applied_by: Mapped[str] = mapped_column(String(128), nullable=False, default="system")
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class TradeProposalRecord(TimestampMixin, Base):
     __tablename__ = "trade_proposals"
 

@@ -19,6 +19,11 @@ from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.newswire.bus import InProcessNewswireBus
 from hyperliquid_trading_agent.app.paper.schemas import PaperTradeDraftRequest
+from hyperliquid_trading_agent.app.prediction_markets.paper import PredictionMarketPaperService
+from hyperliquid_trading_agent.app.prediction_markets.schemas import (
+    PredictionMarketBetDraftRequest,
+    PredictionMarketSettlementRequest,
+)
 from hyperliquid_trading_agent.app.workers.base import BaseWorker
 from hyperliquid_trading_agent.app.workers.stored_newswire_pump import StoredNewswirePump
 
@@ -34,6 +39,7 @@ class TraderWorker(BaseWorker):
         self.command_count = 0
         self.last_command_type: str | None = None
         self._hip4_service: Hip4Service | None = None
+        self._prediction_market_paper: PredictionMarketPaperService | None = None
         self._autonomy_service: AutonomousTradingLoopService | None = None
         self._memory_service: MemoryService | None = None
         self._engine_service: InstitutionalEngineService | None = None
@@ -89,6 +95,12 @@ class TraderWorker(BaseWorker):
             "paper_trade_confirm": self._handle_paper_trade_confirm,
             "paper_trade_cancel": self._handle_paper_trade_cancel,
             "paper_position_close": self._handle_paper_position_close,
+            "prediction_market_bet_draft": self._handle_prediction_market_bet_draft,
+            "prediction_market_bet_confirm": self._handle_prediction_market_bet_confirm,
+            "prediction_market_bet_cancel": self._handle_prediction_market_bet_cancel,
+            "prediction_market_position_close": self._handle_prediction_market_position_close,
+            "prediction_market_settlement_apply": self._handle_prediction_market_settlement_apply,
+            "prediction_market_settlement_sweep": self._handle_prediction_market_settlement_sweep,
             "tracking_pause": self._handle_tracking_pause,
             "tracking_resume": self._handle_tracking_resume,
             "tracking_stop": self._handle_tracking_stop,
@@ -334,6 +346,50 @@ class TraderWorker(BaseWorker):
             position = await service.close_position_by_symbol(ref, price, reason=reason)
         return self._result(command, position=position.model_dump(mode="json"))
 
+    async def _handle_prediction_market_bet_draft(self, command: dict[str, Any]) -> dict[str, Any]:
+        self._record_command(command)
+        payload = {**self._payload(command), "actor": self._actor(command)}
+        request = PredictionMarketBetDraftRequest.model_validate(payload)
+        result = await self._get_prediction_market_paper_service().draft_bet(request)
+        return self._result(command, result=result)
+
+    async def _handle_prediction_market_bet_confirm(self, command: dict[str, Any]) -> dict[str, Any]:
+        self._record_command(command)
+        payload = self._payload(command)
+        result = await self._get_prediction_market_paper_service().confirm_draft(self._required_str(payload, "draft_id"), actor=self._actor(command))
+        return self._result(command, result=result)
+
+    async def _handle_prediction_market_bet_cancel(self, command: dict[str, Any]) -> dict[str, Any]:
+        self._record_command(command)
+        payload = self._payload(command)
+        result = await self._get_prediction_market_paper_service().cancel_draft(
+            self._required_str(payload, "draft_id"),
+            actor=self._actor(command),
+            reason=str(payload.get("reason") or "cancelled"),
+        )
+        return self._result(command, result=result)
+
+    async def _handle_prediction_market_position_close(self, command: dict[str, Any]) -> dict[str, Any]:
+        self._record_command(command)
+        payload = self._payload(command)
+        result = await self._get_prediction_market_paper_service().close_position(
+            self._required_str(payload, "position_ref"),
+            actor=self._actor(command),
+            reason=str(payload.get("reason") or "manual"),
+        )
+        return self._result(command, result=result)
+
+    async def _handle_prediction_market_settlement_apply(self, command: dict[str, Any]) -> dict[str, Any]:
+        self._record_command(command)
+        payload = {**self._payload(command), "actor": self._actor(command)}
+        result = await self._get_prediction_market_paper_service().apply_settlement(PredictionMarketSettlementRequest.model_validate(payload))
+        return self._result(command, result=result)
+
+    async def _handle_prediction_market_settlement_sweep(self, command: dict[str, Any]) -> dict[str, Any]:
+        self._record_command(command)
+        result = await self._get_prediction_market_paper_service().settlement_sweep()
+        return self._result(command, result=result)
+
     async def _handle_tracking_pause(self, command: dict[str, Any]) -> dict[str, Any]:
         self._record_command(command)
         return await self._set_tracker_status(command, "paused")
@@ -462,6 +518,11 @@ class TraderWorker(BaseWorker):
         if self._hip4_service is None:
             self._hip4_service = Hip4Service(settings=self.settings, repository=self.repository, hyperliquid=None, ws_worker=None, risk_gateway=None)
         return self._hip4_service
+
+    def _get_prediction_market_paper_service(self) -> PredictionMarketPaperService:
+        if self._prediction_market_paper is None:
+            self._prediction_market_paper = PredictionMarketPaperService(settings=self.settings, repository=self.repository)
+        return self._prediction_market_paper
 
     def _get_memory_service(self) -> MemoryService:
         if self._memory_service is None:

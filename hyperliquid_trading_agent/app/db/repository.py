@@ -96,7 +96,12 @@ from hyperliquid_trading_agent.app.db.models import (
     PortfolioSnapshotRecord,
     PositionThesisRecord,
     PositionTracker,
+    PredictionMarketBetDraftRecord,
     PredictionMarketCalibrationRecord,
+    PredictionMarketFillRecord,
+    PredictionMarketPaperAccountRecord,
+    PredictionMarketPositionRecord,
+    PredictionMarketSettlementRecord,
     PredictionMarketSignalRecord,
     PromotionDecisionRecord,
     PromptVersionRecord,
@@ -2928,6 +2933,237 @@ class Repository:
                 items = [item for item in items if wanted in item.get("symbols", [])]
             return items[:limit]
 
+    async def create_or_get_prediction_market_paper_account(self, *, discord_guild_id: str, discord_user_id: str, initial_cash_usd: float) -> dict[str, Any]:
+        if self.sessionmaker is None:
+            raise RuntimeError("repository disabled")
+        async with self.sessionmaker() as session:
+            stmt = select(PredictionMarketPaperAccountRecord).where(
+                PredictionMarketPaperAccountRecord.discord_guild_id == str(discord_guild_id),
+                PredictionMarketPaperAccountRecord.discord_user_id == str(discord_user_id),
+            )
+            result = await session.execute(stmt)
+            item = result.scalar_one_or_none()
+            if item is None:
+                item = PredictionMarketPaperAccountRecord(
+                    discord_guild_id=str(discord_guild_id),
+                    discord_user_id=str(discord_user_id),
+                    status="active",
+                    initial_cash_usd=float(initial_cash_usd),
+                    cash_usd=float(initial_cash_usd),
+                    realized_pnl_usd=0.0,
+                    metadata_json={"mode": "prediction_market_paper"},
+                    updated_at=datetime.now(UTC),
+                )
+                session.add(item)
+                try:
+                    await session.flush()
+                except IntegrityError:
+                    await session.rollback()
+                    result = await session.execute(stmt)
+                    item = result.scalar_one()
+            await session.commit()
+            return _prediction_market_account_to_dict(item)
+
+    async def get_prediction_market_paper_account(self, account_id: str) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(PredictionMarketPaperAccountRecord, str(account_id))
+            return _prediction_market_account_to_dict(item) if item is not None else None
+
+    async def update_prediction_market_paper_account(self, account: dict[str, Any]) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            item = await session.get(PredictionMarketPaperAccountRecord, str(account["account_id"]))
+            if item is not None:
+                item.status = str(account.get("status") or item.status)
+                item.cash_usd = float(account.get("cash_usd") or 0)
+                item.realized_pnl_usd = float(account.get("realized_pnl_usd") or 0)
+                item.metadata_json = redact_secrets(dict(account.get("metadata") or {}))
+                item.updated_at = datetime.now(UTC)
+                await session.commit()
+
+    async def create_prediction_market_bet_draft(self, draft: dict[str, Any]) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            session.add(_prediction_market_draft_record(draft))
+            await session.commit()
+
+    async def get_prediction_market_bet_draft(self, draft_id: str) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(PredictionMarketBetDraftRecord, str(draft_id))
+            return _prediction_market_draft_to_dict(item) if item is not None else None
+
+    async def update_prediction_market_bet_draft(self, draft: dict[str, Any]) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            item = await session.get(PredictionMarketBetDraftRecord, str(draft["draft_id"]))
+            if item is None:
+                item = _prediction_market_draft_record(draft)
+                session.add(item)
+            else:
+                _apply_prediction_market_draft(item, draft)
+            await session.commit()
+
+    async def list_prediction_market_bet_drafts(self, *, account_id: str | None = None, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(PredictionMarketBetDraftRecord).order_by(PredictionMarketBetDraftRecord.created_at_ms.desc()).limit(limit)
+            if account_id:
+                stmt = stmt.where(PredictionMarketBetDraftRecord.account_id == account_id)
+            if status:
+                stmt = stmt.where(PredictionMarketBetDraftRecord.status == status)
+            result = await session.execute(stmt)
+            return [_prediction_market_draft_to_dict(item) for item in result.scalars().all()]
+
+    async def create_prediction_market_position(self, position: dict[str, Any]) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            session.add(_prediction_market_position_record(position))
+            await session.commit()
+
+    async def get_prediction_market_position(self, position_id: str) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(PredictionMarketPositionRecord, str(position_id))
+            return _prediction_market_position_to_dict(item) if item is not None else None
+
+    async def update_prediction_market_position(self, position: dict[str, Any]) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            item = await session.get(PredictionMarketPositionRecord, str(position["position_id"]))
+            if item is None:
+                item = _prediction_market_position_record(position)
+                session.add(item)
+            else:
+                _apply_prediction_market_position(item, position)
+            await session.commit()
+
+    async def list_prediction_market_positions(
+        self,
+        *,
+        account_id: str | None = None,
+        discord_guild_id: str | None = None,
+        discord_user_id: str | None = None,
+        venue: str | None = None,
+        market_id: str | None = None,
+        outcome_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(PredictionMarketPositionRecord).order_by(PredictionMarketPositionRecord.opened_at_ms.desc()).limit(limit)
+            if account_id:
+                stmt = stmt.where(PredictionMarketPositionRecord.account_id == account_id)
+            if discord_guild_id:
+                stmt = stmt.where(PredictionMarketPositionRecord.discord_guild_id == str(discord_guild_id))
+            if discord_user_id:
+                stmt = stmt.where(PredictionMarketPositionRecord.discord_user_id == str(discord_user_id))
+            if venue:
+                stmt = stmt.where(PredictionMarketPositionRecord.venue == str(venue).lower())
+            if market_id:
+                stmt = stmt.where(PredictionMarketPositionRecord.market_id == str(market_id))
+            if outcome_id:
+                stmt = stmt.where(PredictionMarketPositionRecord.outcome_id == str(outcome_id))
+            if status:
+                stmt = stmt.where(PredictionMarketPositionRecord.status == status)
+            result = await session.execute(stmt)
+            return [_prediction_market_position_to_dict(item) for item in result.scalars().all()]
+
+    async def record_prediction_market_fill(self, fill: dict[str, Any]) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            if await session.get(PredictionMarketFillRecord, str(fill["fill_id"])) is None:
+                session.add(_prediction_market_fill_record(fill))
+                await session.commit()
+
+    async def upsert_prediction_market_settlement(self, settlement: dict[str, Any]) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            item = await session.get(PredictionMarketSettlementRecord, str(settlement["settlement_id"]))
+            if item is None:
+                item = PredictionMarketSettlementRecord(settlement_id=str(settlement["settlement_id"]))
+                session.add(item)
+            item.venue = str(settlement.get("venue") or "").lower()
+            item.market_id = str(settlement.get("market_id") or "")
+            item.outcome_id = str(settlement.get("outcome_id")) if settlement.get("outcome_id") is not None else None
+            item.settlement_fraction = float(settlement.get("settlement_fraction") or 0)
+            item.source = str(settlement.get("source") or "provider")
+            item.applied_by = str(settlement.get("applied_by") or "system")
+            item.created_at_ms = int(settlement.get("created_at_ms") or _runtime_now_ms())
+            item.metadata_json = redact_secrets(dict(settlement.get("metadata") or {}))
+            await session.commit()
+
+    async def list_prediction_market_settlements(self, *, venue: str | None = None, market_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(PredictionMarketSettlementRecord).order_by(PredictionMarketSettlementRecord.created_at_ms.desc()).limit(limit)
+            if venue:
+                stmt = stmt.where(PredictionMarketSettlementRecord.venue == str(venue).lower())
+            if market_id:
+                stmt = stmt.where(PredictionMarketSettlementRecord.market_id == str(market_id))
+            result = await session.execute(stmt)
+            return [_prediction_market_settlement_to_dict(item) for item in result.scalars().all()]
+
+    async def prediction_market_leaderboard(self, *, discord_guild_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            account_result = await session.execute(
+                select(PredictionMarketPaperAccountRecord).where(PredictionMarketPaperAccountRecord.discord_guild_id == str(discord_guild_id))
+            )
+            accounts = [_prediction_market_account_to_dict(item) for item in account_result.scalars().all()]
+            position_result = await session.execute(
+                select(PredictionMarketPositionRecord).where(PredictionMarketPositionRecord.discord_guild_id == str(discord_guild_id))
+            )
+            positions = [_prediction_market_position_to_dict(item) for item in position_result.scalars().all()]
+        by_account = {account["account_id"]: {**account, "positions": []} for account in accounts}
+        for position in positions:
+            if position["account_id"] in by_account:
+                by_account[position["account_id"]]["positions"].append(position)
+        rows = []
+        for account_id, account in by_account.items():
+            account_positions = list(account.get("positions") or [])
+            open_positions = [item for item in account_positions if item.get("status") == "open"]
+            open_value = sum(float(item.get("current_value_usd") or 0) for item in open_positions)
+            unrealized = sum(float(item.get("unrealized_pnl_usd") or 0) for item in open_positions)
+            realized = float(account.get("realized_pnl_usd") or 0)
+            initial = float(account.get("initial_cash_usd") or 0) or 1.0
+            total = realized + unrealized
+            rows.append(
+                {
+                    "discord_guild_id": account["discord_guild_id"],
+                    "discord_user_id": account["discord_user_id"],
+                    "account_id": account_id,
+                    "cash_usd": float(account.get("cash_usd") or 0),
+                    "open_value_usd": open_value,
+                    "equity_usd": float(account.get("cash_usd") or 0) + open_value,
+                    "realized_pnl_usd": realized,
+                    "unrealized_pnl_usd": unrealized,
+                    "total_pnl_usd": total,
+                    "roi_pct": total / initial * 100.0,
+                    "won": len([item for item in account_positions if item.get("result") == "won"]),
+                    "lost": len([item for item in account_positions if item.get("result") == "lost"]),
+                    "open_positions": len(open_positions),
+                    "settled_positions": len([item for item in account_positions if item.get("status") == "settled"]),
+                }
+            )
+        return sorted(rows, key=lambda item: float(item.get("total_pnl_usd") or 0), reverse=True)[:limit]
+
     async def upsert_source_credibility(self, source: dict[str, Any]) -> str | None:
         return await self._upsert_record_by_pk(
             SourceCredibilityRecord,
@@ -5040,6 +5276,168 @@ def _apply_prediction_market_signal(item: PredictionMarketSignalRecord, data: di
     item.staleness_ms = data.get("staleness_ms")
     item.confidence = float(data.get("confidence") or 0)
     item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
+
+
+def _prediction_market_account_to_dict(item: PredictionMarketPaperAccountRecord) -> dict[str, Any]:
+    return {
+        "account_id": item.account_id,
+        "discord_guild_id": item.discord_guild_id,
+        "discord_user_id": item.discord_user_id,
+        "status": item.status,
+        "initial_cash_usd": item.initial_cash_usd,
+        "cash_usd": item.cash_usd,
+        "realized_pnl_usd": item.realized_pnl_usd,
+        "metadata": item.metadata_json,
+        "created_at_ms": _ms_from_datetime(item.created_at),
+        "updated_at_ms": _ms_from_datetime(item.updated_at) or _ms_from_datetime(item.created_at),
+    }
+
+
+def _prediction_market_draft_record(data: dict[str, Any]) -> PredictionMarketBetDraftRecord:
+    item = PredictionMarketBetDraftRecord(draft_id=str(data["draft_id"]))
+    _apply_prediction_market_draft(item, data)
+    return item
+
+
+def _apply_prediction_market_draft(item: PredictionMarketBetDraftRecord, data: dict[str, Any]) -> None:
+    item.account_id = str(data.get("account_id") or "")
+    item.discord_guild_id = str(data.get("discord_guild_id") or "")
+    item.discord_user_id = str(data.get("discord_user_id") or "")
+    item.venue = str(data.get("venue") or "").lower()
+    item.market_id = str(data.get("market_id") or "")
+    item.outcome_id = str(data.get("outcome_id")) if data.get("outcome_id") is not None else None
+    item.outcome_name = str(data.get("outcome_name") or "")
+    item.question = str(data.get("question") or "")
+    item.side = str(data.get("side") or "yes")
+    item.stake_usd = float(data.get("stake_usd") or 0)
+    item.price = float(data.get("price") or 0)
+    item.shares = float(data.get("shares") or 0)
+    item.quote_signal_id = data.get("quote_signal_id")
+    item.status = str(data.get("status") or "new")
+    item.created_at_ms = int(data.get("created_at_ms") or _runtime_now_ms())
+    item.expires_at_ms = int(data.get("expires_at_ms") or item.created_at_ms)
+    item.confirmed_at_ms = data.get("confirmed_at_ms")
+    item.cancelled_at_ms = data.get("cancelled_at_ms")
+    item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
+
+
+def _prediction_market_draft_to_dict(item: PredictionMarketBetDraftRecord) -> dict[str, Any]:
+    return {
+        "draft_id": item.draft_id,
+        "account_id": item.account_id,
+        "discord_guild_id": item.discord_guild_id,
+        "discord_user_id": item.discord_user_id,
+        "venue": item.venue,
+        "market_id": item.market_id,
+        "outcome_id": item.outcome_id,
+        "outcome_name": item.outcome_name,
+        "question": item.question,
+        "side": item.side,
+        "stake_usd": item.stake_usd,
+        "price": item.price,
+        "shares": item.shares,
+        "quote_signal_id": item.quote_signal_id,
+        "status": item.status,
+        "created_at_ms": item.created_at_ms,
+        "expires_at_ms": item.expires_at_ms,
+        "confirmed_at_ms": item.confirmed_at_ms,
+        "cancelled_at_ms": item.cancelled_at_ms,
+        "metadata": item.metadata_json,
+    }
+
+
+def _prediction_market_position_record(data: dict[str, Any]) -> PredictionMarketPositionRecord:
+    item = PredictionMarketPositionRecord(position_id=str(data["position_id"]))
+    _apply_prediction_market_position(item, data)
+    return item
+
+
+def _apply_prediction_market_position(item: PredictionMarketPositionRecord, data: dict[str, Any]) -> None:
+    item.account_id = str(data.get("account_id") or "")
+    item.discord_guild_id = str(data.get("discord_guild_id") or "")
+    item.discord_user_id = str(data.get("discord_user_id") or "")
+    item.draft_id = data.get("draft_id")
+    item.venue = str(data.get("venue") or "").lower()
+    item.market_id = str(data.get("market_id") or "")
+    item.outcome_id = str(data.get("outcome_id")) if data.get("outcome_id") is not None else None
+    item.outcome_name = str(data.get("outcome_name") or "")
+    item.question = str(data.get("question") or "")
+    item.side = str(data.get("side") or "yes")
+    item.status = str(data.get("status") or "open")
+    item.shares = float(data.get("shares") or 0)
+    item.avg_entry_price = float(data.get("avg_entry_price") or 0)
+    item.cost_usd = float(data.get("cost_usd") or 0)
+    item.mark_price = data.get("mark_price")
+    item.current_value_usd = float(data.get("current_value_usd") or 0)
+    item.realized_pnl_usd = float(data.get("realized_pnl_usd") or 0)
+    item.unrealized_pnl_usd = float(data.get("unrealized_pnl_usd") or 0)
+    item.opened_at_ms = int(data.get("opened_at_ms") or _runtime_now_ms())
+    item.closed_at_ms = data.get("closed_at_ms")
+    item.settled_at_ms = data.get("settled_at_ms")
+    item.result = str(data.get("result") or "open")
+    item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
+
+
+def _prediction_market_position_to_dict(item: PredictionMarketPositionRecord) -> dict[str, Any]:
+    return {
+        "position_id": item.position_id,
+        "account_id": item.account_id,
+        "discord_guild_id": item.discord_guild_id,
+        "discord_user_id": item.discord_user_id,
+        "draft_id": item.draft_id,
+        "venue": item.venue,
+        "market_id": item.market_id,
+        "outcome_id": item.outcome_id,
+        "outcome_name": item.outcome_name,
+        "question": item.question,
+        "side": item.side,
+        "status": item.status,
+        "shares": item.shares,
+        "avg_entry_price": item.avg_entry_price,
+        "cost_usd": item.cost_usd,
+        "mark_price": item.mark_price,
+        "current_value_usd": item.current_value_usd,
+        "realized_pnl_usd": item.realized_pnl_usd,
+        "unrealized_pnl_usd": item.unrealized_pnl_usd,
+        "opened_at_ms": item.opened_at_ms,
+        "closed_at_ms": item.closed_at_ms,
+        "settled_at_ms": item.settled_at_ms,
+        "result": item.result,
+        "metadata": item.metadata_json,
+    }
+
+
+def _prediction_market_fill_record(data: dict[str, Any]) -> PredictionMarketFillRecord:
+    return PredictionMarketFillRecord(
+        fill_id=str(data["fill_id"]),
+        account_id=str(data.get("account_id") or ""),
+        position_id=data.get("position_id"),
+        draft_id=data.get("draft_id"),
+        action=str(data.get("action") or "open"),
+        venue=str(data.get("venue") or "").lower(),
+        market_id=str(data.get("market_id") or ""),
+        outcome_id=str(data.get("outcome_id")) if data.get("outcome_id") is not None else None,
+        shares=float(data.get("shares") or 0),
+        price=float(data.get("price") or 0),
+        cash_delta_usd=float(data.get("cash_delta_usd") or 0),
+        realized_pnl_usd=float(data.get("realized_pnl_usd") or 0),
+        created_at_ms=int(data.get("created_at_ms") or _runtime_now_ms()),
+        metadata_json=redact_secrets(dict(data.get("metadata") or {})),
+    )
+
+
+def _prediction_market_settlement_to_dict(item: PredictionMarketSettlementRecord) -> dict[str, Any]:
+    return {
+        "settlement_id": item.settlement_id,
+        "venue": item.venue,
+        "market_id": item.market_id,
+        "outcome_id": item.outcome_id,
+        "settlement_fraction": item.settlement_fraction,
+        "source": item.source,
+        "applied_by": item.applied_by,
+        "created_at_ms": item.created_at_ms,
+        "metadata": item.metadata_json,
+    }
 
 
 def _apply_source_credibility(item: SourceCredibilityRecord, data: dict[str, Any]) -> None:

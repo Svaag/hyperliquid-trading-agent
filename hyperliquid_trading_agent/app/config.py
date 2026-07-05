@@ -295,6 +295,13 @@ class Settings(BaseSettings):
 
     paper_trading_enabled: bool = False
     paper_trading_require_confirm: bool = True
+    prediction_market_paper_enabled: bool = True
+    prediction_market_paper_initial_cash_usd: float = 10_000.0
+    prediction_market_paper_default_stake_usd: float = 100.0
+    prediction_market_paper_max_stake_usd: float = 1_000.0
+    prediction_market_paper_draft_ttl_seconds: int = 300
+    prediction_market_paper_settlement_sweep_seconds: int = 300
+    prediction_market_search_max_staleness_seconds: int = 300
 
     autonomy_enabled: bool = False
     autonomy_mode: Literal["paper_signoff"] = "paper_signoff"

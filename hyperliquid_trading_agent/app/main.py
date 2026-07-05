@@ -71,6 +71,7 @@ from hyperliquid_trading_agent.app.paper.schemas import (
     PaperTradeConfirmRequest,
     PaperTradeDraftRequest,
 )
+from hyperliquid_trading_agent.app.prediction_markets.routes import register_prediction_market_routes
 from hyperliquid_trading_agent.app.runtime_commands import COMMAND_REGISTRY, command_registry_json
 from hyperliquid_trading_agent.app.tracking.alerts import DiscordAlertSink
 from hyperliquid_trading_agent.app.tracking.service import PositionTrackingService
@@ -1376,6 +1377,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_engine_routes(app, settings, _require_agent_api)
     register_orchestration_routes(app, settings, _require_agent_api)
     register_hip4_routes(app, settings, _require_agent_api)
+    register_prediction_market_routes(app, settings, _require_agent_api)
     register_newswire_routes(app)
     return app
 

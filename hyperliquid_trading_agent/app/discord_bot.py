@@ -22,6 +22,16 @@ from hyperliquid_trading_agent.app.paper.discord import (
     format_paper_result,
     parse_paper_discord_command,
 )
+from hyperliquid_trading_agent.app.prediction_markets.discord import (
+    PredictionMarketDiscordCommand,
+    format_prediction_market_leaderboard,
+    format_prediction_market_portfolio,
+    format_prediction_market_positions,
+    format_prediction_market_result,
+    format_prediction_market_search,
+    parse_prediction_market_discord_command,
+)
+from hyperliquid_trading_agent.app.prediction_markets.paper import PredictionMarketPaperService
 from hyperliquid_trading_agent.app.tracking.commands import parse_tracking_command
 from hyperliquid_trading_agent.app.tracking.service import PositionTrackingService
 
@@ -132,6 +142,7 @@ class DiscordTradingBot:
             prompt = _message_prompt_without_mentions(message.content)
             referenced_message = await _resolve_referenced_message(message)
             autonomy_command = parse_autonomy_command(prompt, referenced_message=referenced_message) if (prompt or referenced_message is not None) else None
+            prediction_market_command = parse_prediction_market_discord_command(prompt, referenced_message=referenced_message) if prompt else None
             paper_command = parse_paper_discord_command(prompt) if prompt else None
             autonomy_alert_channel = bool(self.settings.autonomy_alert_channel_id and str(channel_id) == str(self.settings.autonomy_alert_channel_id))
             if not mentioned and not thread_continuation and not (autonomy_command is not None and autonomy_alert_channel):
@@ -151,6 +162,17 @@ class DiscordTradingBot:
             tracking_command = parse_tracking_command(prompt)
             try:
                 async with message.channel.typing():
+                    if prediction_market_command is not None:
+                        content = await self._handle_prediction_market_command(
+                            prediction_market_command,
+                            context=context,
+                            user_id=_maybe_str(getattr(message.author, "id", None)),
+                            role_ids=role_ids,
+                        )
+                        for chunk in _chunk(content, self.settings.discord_max_response_chars):
+                            await message.reply(chunk, mention_author=False)
+                        DISCORD_MESSAGES.labels(result="prediction_market_command").inc()
+                        return
                     if paper_command is not None:
                         content = await self._handle_paper_command(
                             paper_command,
@@ -420,6 +442,95 @@ class DiscordTradingBot:
             log.exception("discord_chart_command_failed", error=type(exc).__name__)
             await message.reply("I hit an internal error while rendering the chart. No trade was placed.", mention_author=False)
         return True
+
+    async def _handle_prediction_market_command(
+        self,
+        command: PredictionMarketDiscordCommand,
+        *,
+        context: DiscordContext,
+        user_id: str | None,
+        role_ids: set[int],
+    ) -> str:
+        repository = self._repository()
+        if repository is None:
+            return "Prediction-market storage is unavailable. No live trade was placed."
+        service = PredictionMarketPaperService(settings=self.settings, repository=repository)
+        guild_id = _maybe_str(context.guild_id) or "dm"
+        discord_user_id = user_id or "unknown"
+
+        if command.action == "search":
+            return format_prediction_market_search(await service.search(command.query, limit=10))
+        if command.action == "portfolio":
+            return format_prediction_market_portfolio(await service.portfolio(discord_guild_id=guild_id, discord_user_id=discord_user_id))
+        if command.action == "positions":
+            items = await repository.list_prediction_market_positions(discord_guild_id=guild_id, discord_user_id=discord_user_id, limit=20)
+            return format_prediction_market_positions(items)
+        if command.action == "leaderboard":
+            return format_prediction_market_leaderboard([row.model_dump(mode="json") for row in await service.leaderboard(discord_guild_id=guild_id, limit=20)])
+
+        if not self.settings.prediction_market_paper_enabled:
+            return "Prediction-market paper trading is disabled for this runtime. Set PREDICTION_MARKET_PAPER_ENABLED=true to use Discord prediction-market paper commands. No live trade was placed."
+        if command.error:
+            return f"{command.error} No live trade was placed."
+        if command.action in {"settle", "settlement_sweep"} and not self._is_admin(user_id, role_ids):
+            return "Not authorized for prediction-market settlement commands."
+
+        if command.action == "draft":
+            payload = {
+                "discord_guild_id": guild_id,
+                "discord_user_id": discord_user_id,
+                "side": command.side,
+                "stake_usd": command.stake_usd,
+                "query": command.query,
+                "market_ref": command.market_ref,
+                "actor": discord_user_id,
+                "source": "discord",
+            }
+            command_type = "prediction_market_bet_draft"
+        elif command.action == "confirm":
+            command_type = "prediction_market_bet_confirm"
+            payload = {"draft_id": command.draft_id, "actor": discord_user_id}
+        elif command.action == "cancel":
+            command_type = "prediction_market_bet_cancel"
+            payload = {"draft_id": command.draft_id, "actor": discord_user_id, "reason": "discord_cancel"}
+        elif command.action == "close":
+            command_type = "prediction_market_position_close"
+            payload = {"position_ref": command.position_ref, "actor": discord_user_id, "reason": "discord_manual_close"}
+        elif command.action == "settle" and command.settlement is not None:
+            command_type = "prediction_market_settlement_apply"
+            payload = command.settlement.model_copy(update={"actor": discord_user_id}).model_dump(mode="json")
+        elif command.action == "settlement_sweep":
+            command_type = "prediction_market_settlement_sweep"
+            payload = {"actor": discord_user_id}
+        else:
+            return "Unknown prediction-market paper command. No live trade was placed."
+
+        queued = await repository.enqueue_worker_command(
+            target_role=ServiceRole.TRADER.value,
+            command_type=command_type,
+            payload={key: value for key, value in payload.items() if value is not None},
+            requested_by="discord_bot",
+        )
+        return await self._prediction_market_command_response(command, queued)
+
+    async def _prediction_market_command_response(self, command: PredictionMarketDiscordCommand, queued: dict[str, Any]) -> str:
+        repository = self._repository()
+        command_id = str(queued.get("command_id") or "")
+        if repository is None or not command_id:
+            return "Prediction-market paper command was accepted, but status polling is unavailable. No live trade was placed."
+        timeout_seconds = min(30.0, max(5.0, float(getattr(self.settings, "discord_command_timeout_seconds", 30.0))))
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        current = queued
+        while asyncio.get_running_loop().time() < deadline:
+            current = await repository.get_worker_command(command_id) or current
+            status = str(current.get("status") or "")
+            if status == "completed":
+                result = current.get("result") if isinstance(current.get("result"), dict) else {}
+                return format_prediction_market_result(command, result)
+            if status in {"failed", "cancelled"}:
+                return f"Prediction-market paper command `{command_id}` {status}: {current.get('last_error') or 'unknown error'}. No live trade was placed."
+            await asyncio.sleep(1.0)
+        return f"Accepted prediction-market paper command `{command_id}`; it is still pending. Check `/commands/{command_id}`. No live trade was placed."
 
 
 def _format_paper_snapshot_dict(snapshot: dict[str, Any]) -> str:
