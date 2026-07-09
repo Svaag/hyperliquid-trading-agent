@@ -9,6 +9,7 @@ from hyperliquid_trading_agent.app.autonomy.schemas import SignalEvidence, Trade
 from hyperliquid_trading_agent.app.autonomy.service import AutonomousTradingLoopService
 from hyperliquid_trading_agent.app.config import ServiceRole, Settings
 from hyperliquid_trading_agent.app.engine.bandit import OfflineContextualBanditReporter
+from hyperliquid_trading_agent.app.engine.evidence_loop import EngineEvidenceRefreshLoopService
 from hyperliquid_trading_agent.app.engine.newswire_bridge import EngineNewsConsumer
 from hyperliquid_trading_agent.app.engine.pnl_loop import EnginePnLAttributionLoopService
 from hyperliquid_trading_agent.app.engine.replay_compare import EngineReplayComparisonService
@@ -17,6 +18,8 @@ from hyperliquid_trading_agent.app.engine.strategy_performance import refresh_st
 from hyperliquid_trading_agent.app.governance.risk_gateway import RiskGateway
 from hyperliquid_trading_agent.app.hip4.service import Hip4Service
 from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
+from hyperliquid_trading_agent.app.liquidations.signals import StoreBackedLiquidationSignalBridge
+from hyperliquid_trading_agent.app.liquidations.store import LiquidationStore
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.newswire.bus import InProcessNewswireBus
 from hyperliquid_trading_agent.app.paper.schemas import PaperTradeDraftRequest
@@ -46,6 +49,7 @@ class TraderWorker(BaseWorker):
         self._engine_service: InstitutionalEngineService | None = None
         self._engine_hyperliquid: HyperliquidClient | None = None
         self._engine_pnl_attribution: EnginePnLAttributionLoopService | None = None
+        self._engine_evidence_refresh: EngineEvidenceRefreshLoopService | None = None
         self._engine_loop_task: asyncio.Task | None = None
         self._engine_loop_last_result: dict[str, Any] | None = None
         self._engine_loop_last_error: str | None = None
@@ -56,6 +60,7 @@ class TraderWorker(BaseWorker):
     async def run(self) -> None:
         await self._start_engine_loop()
         await self._start_engine_pnl_attribution()
+        await self._start_engine_evidence_refresh()
         await self._start_engine_newsfeed()
         tasks = [asyncio.create_task(self.command_loop(self._command_handlers()), name="trader-command-loop")]
         if self._engine_loop_task is not None:
@@ -80,6 +85,7 @@ class TraderWorker(BaseWorker):
     def _command_handlers(self):
         return {
             "engine_strategy_regime_refresh": self._handle_engine_strategy_regime_refresh,
+            "engine_position_thesis_cleanup": self._handle_engine_position_thesis_cleanup,
             "engine_bandit_run": self._handle_engine_bandit_run,
             "engine_replay_comparison_run": self._handle_engine_replay_comparison_run,
             "hip4_loop_run_once": self._handle_hip4_loop_run_once,
@@ -145,6 +151,13 @@ class TraderWorker(BaseWorker):
             )
         await self._engine_pnl_attribution.start()
 
+    async def _start_engine_evidence_refresh(self) -> None:
+        if not self.settings.engine_enabled:
+            return
+        if self._engine_evidence_refresh is None:
+            self._engine_evidence_refresh = EngineEvidenceRefreshLoopService(settings=self.settings, repository=self.repository)
+        await self._engine_evidence_refresh.start()
+
     async def _run_engine_loop(self) -> None:
         interval = max(5, int(self.settings.engine_loop_interval_seconds))
         while not self._stop.is_set():
@@ -152,12 +165,20 @@ class TraderWorker(BaseWorker):
                 service = self._ensure_engine_service()
                 self._engine_loop_last_result = await service.run_once(symbols=self.settings.autonomy_core_symbols)
                 self._engine_loop_last_error = None
+                stage_ms = self._engine_loop_last_result.get("stage_ms") or {}
+                slowest_stage = max(stage_ms, key=stage_ms.get) if stage_ms else None
                 log.info(
                     "trader_engine_loop_completed",
                     candidates=self._engine_loop_last_result.get("candidates"),
                     executed=self._engine_loop_last_result.get("executed"),
                     run_count=service.run_count,
+                    duration_ms=self._engine_loop_last_result.get("duration_ms"),
+                    slowest_stage=slowest_stage,
                 )
+                try:
+                    await self._heartbeat("running")
+                except Exception:
+                    log.warning("trader_engine_loop_heartbeat_failed")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - worker resilience
@@ -172,6 +193,9 @@ class TraderWorker(BaseWorker):
         if self._engine_service is None:
             self._engine_hyperliquid = HyperliquidClient(settings=self.settings)
             risk_gateway = RiskGateway(settings=self.settings, repository=self.repository)
+            liquidation_bridge = None
+            if bool(getattr(self.settings, "engine_liquidation_features_enabled", True)) and self.sessionmaker is not None:
+                liquidation_bridge = StoreBackedLiquidationSignalBridge(LiquidationStore(self.sessionmaker))
             self._engine_service = InstitutionalEngineService(
                 settings=self.settings,
                 repository=self.repository,
@@ -179,11 +203,14 @@ class TraderWorker(BaseWorker):
                 risk_gateway=risk_gateway,
                 portfolio_service=None,
                 world_model_service=None,
-                liquidation_bridge=None,
+                liquidation_bridge=liquidation_bridge,
             )
         return self._engine_service
 
     async def _shutdown_engine_runtime(self) -> None:
+        if self._engine_evidence_refresh is not None:
+            await self._engine_evidence_refresh.stop()
+            self._engine_evidence_refresh = None
         if self._engine_pnl_attribution is not None:
             await self._engine_pnl_attribution.stop()
             self._engine_pnl_attribution = None
@@ -202,6 +229,22 @@ class TraderWorker(BaseWorker):
             limit=int(payload.get("limit") or 5000),
         )
         return self._result(command, window_start_ms=start_ms, window_end_ms=end_ms, refreshed_count=len(rows), items=rows[:50])
+
+    async def _handle_engine_position_thesis_cleanup(self, command: dict[str, Any]) -> dict[str, Any]:
+        self._record_command(command)
+        payload = self._payload(command)
+        before_ms = int(payload.get("before_ms") or 0)
+        states = [str(state) for state in payload.get("states") or ["approved"]]
+        reason = str(payload.get("reason") or "stale_position_cleanup")
+        dry_run = bool(payload.get("dry_run", True))
+        affected = await self.repository.close_stale_position_theses(
+            before_ms=before_ms,
+            states=states,
+            reason=reason,
+            limit=int(payload.get("limit") or 20000),
+            dry_run=dry_run,
+        )
+        return self._result(command, before_ms=before_ms, states=states, reason=reason, dry_run=dry_run, affected_count=affected)
 
     async def _handle_engine_bandit_run(self, command: dict[str, Any]) -> dict[str, Any]:
         self._record_command(command)
@@ -566,6 +609,7 @@ class TraderWorker(BaseWorker):
             "trader": {"command_count": self.command_count, "last_command_type": self.last_command_type, "execution_authority": "paper-only/settings-gated"},
             "engine_loop": self._engine_loop_metadata(),
             "engine_pnl_attribution": self._engine_pnl_attribution_metadata(),
+            "engine_evidence_refresh": self._engine_evidence_refresh.status() if self._engine_evidence_refresh is not None else {"enabled": False, "running": False},
             "engine_newsfeed": self._engine_newsfeed_metadata(),
         }
 

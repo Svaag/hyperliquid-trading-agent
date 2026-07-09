@@ -110,26 +110,37 @@ async def _latest_trader_engine_loop_status(repository: Any, settings: Settings,
     except TypeError:
         heartbeats = await method()
     stale_after_ms = max(1, int(settings.service_heartbeat_stale_seconds)) * 1000
+    best_stale: dict[str, Any] | None = None
     for heartbeat in heartbeats:
         if not isinstance(heartbeat, dict) or str(heartbeat.get("status") or "") != "running":
             continue
         updated_at_ms = _i(heartbeat.get("updated_at_ms"), 0)
-        if updated_at_ms and generated_at_ms - updated_at_ms > stale_after_ms:
-            continue
         metadata = heartbeat.get("metadata") if isinstance(heartbeat.get("metadata"), dict) else {}
         engine_loop = metadata.get("engine_loop") if isinstance(metadata, dict) else None
         if not isinstance(engine_loop, dict) or not engine_loop.get("enabled"):
             continue
         service = engine_loop.get("service") if isinstance(engine_loop.get("service"), dict) else {}
-        if service:
-            return {
-                **service,
-                "runtime_source": "trader_heartbeat",
-                "runtime_instance_id": heartbeat.get("instance_id"),
-                "runtime_updated_at_ms": updated_at_ms,
-                "runtime_running": bool(engine_loop.get("running")),
-            }
-    return {}
+        if not service:
+            continue
+        entry = {
+            **service,
+            "runtime_source": "trader_heartbeat",
+            "runtime_instance_id": heartbeat.get("instance_id"),
+            "runtime_updated_at_ms": updated_at_ms,
+            "runtime_running": bool(engine_loop.get("running")),
+        }
+        if updated_at_ms and generated_at_ms - updated_at_ms > stale_after_ms:
+            # Keep the freshest stale row so callers can report the true
+            # run_count/last_run instead of pretending the engine never ran;
+            # staleness itself still hard-blocks readiness elsewhere.
+            entry["runtime_stale"] = True
+            entry["runtime_age_ms"] = generated_at_ms - updated_at_ms
+            if best_stale is None or updated_at_ms > _i(best_stale.get("runtime_updated_at_ms"), 0):
+                best_stale = entry
+            continue
+        entry["runtime_stale"] = False
+        return entry
+    return best_stale or {}
 
 
 async def _engine_service_status(repository: Any, settings: Settings, engine_service: Any | None, *, generated_at_ms: int) -> dict[str, Any]:
@@ -262,6 +273,10 @@ async def build_paper_readiness_scorecard(
         "runtime_instance_id": service_status.get("runtime_instance_id"),
         "runtime_updated_at_ms": service_status.get("runtime_updated_at_ms"),
         "runtime_running": service_status.get("runtime_running"),
+        "runtime_stale": service_status.get("runtime_stale"),
+        "runtime_age_ms": service_status.get("runtime_age_ms"),
+        "last_run_duration_ms": service_status.get("last_run_duration_ms"),
+        "last_stage_ms": service_status.get("last_stage_ms"),
     }
 
     # Data completeness for core symbols.
@@ -566,7 +581,7 @@ async def build_paper_readiness_scorecard(
             hard_blocks.append(_issue("replay_comparison_failed", f"latest engine replay {latest_replay.get('replay_id')} status={replay_status}."))
         if replay_window_hours and replay_window_hours < settings.engine_readiness_min_replay_window_hours:
             hard_blocks.append(_issue("replay_comparison_stale", f"Replay window {replay_window_hours}h below required {settings.engine_readiness_min_replay_window_hours}h."))
-        if replay_sample_size and replay_sample_size < settings.engine_readiness_min_replay_sample_size:
+        if replay_sample_size < settings.engine_readiness_min_replay_sample_size:
             hard_blocks.append(_issue("replay_comparison_stale", f"Replay sample size {replay_sample_size} below required {settings.engine_readiness_min_replay_sample_size}."))
     elif replay_required:
         hard_blocks.append(_issue("replay_comparison_missing", "No engine shadow replay comparison artifact exists."))

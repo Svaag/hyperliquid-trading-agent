@@ -1042,6 +1042,7 @@ class FeatureValueRecord(TimestampMixin, Base):
     __tablename__ = "feature_values"
     __table_args__ = (
         Index("ix_feature_values_asset_feature_computed", "asset", "feature_name", "computed_ts_ms"),
+        Index("ix_feature_values_asset_computed", "asset", "computed_ts_ms"),
         Index("ix_feature_values_source_event", "source_event_id"),
         Index("ix_feature_values_group_computed", "feature_group", "computed_ts_ms"),
     )

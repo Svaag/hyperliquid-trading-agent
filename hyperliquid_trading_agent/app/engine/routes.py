@@ -30,6 +30,14 @@ class EngineBanditRecommendationRunRequest(BaseModel):
     window_hours: int = Field(default=24 * 7, ge=1, le=24 * 180)
 
 
+class EnginePositionThesisCleanupRequest(BaseModel):
+    before_ms: int = Field(ge=1)
+    states: list[str] = Field(default_factory=lambda: ["approved"])
+    reason: str = Field(default="stale_position_cleanup", max_length=96)
+    limit: int = Field(default=20000, ge=1, le=100_000)
+    dry_run: bool = True
+
+
 class EngineReplayComparisonRequest(BaseModel):
     window_hours: int = Field(default=24, ge=1, le=24 * 30)
     universe: list[str] = Field(default_factory=list)
@@ -301,6 +309,12 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
     async def engine_strategy_regime_performance_refresh(request: EngineStrategyRegimeRefreshRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _auth(authorization)
         command = await _enqueue_command(_repo(), target_role="trader", command_type="engine_strategy_regime_refresh", payload=request.model_dump(mode="json"))
+        return _accepted_command(command)
+
+    @app.post("/engine/position-theses/cleanup")
+    async def engine_position_thesis_cleanup(request: EnginePositionThesisCleanupRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _auth(authorization)
+        command = await _enqueue_command(_repo(), target_role="trader", command_type="engine_position_thesis_cleanup", payload=request.model_dump(mode="json"))
         return _accepted_command(command)
 
     @app.get("/engine/candidate-trade-packets")

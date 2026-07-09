@@ -181,3 +181,27 @@ def test_defensive_flat_never_allocates_intent_size():
         assert allocation.allocated_notional_usd == 0.0
 
     anyio.run(run)
+
+def test_funding_carry_v1_1_uses_relative_p90_gate_with_cold_start_fallback():
+    base = {"mid": 100.0, "realized_vol_15m_bps": 55.0}
+    regime = _regime(funding_state="positive_extreme")
+
+    # With p90 evidence: fires when |funding| clears max(floor, p90).
+    fired = FundingCarryStrategy().generate(
+        _snapshot({**base, "funding_hourly": 6e-5, "funding_abs_p90_24h": 5.5e-5}), regime, timestamp_ms=10_000
+    )
+    assert len(fired) == 1
+    assert fired[0].side == "short"
+    assert fired[0].metadata["funding_gate"] == 5.5e-5
+
+    # Below the floor even when p90 is tiny: stays silent.
+    assert (
+        FundingCarryStrategy().generate(
+            _snapshot({**base, "funding_hourly": 2e-5, "funding_abs_p90_24h": 1e-5}), regime, timestamp_ms=10_000
+        )
+        == []
+    )
+
+    # Cold start (no p90 feature yet): legacy 1e-4 gate is unchanged.
+    assert FundingCarryStrategy().generate(_snapshot({**base, "funding_hourly": 6e-5}), regime, timestamp_ms=10_000) == []
+    assert len(FundingCarryStrategy().generate(_snapshot({**base, "funding_hourly": 2e-4}), regime, timestamp_ms=10_000)) == 1

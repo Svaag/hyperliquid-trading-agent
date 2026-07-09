@@ -373,3 +373,59 @@ def test_engine_readiness_route_is_registered():
     preflight = client.get("/engine/paper-signoff/preflight", params={"symbols": "BTC,ETH", "window_hours": 1, "limit": 100})
     assert preflight.status_code == 200
     assert preflight.json()["ready_for_paper_signoff"] is True
+
+def test_paper_readiness_surfaces_stale_trader_heartbeat_with_true_run_count():
+    now_ms = int(time.time() * 1000)
+    repo = FakeReadinessRepository(now_ms=now_ms)
+    stale_updated = now_ms - 600_000
+    repo.heartbeats = [
+        {
+            "service_role": "trader",
+            "instance_id": "trader-1",
+            "status": "running",
+            "updated_at_ms": stale_updated,
+            "metadata": {
+                "engine_loop": {
+                    "enabled": True,
+                    "running": True,
+                    "service": {"enabled": True, "run_count": 756, "last_run_at_ms": stale_updated, "last_error": None},
+                }
+            },
+        }
+    ]
+    settings = readiness_settings()
+
+    async def run():
+        return await build_paper_readiness_scorecard(repo, settings, PassiveReadinessService(), window_hours=1, limit=100)
+
+    scorecard = anyio.run(run)
+    reliability = scorecard["checks"]["engine_reliability"]
+
+    assert reliability["run_count"] == 756
+    assert reliability["runtime_stale"] is True
+    assert reliability["runtime_age_ms"] >= 600_000
+    assert "engine_loop_stale" in {block["code"] for block in scorecard["hard_blocks"]}
+    assert scorecard["ready_for_paper"] is False
+
+def test_paper_readiness_blocks_zero_sample_replay_artifact():
+    now_ms = int(time.time() * 1000)
+    repo = FakeReadinessRepository(now_ms=now_ms)
+    repo.replay_results = [
+        {
+            "replay_id": "ereplay_zero",
+            "proposal_id": "engine:test",
+            "status": "advisory_pass",
+            "candidate_metrics": {"candidate_count": 0},
+            "created_at_ms": now_ms - 1000,
+            "metadata": {"artifact_type": "engine_shadow_comparison", "data_window": {"start_ms": now_ms - 60 * 60 * 1000, "end_ms": now_ms}, "verdict": "baseline_equivalence"},
+        }
+    ]
+    settings = readiness_settings()
+
+    async def run():
+        return await build_paper_readiness_scorecard(repo, settings, FakeReadinessService(now_ms=now_ms), window_hours=1, limit=100)
+
+    scorecard = anyio.run(run)
+
+    assert "replay_comparison_stale" in {block["code"] for block in scorecard["hard_blocks"]}
+    assert scorecard["ready_for_paper"] is False

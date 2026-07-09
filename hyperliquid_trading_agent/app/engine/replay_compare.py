@@ -61,12 +61,16 @@ class EngineReplayComparisonService:
         candidate_config = self._normalize_config(candidate_config)
         universe = [symbol.upper() for symbol in universe]
         dataset_id = dataset_id or dataset_id_for_window(start_ms=window_start_ms, end_ms=window_end_ms, universe=universe, config_hash=stable_hash(baseline_config))
-        candidates = await self.repository.list_alpha_candidates(limit=5000)
-        evs = await self.repository.list_ev_estimates(limit=5000)
-        reports = await self.repository.list_execution_reports(limit=5000)
-        risk_rejects = await self.repository.list_risk_gateway_decisions(limit=5000, decision="reject")
-        pnl = await self.repository.list_pnl_attribution(limit=5000)
-        outcomes = await _list_candidate_outcomes(self.repository, limit=5000)
+        # Window at the query layer so newest-first fetch limits cannot silently
+        # truncate the comparison window; in-memory refiltering below stays for
+        # repositories that ignore the window kwargs.
+        window = {"since_ms": window_start_ms, "until_ms": window_end_ms}
+        candidates = await _list_windowed(self.repository.list_alpha_candidates, limit=5000, **window)
+        evs = await _list_windowed(self.repository.list_ev_estimates, limit=5000, **window)
+        reports = await _list_windowed(self.repository.list_execution_reports, limit=5000, **window)
+        risk_rejects = await _list_windowed(self.repository.list_risk_gateway_decisions, limit=5000, decision="reject", **window)
+        pnl = await _list_windowed(self.repository.list_pnl_attribution, limit=5000, **window)
+        outcomes = await _list_candidate_outcomes(self.repository, limit=5000, **window)
         candidates = [item for item in candidates if window_start_ms <= int(item.get("created_at_ms") or 0) <= window_end_ms and (not universe or str(item.get("asset") or "").upper() in universe)]
         ev_by_candidate = {str(item.get("candidate_id")): item for item in evs if window_start_ms <= int(item.get("created_at_ms") or 0) <= window_end_ms}
         reports = [item for item in reports if window_start_ms <= int(item.get("created_at_ms") or 0) <= window_end_ms]
@@ -76,8 +80,24 @@ class EngineReplayComparisonService:
         baseline_metrics = self._metrics_for_config(candidates, ev_by_candidate, reports, risk_rejects, pnl, outcomes, baseline_config)
         candidate_metrics = self._metrics_for_config(candidates, ev_by_candidate, reports, risk_rejects, pnl, outcomes, candidate_config)
         diffs = _diff_metrics(baseline_metrics, candidate_metrics)
-        verdict = _verdict(baseline_metrics, candidate_metrics, diffs, self.settings.engine_readiness_max_strategy_allocation_share_pct)
-        status = "passed" if verdict == "candidate_better" else "failed" if verdict == "candidate_worse" else "advisory_pass"
+        dominance_cap_pct = self.settings.engine_readiness_max_strategy_allocation_share_pct
+        min_sample = max(1, int(getattr(self.settings, "engine_replay_min_sample_candidates", 50)))
+        if len(candidates) < min_sample or int(baseline_metrics.get("allocated_count") or 0) == 0:
+            # An empty or thin window cannot fail nor pass a config; the old
+            # behavior scored it "candidate_worse" and blocked readiness with a
+            # misleading verdict.
+            verdict = "insufficient_data"
+            status = "insufficient_data"
+        elif stable_hash(baseline_config) == stable_hash(candidate_config):
+            if float(candidate_metrics.get("dominant_strategy_share_pct") or 0.0) <= dominance_cap_pct:
+                verdict = "baseline_equivalence"
+                status = "advisory_pass"
+            else:
+                verdict = "dominance_cap_breach"
+                status = "failed"
+        else:
+            verdict = _verdict(baseline_metrics, candidate_metrics, diffs, dominance_cap_pct)
+            status = "passed" if verdict == "candidate_better" else "failed" if verdict == "candidate_worse" else "advisory_pass"
         promotion_decision = "eligible_for_review" if status in {"passed", "advisory_pass"} else "do_not_promote"
         ts = _now_ms()
         replay_id = "ereplay_" + stable_hash({"variant_id": variant_id, "dataset_id": dataset_id, "ts": ts})
@@ -232,12 +252,21 @@ async def latest_engine_replay_comparison(repository: Any) -> dict[str, Any] | N
     return items[0] if items else None
 
 
-async def _list_candidate_outcomes(repository: Any, *, limit: int) -> list[dict[str, Any]]:
+async def _list_windowed(method: Any, *, limit: int, **kwargs: Any) -> list[dict[str, Any]]:
+    try:
+        return await method(limit=limit, **kwargs)
+    except TypeError:
+        kwargs.pop("since_ms", None)
+        kwargs.pop("until_ms", None)
+        return await method(limit=limit, **kwargs)
+
+
+async def _list_candidate_outcomes(repository: Any, *, limit: int, **kwargs: Any) -> list[dict[str, Any]]:
     method = getattr(repository, "list_candidate_outcome_attributions", None)
     if not callable(method):
         return []
     try:
-        return await method(limit=limit)
+        return await _list_windowed(method, limit=limit, **kwargs)
     except TypeError:
         return await method()
 

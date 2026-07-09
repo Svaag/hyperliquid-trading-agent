@@ -133,3 +133,37 @@ def test_engine_validation_monitor_detects_bad_shadow_conditions_and_posts_diges
     assert "missing_feature_or_regime_data" in alert_types
     assert sink.messages
     assert service.status()["digest_count"] == 1
+
+def test_engine_validation_monitor_alerts_on_loop_duration_overrun():
+    settings = Settings(
+        engine_enabled=True,
+        engine_paper_enabled=False,
+        engine_shadow_enabled=True,
+        engine_execution_modes="shadow",
+        autonomy_core_universe="BTC,ETH",
+        autonomy_alert_channel_id="alerts",
+        engine_loop_interval_seconds=60,
+    )
+    repo = FakeMonitorRepository()
+    service = EngineValidationMonitorService(
+        settings=settings,
+        repository=repo,
+        engine_service=FakeEngineService(
+            {
+                "run_count": 5,
+                "last_error": None,
+                "last_run_at_ms": repo.now,
+                "last_run_duration_ms": 200_000.0,
+                "last_stage_ms": {"meta_asset_ctxs": 150_000.0, "l2_books": 1_000.0},
+            }
+        ),
+        alert_sink=FakeSink(),
+    )
+
+    async def run():
+        return await service.run_once(post=False)
+
+    result = anyio.run(run)
+    overruns = [item for item in result["alerts"] if item["type"] == "engine_loop_duration_overrun"]
+    assert overruns and overruns[0]["severity"] == "critical"
+    assert "slowest_stage=meta_asset_ctxs" in overruns[0]["detail"]

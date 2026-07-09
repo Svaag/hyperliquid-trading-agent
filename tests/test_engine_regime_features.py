@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from hyperliquid_trading_agent.app.engine.feature_store import derive_features, derive_rolling_features
+import anyio
+
+from hyperliquid_trading_agent.app.engine.feature_store import FeatureStore, derive_features, derive_rolling_features
 from hyperliquid_trading_agent.app.engine.regime import RegimeEngine
 from hyperliquid_trading_agent.app.engine.schemas import FeatureValue, NormalizedEvent
 
@@ -91,6 +93,46 @@ def test_rolling_features_are_deterministic():
     assert round(rollups["mid_return_5m_bps"], 2) == 300.0
     assert round(rollups["oi_delta_5m_pct"], 2) == 50.0
     assert "oi_velocity_z" in rollups
+
+
+def test_store_rollups_match_list_based_rollups():
+    points = [
+        _feature("mid", 100, ts=0),
+        _feature("mid", 101, ts=60_000),
+        _feature("mid", 99, ts=180_000),
+        _feature("mid", 103, ts=300_000),
+        _feature("open_interest", 1_000, ts=0),
+        _feature("open_interest", 1_050, ts=120_000),
+        _feature("open_interest", 1_200, ts=300_000),
+        _feature("top_depth_usd", 1_000_000, ts=0),
+        _feature("top_depth_usd", 800_000, ts=300_000),
+        _feature("spread_bps", 4, ts=0),
+        _feature("spread_bps", 6, ts=300_000),
+        _feature("perp_basis_bps", 10, ts=0),
+        _feature("perp_basis_bps", 16, ts=300_000),
+        _feature("funding_hourly", 0.0001, ts=0),
+        _feature("funding_hourly", 0.00013, ts=300_000),
+        _feature("day_volume_usd", 100_000_000, ts=300_000),
+    ]
+    expected = {feature.feature_name: feature.scalar_value for feature in derive_rolling_features(asset="BTC", features=points, as_of_ms=300_000)}
+
+    async def run():
+        store = FeatureStore()
+        for point in points:
+            await store.record(point)
+        return {feature.feature_name: feature.scalar_value for feature in store._rollups_for("BTC", as_of_ms=300_000)}
+
+    assert anyio.run(run) == expected
+
+
+def test_funding_abs_p90_rollup_requires_full_trailing_sample():
+    hourly = [_feature("funding_hourly", (idx + 1) * 1e-5 * (-1 if idx % 2 else 1), ts=idx * 3_600_000) for idx in range(25)]
+    cutoff = 24 * 3_600_000
+    rollups = {feature.feature_name: feature.scalar_value for feature in derive_rolling_features(asset="BTC", features=hourly, as_of_ms=cutoff)}
+    assert abs(rollups["funding_abs_p90_24h"] - 23e-5) < 1e-12
+
+    sparse = {feature.feature_name for feature in derive_rolling_features(asset="BTC", features=hourly[:20], as_of_ms=cutoff)}
+    assert "funding_abs_p90_24h" not in sparse
 
 
 def test_wave_catalog_rollups_and_cross_venue_features_are_deterministic_and_gated():

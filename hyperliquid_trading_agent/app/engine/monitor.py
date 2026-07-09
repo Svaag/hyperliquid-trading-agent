@@ -7,7 +7,7 @@ from typing import Any
 from hyperliquid_trading_agent.app.autonomy.discord import AutonomyAlertSink
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.discord_bot import _chunk
-from hyperliquid_trading_agent.app.engine.readiness import build_paper_readiness_scorecard
+from hyperliquid_trading_agent.app.engine.readiness import _latest_trader_engine_loop_status, build_paper_readiness_scorecard
 from hyperliquid_trading_agent.app.engine.replay_compare import latest_engine_replay_comparison
 from hyperliquid_trading_agent.app.engine.validation_report import build_engine_validation_report
 from hyperliquid_trading_agent.app.logging import get_logger
@@ -89,7 +89,7 @@ class EngineValidationMonitorService:
         self.alert_count += len(alerts)
         for alert in alerts:
             ENGINE_VALIDATION_ALERTS.labels(alert_type=str(alert.get("type") or "unknown")).inc()
-        message = format_engine_validation_digest(report, alerts, settings=self.settings, service_status=self._engine_status(), readiness=readiness, latest_replay=latest_replay)
+        message = format_engine_validation_digest(report, alerts, settings=self.settings, service_status=await self._engine_status(), readiness=readiness, latest_replay=latest_replay)
         if post:
             await self._send(message)
             self.last_digest_at_ms = _now_ms()
@@ -125,7 +125,7 @@ class EngineValidationMonitorService:
     async def _detect_alerts(self, report: dict[str, Any]) -> list[dict[str, Any]]:
         alerts: list[dict[str, Any]] = []
         now = _now_ms()
-        service_status = self._engine_status()
+        service_status = await self._engine_status()
         last_run_at = service_status.get("last_run_at_ms")
         stale_after_ms = max(1, self.settings.engine_validation_alert_stale_loop_seconds) * 1000
         if self.settings.engine_enabled and (not last_run_at or now - int(last_run_at) > stale_after_ms):
@@ -139,6 +139,18 @@ class EngineValidationMonitorService:
                 )
         if service_status.get("last_error"):
             alerts.append({"type": "engine_loop_error", "severity": "critical", "detail": str(service_status.get("last_error"))})
+        duration_ms = service_status.get("last_run_duration_ms")
+        interval_ms = max(5, int(self.settings.engine_loop_interval_seconds)) * 1000
+        if duration_ms is not None and float(duration_ms) > interval_ms:
+            stage_ms = service_status.get("last_stage_ms") if isinstance(service_status.get("last_stage_ms"), dict) else {}
+            slowest_stage = max(stage_ms, key=stage_ms.get) if stage_ms else "unknown"
+            alerts.append(
+                {
+                    "type": "engine_loop_duration_overrun",
+                    "severity": "critical" if float(duration_ms) > 3 * interval_ms else "warning",
+                    "detail": f"last_run_duration_ms={duration_ms} interval_ms={interval_ms} slowest_stage={slowest_stage}",
+                }
+            )
 
         shadow_only = self.settings.engine_shadow_enabled and not self.settings.engine_paper_enabled and self.settings.engine_execution_mode_list == ["shadow"]
         if shadow_only:
@@ -208,10 +220,16 @@ class EngineValidationMonitorService:
                     missing.append(f"{asset}: latest regime stale by {(now_ms - as_of_ms) // 1000}s")
         return missing
 
-    def _engine_status(self) -> dict[str, Any]:
+    async def _engine_status(self) -> dict[str, Any]:
+        local: dict[str, Any] = {}
         if self.engine_service is not None and callable(getattr(self.engine_service, "status", None)):
-            return self.engine_service.status()
-        return {}
+            local = self.engine_service.status()
+        if int(local.get("run_count") or 0) > 0 or local.get("last_run_at_ms"):
+            return local
+        # This process may not host the engine loop (role split); fall back to
+        # the trader heartbeat runtime the readiness scorecard uses.
+        runtime = await _latest_trader_engine_loop_status(self.repository, self.settings, generated_at_ms=_now_ms())
+        return runtime or local
 
 
 def format_engine_validation_digest(

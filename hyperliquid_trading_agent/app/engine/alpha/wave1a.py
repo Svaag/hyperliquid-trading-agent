@@ -185,9 +185,17 @@ class LiquidationMeanRevertStrategy:
 
 
 class FundingCarryStrategy:
+    # Absolute floor for the relative gate: ~5e-5/hr (~44% APR) is genuinely
+    # stressed funding, unlike the legacy 1e-4 (~87% APR) which never fired on
+    # the core universe. The trailing-24h p90 keeps the gate relative to each
+    # asset's own funding distribution; without that evidence we fall back to
+    # the legacy absolute gate so cold-start behavior is unchanged.
+    FUNDING_FLOOR = 5e-5
+    LEGACY_FUNDING_GATE = 1e-4
+
     spec = StrategySpec(
         strategy_id="funding_carry_v1",
-        version="1.0.0",
+        version="1.1.0",
         family="funding_basis",
         supported_assets=CORE_CRYPTO_ASSETS,
         supported_venues=HYPERLIQUID_VENUES,
@@ -209,7 +217,9 @@ class FundingCarryStrategy:
         vol_15m = _float(snapshot.features.get("realized_vol_15m_bps"))
         if mid is None or mid <= 0 or funding is None or vol_15m is None:
             return []
-        if abs(funding) < 0.0001 or regime.volatility_state == "extreme" or vol_15m > 180:
+        funding_abs_p90 = _float(snapshot.features.get("funding_abs_p90_24h"))
+        funding_gate = max(self.FUNDING_FLOOR, funding_abs_p90) if funding_abs_p90 is not None else self.LEGACY_FUNDING_GATE
+        if abs(funding) < funding_gate or regime.volatility_state == "extreme" or vol_15m > 180:
             return []
         side = "short" if funding > 0 else "long"
         if side == "short" and regime.trend_state == "bull" and regime.trend_confidence > 0.75:
@@ -234,7 +244,7 @@ class FundingCarryStrategy:
                 confidence=min(0.88, 0.34 + score / 180.0),
                 thesis=f"{snapshot.asset} {side} funding carry: hourly funding {funding:.5f}, volatility {vol_15m:.1f} bps.",
                 invalidation=["Funding normalizes", "Directional trend risk overwhelms carry", f"Price trades through {stop:.6g}"],
-                metadata={"funding_hourly": funding, "realized_vol_15m_bps": vol_15m, "expected_funding_cost_bps": -funding_edge_bps},
+                metadata={"funding_hourly": funding, "realized_vol_15m_bps": vol_15m, "expected_funding_cost_bps": -funding_edge_bps, "funding_gate": funding_gate, "funding_abs_p90_24h": funding_abs_p90},
                 expected_edge_bps=funding_edge_bps,
             )
         ]

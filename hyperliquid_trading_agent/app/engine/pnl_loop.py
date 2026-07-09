@@ -75,18 +75,40 @@ class EnginePnLAttributionLoopService:
     async def run_once(self) -> dict[str, Any]:
         ts = _now_ms()
         mids = await self._safe_all_mids()
-        positions = await self.repository.list_position_theses(limit=1000)
-        active = [item for item in positions if item.get("position_state") in {"open", "approved", "de_risking", "trailing", "time_stop_pending"}]
+        max_age_ms = max(1, self.settings.engine_pnl_attribution_max_position_age_hours) * 60 * 60 * 1000
+        # Scan per active state so a large backlog in one state (e.g. stale
+        # "approved" theses) cannot shadow the others within the fetch limit.
+        active: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for state in ("open", "approved", "de_risking", "trailing", "time_stop_pending"):
+            for item in await self.repository.list_position_theses(state=state, limit=1000):
+                position_id = str(item.get("position_id") or "")
+                if position_id and position_id not in seen_ids:
+                    seen_ids.add(position_id)
+                    active.append(item)
         created = 0
         closed = 0
         matured_outcomes = await self.candidate_outcomes.refresh_matured_outcomes(marks=mids, timestamp_ms=ts, limit=5000)
+        reports_by_id = {str(report.get("report_id")): report for report in await self.repository.list_execution_reports(limit=1000)}
+        last_window_end: dict[str, int] = {}
+        for record in await self.repository.list_pnl_attribution(limit=1000):
+            record_position_id = str(record.get("position_id") or "")
+            window_end = int(record.get("window_end_ms") or 0)
+            if record_position_id and window_end > last_window_end.get(record_position_id, 0):
+                last_window_end[record_position_id] = window_end
         for position in active:
             asset = str(position.get("asset") or "").upper()
             mark_px = _f(mids.get(asset))
-            if mark_px <= 0:
+            report = self._position_report(position, reports_by_id)
+            # Age out first: expiry must not depend on a mark or execution
+            # report still being retrievable, or stale positions live forever.
+            opened = int(position.get("opened_at_ms") or position.get("updated_at_ms") or ts)
+            if ts - opened > max_age_ms:
+                reasons = ["max_age"] if report is not None else ["max_age", "missing_execution_report"]
+                await self._close_position(position, ts, reasons)
+                closed += 1
                 continue
-            report = await self._first_execution_report(position)
-            if report is None:
+            if mark_px <= 0 or report is None:
                 continue
             entry_px, size, fees_usd, slippage_bps = self._execution_inputs(report)
             if entry_px <= 0 or size <= 0:
@@ -96,7 +118,7 @@ class EnginePnLAttributionLoopService:
             notional = entry_px * size
             slippage_cost = abs(notional) * slippage_bps / 10_000
             total = gross - fees_usd - slippage_cost
-            window_start = await self._window_start(position, ts)
+            window_start = last_window_end.get(str(position.get("position_id") or "")) or int(position.get("opened_at_ms") or position.get("updated_at_ms") or ts)
             attribution = {
                 "attribution_id": _attr_id(position, window_start, ts),
                 "position_id": position.get("position_id"),
@@ -129,14 +151,7 @@ class EnginePnLAttributionLoopService:
             self.positions_marked += 1
             close_reason = self._close_reason(position, mark_px, ts)
             if close_reason:
-                updated = {
-                    **position,
-                    "position_state": "closed",
-                    "closed_at_ms": ts,
-                    "updated_at_ms": ts,
-                    "degradation_reasons": [*(position.get("degradation_reasons") or []), close_reason],
-                }
-                await self.repository.record_position_thesis(updated)
+                await self._close_position(position, ts, [close_reason])
                 closed += 1
         self.last_run_at_ms = ts
         self.records_created += created
@@ -149,14 +164,22 @@ class EnginePnLAttributionLoopService:
         except Exception:
             return {}
 
-    async def _first_execution_report(self, position: dict[str, Any]) -> dict[str, Any] | None:
-        report_ids = list(position.get("execution_report_ids") or [])
-        reports = await self.repository.list_execution_reports(limit=1000)
-        for report_id in report_ids:
-            for report in reports:
-                if report.get("report_id") == report_id:
-                    return report
+    def _position_report(self, position: dict[str, Any], reports_by_id: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+        for report_id in position.get("execution_report_ids") or []:
+            report = reports_by_id.get(str(report_id))
+            if report is not None:
+                return report
         return None
+
+    async def _close_position(self, position: dict[str, Any], ts: int, reasons: list[str]) -> None:
+        updated = {
+            **position,
+            "position_state": "closed",
+            "closed_at_ms": ts,
+            "updated_at_ms": ts,
+            "degradation_reasons": [*(position.get("degradation_reasons") or []), *reasons],
+        }
+        await self.repository.record_position_thesis(updated)
 
     def _execution_inputs(self, report: dict[str, Any]) -> tuple[float, float, float, float]:
         assumptions = report.get("assumptions") or {}
@@ -166,14 +189,6 @@ class EnginePnLAttributionLoopService:
         if entry_px <= 0 and size > 0:
             entry_px = _f(would_submit.get("target_notional_usd")) / size
         return entry_px, size, _f(report.get("fees_usd")), _f(report.get("slippage_bps"))
-
-    async def _window_start(self, position: dict[str, Any], now_ms: int) -> int:
-        records = await self.repository.list_pnl_attribution(limit=1000)
-        position_id = position.get("position_id")
-        previous = [item for item in records if item.get("position_id") == position_id]
-        if previous:
-            return max(int(item.get("window_end_ms") or 0) for item in previous)
-        return int(position.get("opened_at_ms") or position.get("updated_at_ms") or now_ms)
 
     def _close_reason(self, position: dict[str, Any], mark_px: float, now_ms: int) -> str | None:
         side = str(position.get("side") or "long")
@@ -189,9 +204,6 @@ class EnginePnLAttributionLoopService:
                 return "target_hit"
             if side == "short" and mark_px <= first_target:
                 return "target_hit"
-        opened = int(position.get("opened_at_ms") or position.get("updated_at_ms") or now_ms)
-        if now_ms - opened > max(1, self.settings.engine_pnl_attribution_max_position_age_hours) * 60 * 60 * 1000:
-            return "max_age"
         return None
 
 

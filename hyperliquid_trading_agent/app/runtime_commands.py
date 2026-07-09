@@ -80,6 +80,15 @@ COMMAND_SPECS: tuple[WorkerCommandSpec, ...] = (
         handler_status="implemented",
     ),
     WorkerCommandSpec(
+        "engine_position_thesis_cleanup",
+        ServiceRole.TRADER,
+        "_handle_engine_position_thesis_cleanup",
+        ("POST /engine/position-theses/cleanup",),
+        "Bulk-close stale shadow/paper position theses opened before a cutoff.",
+        external_side_effect="db_write",
+        handler_status="implemented",
+    ),
+    WorkerCommandSpec(
         "engine_bandit_run",
         ServiceRole.TRADER,
         "_handle_engine_bandit_run",

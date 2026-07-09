@@ -809,7 +809,13 @@ class Repository:
             log.warning("risk_gateway_decision_record_failed", intent_id=decision.get("intent_id"), error=type(exc).__name__)
             return None
 
-    async def list_risk_gateway_decisions(self, limit: int = 100, decision: str | None = None) -> list[dict[str, Any]]:
+    async def list_risk_gateway_decisions(
+        self,
+        limit: int = 100,
+        decision: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         try:
@@ -817,6 +823,10 @@ class Repository:
                 stmt = select(RiskGatewayDecisionRecord).order_by(RiskGatewayDecisionRecord.created_at_ms.desc()).limit(limit)
                 if decision:
                     stmt = stmt.where(RiskGatewayDecisionRecord.decision == decision)
+                if since_ms is not None:
+                    stmt = stmt.where(RiskGatewayDecisionRecord.created_at_ms >= int(since_ms))
+                if until_ms is not None:
+                    stmt = stmt.where(RiskGatewayDecisionRecord.created_at_ms <= int(until_ms))
                 result = await session.execute(stmt)
                 return [_risk_gateway_decision_to_dict(item) for item in result.scalars().all()]
         except Exception as exc:  # pragma: no cover
@@ -1222,12 +1232,24 @@ class Repository:
     async def get_alpha_candidate(self, candidate_id: str) -> dict[str, Any] | None:
         return await self._get_engine_record(AlphaCandidateRecord, candidate_id)
 
-    async def list_alpha_candidates(self, *, status: str | None = None, asset: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_alpha_candidates(
+        self,
+        *,
+        status: str | None = None,
+        asset: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
         filters = []
         if status:
             filters.append(AlphaCandidateRecord.status == status)
         if asset:
             filters.append(AlphaCandidateRecord.asset == asset.upper())
+        if since_ms is not None:
+            filters.append(AlphaCandidateRecord.created_at_ms >= int(since_ms))
+        if until_ms is not None:
+            filters.append(AlphaCandidateRecord.created_at_ms <= int(until_ms))
         return await self._list_engine_records(AlphaCandidateRecord, order_by=AlphaCandidateRecord.created_at_ms, limit=limit, filters=filters)
 
     async def record_candidate_book_snapshot(self, snapshot: dict[str, Any]) -> str | None:
@@ -1277,8 +1299,19 @@ class Repository:
             "estimate_id",
         )
 
-    async def list_ev_estimates(self, *, candidate_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_ev_estimates(
+        self,
+        *,
+        candidate_id: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
         filters = [EVEstimateRecord.candidate_id == candidate_id] if candidate_id else []
+        if since_ms is not None:
+            filters.append(EVEstimateRecord.created_at_ms >= int(since_ms))
+        if until_ms is not None:
+            filters.append(EVEstimateRecord.created_at_ms <= int(until_ms))
         return await self._list_engine_records(EVEstimateRecord, order_by=EVEstimateRecord.created_at_ms, limit=limit, filters=filters)
 
     async def record_allocation_decision(self, allocation: dict[str, Any]) -> str | None:
@@ -1446,6 +1479,8 @@ class Repository:
         strategy_id: str | None = None,
         outcome_window: str | None = None,
         terminal_state: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         filters = []
@@ -1457,6 +1492,10 @@ class Repository:
             filters.append(CandidateOutcomeAttributionRecord.outcome_window == outcome_window)
         if terminal_state:
             filters.append(CandidateOutcomeAttributionRecord.terminal_state == terminal_state)
+        if since_ms is not None:
+            filters.append(CandidateOutcomeAttributionRecord.window_end_ms >= int(since_ms))
+        if until_ms is not None:
+            filters.append(CandidateOutcomeAttributionRecord.window_end_ms <= int(until_ms))
         return await self._list_engine_records(CandidateOutcomeAttributionRecord, order_by=CandidateOutcomeAttributionRecord.window_end_ms, limit=limit, filters=filters)
 
     async def list_due_candidate_outcome_attributions(self, *, timestamp_ms: int, limit: int = 1000) -> list[dict[str, Any]]:
@@ -1775,8 +1814,19 @@ class Repository:
             "report_id",
         )
 
-    async def list_execution_reports(self, *, intent_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_execution_reports(
+        self,
+        *,
+        intent_id: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
         filters = [ExecutionReportRecord.intent_id == intent_id] if intent_id else []
+        if since_ms is not None:
+            filters.append(ExecutionReportRecord.created_at_ms >= int(since_ms))
+        if until_ms is not None:
+            filters.append(ExecutionReportRecord.created_at_ms <= int(until_ms))
         return await self._list_engine_records(ExecutionReportRecord, order_by=ExecutionReportRecord.created_at_ms, limit=limit, filters=filters)
 
     async def record_position_thesis(self, thesis: dict[str, Any]) -> str | None:
@@ -1814,6 +1864,42 @@ class Repository:
         if asset:
             filters.append(PositionThesisRecord.asset == asset.upper())
         return await self._list_engine_records(PositionThesisRecord, order_by=PositionThesisRecord.updated_at_ms, limit=limit, filters=filters)
+
+    async def close_stale_position_theses(
+        self,
+        *,
+        before_ms: int,
+        states: list[str],
+        reason: str,
+        limit: int = 20000,
+        dry_run: bool = False,
+    ) -> int:
+        """Bulk-close position theses opened before a cutoff (era cleanup)."""
+
+        if self.sessionmaker is None:
+            return 0
+        normalized_states = [str(state) for state in states if str(state or "").strip()]
+        if not normalized_states or int(before_ms) <= 0:
+            return 0
+        now_ms = _runtime_now_ms()
+        async with self.sessionmaker() as session:
+            stmt = (
+                select(PositionThesisRecord)
+                .where(PositionThesisRecord.position_state.in_(normalized_states))
+                .where(func.coalesce(PositionThesisRecord.opened_at_ms, PositionThesisRecord.updated_at_ms) < int(before_ms))
+                .order_by(PositionThesisRecord.updated_at_ms)
+                .limit(max(1, int(limit)))
+            )
+            records = list((await session.execute(stmt)).scalars().all())
+            if dry_run:
+                return len(records)
+            for record in records:
+                record.position_state = "closed"
+                record.closed_at_ms = now_ms
+                record.updated_at_ms = now_ms
+                record.degradation_reasons_json = [*(record.degradation_reasons_json or []), str(reason)]
+            await session.commit()
+            return len(records)
 
     async def record_reconciliation_run(self, run: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -1858,12 +1944,24 @@ class Repository:
             "attribution_id",
         )
 
-    async def list_pnl_attribution(self, *, strategy_id: str | None = None, asset: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_pnl_attribution(
+        self,
+        *,
+        strategy_id: str | None = None,
+        asset: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
         filters = []
         if strategy_id:
             filters.append(PnLAttributionRecord.strategy_id == strategy_id)
         if asset:
             filters.append(PnLAttributionRecord.asset == asset.upper())
+        if since_ms is not None:
+            filters.append(PnLAttributionRecord.window_end_ms >= int(since_ms))
+        if until_ms is not None:
+            filters.append(PnLAttributionRecord.window_end_ms <= int(until_ms))
         return await self._list_engine_records(PnLAttributionRecord, order_by=PnLAttributionRecord.window_end_ms, limit=limit, filters=filters)
 
     async def record_kill_switch_event(self, event: dict[str, Any]) -> str | None:

@@ -108,3 +108,68 @@ def test_event_feature_regime_candidate_ev_allocation_execution_pipeline():
         assert position.position_state == "open"
 
     anyio.run(run)
+
+
+def test_feature_store_bounds_series_and_filters_universe():
+    from hyperliquid_trading_agent.app.engine.schemas import FeatureValue
+
+    def _scalar(name: str, value: float, ts: int, asset: str = "BTC") -> FeatureValue:
+        return FeatureValue(
+            feature_id=f"feat_{asset}_{name}_{ts}",
+            asset=asset,
+            feature_group="test",
+            feature_name=name,
+            value={name: value},
+            scalar_value=value,
+            received_ts_ms=ts,
+            computed_ts_ms=ts,
+            source="test",
+            version="test_v1",
+        )
+
+    async def run():
+        ledger = EventLedger()
+        store = FeatureStore(max_age_seconds=600, max_points_per_series=16)
+
+        # Age eviction: points older than max-age relative to the newest fall off.
+        for ts in (0, 100_000, 400_000, 900_000):
+            await store.record(_scalar("mid", 100 + ts / 100_000, ts))
+        series = store._series[("BTC", "mid")]
+        assert [point[0] for point in series] == [400_000, 900_000]
+
+        # Length cap (constructor clamps the cap to a floor of 16).
+        for idx in range(24):
+            await store.record(_scalar("spread_bps", 4 + idx, 1_000_000 + idx))
+        assert len(store._series[("BTC", "spread_bps")]) == 16
+
+        # Snapshot rewinds scalar series for historical cutoffs.
+        snapshot = store.snapshot(asset="BTC", as_of_ms=400_000)
+        assert snapshot.features["mid"] == 104.0
+
+        # Universe filter: meta event payload covers many assets, but only the
+        # event's declared symbols are recorded.
+        meta_event = await ledger.normalize_and_record(
+            event_type="meta_and_asset_ctxs",
+            source="hyperliquid",
+            provider="test",
+            payload={
+                "meta": {"universe": [{"name": "BTC"}, {"name": "DOGE"}, {"name": "PEPE"}]},
+                "asset_ctxs": [
+                    {"funding": "0.0001", "openInterest": "1"},
+                    {"funding": "0.0002", "openInterest": "2"},
+                    {"funding": "0.0003", "openInterest": "3"},
+                ],
+            },
+            asset_class="crypto",
+            symbols=["BTC"],
+            received_ts_ms=2_000_000,
+        )
+        recorded = await store.features_for_event(meta_event)
+        assert {feature.asset for feature in recorded} == {"BTC"}
+        assert "DOGE" not in store._latest
+
+        full_store = FeatureStore(full_universe_enabled=True)
+        recorded_full = await full_store.features_for_event(meta_event)
+        assert {"BTC", "DOGE", "PEPE"} <= {feature.asset for feature in recorded_full}
+
+    anyio.run(run)

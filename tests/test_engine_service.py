@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import anyio
 
 from hyperliquid_trading_agent.app.config import Settings
@@ -86,8 +88,11 @@ def test_institutional_engine_run_once_is_paper_shadow_only():
     result = anyio.run(run)
 
     assert result["candidates"] >= 0
+    assert result["duration_ms"] >= 0
+    assert set(result["stage_ms"]) >= {"all_mids", "meta_asset_ctxs", "l2_books"}
     assert service.status()["run_count"] == 2
     assert service.status()["last_error"] is None
+    assert service.status()["last_run_duration_ms"] == result["duration_ms"]
 
 
 def test_engine_persists_all_strategy_specs_for_reporting():
@@ -213,3 +218,43 @@ def test_candidate_risk_precheck_uses_fresh_decision_market_timestamps():
     assert decision.market_snapshot["freshness_source"] == "hyperliquid_l2_book"
     assert decision.market_snapshot["last_orderbook_at_ms"] > 10_000
     assert hyperliquid.l2_calls == 1
+
+def test_engine_records_liquidation_features_from_async_bridge():
+    settings = Settings(
+        engine_enabled=True,
+        autonomy_core_universe="BTC",
+        autonomy_max_hot_l2_assets=1,
+        engine_shadow_enabled=True,
+    )
+
+    class AsyncLiquidationBridge:
+        async def named_signals(self, symbol: str, *, venue: str = "all"):
+            return {
+                "symbol": symbol.upper(),
+                "venue": venue,
+                "as_of_ms": int(time.time() * 1000),
+                "liq_notional_1m": 1_000.0,
+                "liq_notional_5m": 5_000.0,
+                "long_vs_short_liq_imbalance_5m": -2_000.0,
+                "largest_single_liq_5m": 900.0,
+                "confirmed_only_liq_score_5m": 1.0,
+                "source_mix_5m": {"confirmed": 3},
+                "event_count_5m": 3,
+            }
+
+    service = InstitutionalEngineService(
+        settings=settings,
+        repository=None,
+        hyperliquid=FakeHyperliquidEngine(),
+        risk_gateway=RiskGateway(settings=settings),
+        liquidation_bridge=AsyncLiquidationBridge(),
+    )
+
+    async def run():
+        await service.run_once(symbols=["BTC"])
+        return service.feature_store.snapshot(asset="BTC").features
+
+    features = anyio.run(run)
+
+    assert features["liq_notional_5m"] == 5_000.0
+    assert features["long_vs_short_liq_imbalance_5m"] == -2_000.0

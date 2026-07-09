@@ -59,7 +59,7 @@ class ReplayRepo:
 def test_engine_replay_compare_persists_immutable_artifact():
     now_ms = int(time.time() * 1000)
     repo = ReplayRepo(now_ms)
-    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test"))
+    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_replay_min_sample_candidates=1))
 
     async def run():
         return await service.compare_variant(
@@ -105,7 +105,7 @@ def test_engine_replay_groups_candidate_outcomes_by_strategy_regime_asset_venue_
             "metadata": {"regime_label": "orderflow=buy_pressure"},
         }
     ]
-    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_readiness_max_strategy_allocation_share_pct=100))
+    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_readiness_max_strategy_allocation_share_pct=100, engine_replay_min_sample_candidates=1))
 
     async def run():
         return await service.compare_variant(
@@ -150,7 +150,7 @@ def _candidate(cid: str, strategy: str, score: float) -> AlphaCandidate:
 def test_engine_replay_compare_marks_safe_inconclusive_as_advisory_pass():
     now_ms = int(time.time() * 1000)
     repo = ReplayRepo(now_ms)
-    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_readiness_max_strategy_allocation_share_pct=100))
+    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_readiness_max_strategy_allocation_share_pct=100, engine_replay_min_sample_candidates=1))
 
     async def run():
         return await service.compare_variant(
@@ -165,7 +165,53 @@ def test_engine_replay_compare_marks_safe_inconclusive_as_advisory_pass():
     artifact = anyio.run(run)
 
     assert artifact["status"] == "advisory_pass"
+    assert artifact["metadata"]["verdict"] == "baseline_equivalence"
     assert artifact["metadata"]["promotion_decision"] == "eligible_for_review"
+
+
+def test_engine_replay_compare_reports_insufficient_data_for_empty_window():
+    now_ms = int(time.time() * 1000)
+    repo = ReplayRepo(now_ms)
+    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_replay_min_sample_candidates=1))
+
+    async def run():
+        # Window entirely before any repo data exists.
+        return await service.compare_variant(
+            baseline_config={"current": True},
+            candidate_config={"current": True},
+            window_start_ms=now_ms - 7_200_000,
+            window_end_ms=now_ms - 3_600_000,
+            universe=["BTC"],
+            variant_id="empty_window_v1",
+        )
+
+    artifact = anyio.run(run)
+
+    assert artifact["status"] == "insufficient_data"
+    assert artifact["metadata"]["verdict"] == "insufficient_data"
+    assert artifact["metadata"]["promotion_decision"] == "do_not_promote"
+
+
+def test_engine_replay_compare_still_fails_genuinely_worse_variant():
+    now_ms = int(time.time() * 1000)
+    repo = ReplayRepo(now_ms)
+    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_readiness_max_strategy_allocation_share_pct=100, engine_replay_min_sample_candidates=1))
+
+    async def run():
+        return await service.compare_variant(
+            baseline_config={"current": True},
+            candidate_config={"engine_min_net_ev_bps": 1000, "engine_min_risk_adjusted_utility": 0.25},
+            window_start_ms=now_ms - 60_000,
+            window_end_ms=now_ms,
+            universe=["BTC"],
+            variant_id="worse_variant_v1",
+        )
+
+    artifact = anyio.run(run)
+
+    assert artifact["status"] == "failed"
+    assert artifact["metadata"]["verdict"] == "candidate_worse"
+    assert artifact["metadata"]["promotion_decision"] == "do_not_promote"
 
 
 def test_strategy_throttle_filters_candidates_and_blocks_loop_allocations():
@@ -314,3 +360,32 @@ def test_unified_dashboard_routes_registered():
     assert "engine" in data
     assert "readiness" in data["engine"]
     assert data["engine"]["regime"]["latest_by_asset"]["BTC"]["news_risk_tier"] == "catalyst"
+
+def test_pnl_loop_closes_aged_position_even_without_execution_report():
+    now_ms = int(time.time() * 1000)
+    repo = PnLRepo(now_ms)
+    repo.positions = [
+        {
+            "position_id": "pos_era1",
+            "entry_candidate_id": "cand_old",
+            "strategy_id": "support_resistance_reversion_v2",
+            "asset": "BTC",
+            "side": "long",
+            "stop": 90,
+            "targets": [110],
+            "position_state": "approved",
+            "execution_report_ids": ["er_gone"],
+            "opened_at_ms": now_ms - 49 * 60 * 60 * 1000,
+            "updated_at_ms": now_ms - 49 * 60 * 60 * 1000,
+            "degradation_reasons": [],
+        }
+    ]
+    service = EnginePnLAttributionLoopService(settings=Settings(environment="test"), repository=repo, hyperliquid=Mids())
+
+    result = anyio.run(service.run_once)
+
+    assert result["positions_closed"] == 1
+    assert result["records_created"] == 0
+    assert repo.positions[0]["position_state"] == "closed"
+    assert "max_age" in repo.positions[0]["degradation_reasons"]
+    assert "missing_execution_report" in repo.positions[0]["degradation_reasons"]

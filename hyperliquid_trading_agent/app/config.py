@@ -432,6 +432,19 @@ class Settings(BaseSettings):
     engine_pnl_attribution_close_on_expired_horizon: bool = True
     engine_pnl_attribution_max_position_age_hours: int = 48
     engine_pnl_attribution_min_mark_interval_seconds: int = 60
+    # In-memory feature-store bounds. The funding series keeps a longer window so
+    # the trailing-24h funding percentile rollup stays computable.
+    engine_feature_store_max_age_seconds: int = 7200
+    engine_feature_store_funding_max_age_seconds: int = 90000
+    engine_feature_store_max_points_per_series: int = 4096
+    engine_feature_full_universe_enabled: bool = False
+    engine_liquidation_features_enabled: bool = True
+    engine_strategy_regime_refresh_enabled: bool = True
+    engine_strategy_regime_refresh_interval_seconds: int = 3600
+    engine_replay_comparison_schedule_enabled: bool = True
+    engine_replay_comparison_interval_seconds: int = 86400
+    engine_evidence_refresh_window_hours: int = 24
+    engine_replay_min_sample_candidates: int = 50
 
     # Agentic wave orchestration. These flags enable observation/diagnosis,
     # report-only maintenance, trace emission, and bounded handoff escalation.

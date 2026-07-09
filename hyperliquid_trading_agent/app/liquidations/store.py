@@ -383,6 +383,63 @@ class LiquidationStore:
         except Exception as exc:  # pragma: no cover
             log.warning("liquidation_adapter_state_failed", adapter=adapter_name, error=type(exc).__name__)
 
+    async def latest_adapter_update_ms(self) -> int | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            value = (await session.execute(select(func.max(LiquidationAdapterStateRecord.updated_at_ms)))).scalar()
+            return int(value) if value is not None else None
+
+    async def window_signal(self, *, symbol: str, window_ms: int, now_ms: int, venue: str = "all") -> dict[str, Any]:
+        """Execution-only window aggregate mirroring RollingAggregator.signal math."""
+
+        empty = {"long_usd": 0.0, "short_usd": 0.0, "max_single_usd": 0.0, "confidence": 0.0, "source_mix": {}, "event_count": 0}
+        if self.sessionmaker is None:
+            return empty
+        conditions: list[ColumnElement[bool]] = [
+            LiquidationEventRecord.symbol == symbol.upper(),
+            LiquidationEventRecord.timestamp_ms >= now_ms - window_ms,
+            LiquidationEventRecord.timestamp_ms <= now_ms,
+            LiquidationEventRecord.event_type.in_(_EXECUTION_EVENT_VALUES),
+        ]
+        if venue and venue != "all":
+            conditions.append(LiquidationEventRecord.venue == venue)
+        async with self.sessionmaker() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        LiquidationEventRecord.liquidated_side,
+                        LiquidationEventRecord.source_integrity,
+                        LiquidationEventRecord.notional_usd,
+                    ).where(and_(*conditions))
+                )
+            ).all()
+        long_usd = 0.0
+        short_usd = 0.0
+        max_single = 0.0
+        confirmed_notional = 0.0
+        total_notional = 0.0
+        source_mix: dict[str, int] = {}
+        for side, integrity, notional in rows:
+            value = float(notional or 0.0)
+            if side == "long":
+                long_usd += value
+            elif side == "short":
+                short_usd += value
+            max_single = max(max_single, value)
+            source_mix[str(integrity)] = source_mix.get(str(integrity), 0) + 1
+            total_notional += value
+            if str(integrity) in ("confirmed", "verifiable"):
+                confirmed_notional += value
+        return {
+            "long_usd": long_usd,
+            "short_usd": short_usd,
+            "max_single_usd": max_single,
+            "confidence": confirmed_notional / total_notional if total_notional > 0 else 0.0,
+            "source_mix": source_mix,
+            "event_count": len(rows),
+        }
+
 
 def _filter_conditions(
     *,

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
+import time
 from typing import Any
 
 from hyperliquid_trading_agent.app.engine.attribution import CandidateOutcomeAttributionService
@@ -61,6 +63,10 @@ class InstitutionalEngineService:
         self.feature_store = FeatureStore(
             repository,
             cross_venue_dexes=getattr(settings, "engine_cross_venue_dex_list", []),
+            max_age_seconds=int(getattr(settings, "engine_feature_store_max_age_seconds", 7200)),
+            funding_max_age_seconds=int(getattr(settings, "engine_feature_store_funding_max_age_seconds", 90000)),
+            max_points_per_series=int(getattr(settings, "engine_feature_store_max_points_per_series", 4096)),
+            full_universe_enabled=bool(getattr(settings, "engine_feature_full_universe_enabled", False)),
         )
         self.regime_engine = RegimeEngine(
             news_catalyst_threshold=getattr(settings, "engine_news_catalyst_threshold", 0.35),
@@ -91,6 +97,8 @@ class InstitutionalEngineService:
         self.strategies = self.strategy_registry.strategies(enabled_only=True)
         self.last_run_at_ms: int | None = None
         self.last_error: str | None = None
+        self.last_run_duration_ms: float | None = None
+        self.last_stage_ms: dict[str, float] = {}
         self.run_count = 0
         self.candidates_created = 0
         self.order_intents_created = 0
@@ -109,6 +117,8 @@ class InstitutionalEngineService:
             "mode": self.settings.engine_mode,
             "last_run_at_ms": self.last_run_at_ms,
             "last_error": self.last_error,
+            "last_run_duration_ms": self.last_run_duration_ms,
+            "last_stage_ms": self.last_stage_ms,
             "run_count": self.run_count,
             "candidates_created": self.candidates_created,
             "order_intents_created": self.order_intents_created,
@@ -133,8 +143,15 @@ class InstitutionalEngineService:
     async def run_once(self, *, symbols: list[str] | None = None) -> dict[str, Any]:
         ts = now_ms()
         symbols = [symbol.upper() for symbol in (symbols or self.settings.autonomy_core_symbols or ["BTC", "ETH", "HYPE"])]
+        run_started = time.perf_counter()
+        stage_ms: dict[str, float] = {}
+
+        def _stage_done(name: str, started: float) -> None:
+            stage_ms[name] = round(stage_ms.get(name, 0.0) + (time.perf_counter() - started) * 1000, 3)
+
         try:
             await self.persist_strategy_specs()
+            stage_started = time.perf_counter()
             mids = await self._safe_all_mids()
             selected_mids = {symbol: mids[symbol] for symbol in symbols if symbol in mids}
             if selected_mids:
@@ -148,8 +165,12 @@ class InstitutionalEngineService:
                     received_ts_ms=ts,
                 )
                 await self.feature_store.features_for_event(event)
+            _stage_done("all_mids", stage_started)
+            stage_started = time.perf_counter()
             await self._record_meta_and_asset_ctx_features(symbols=symbols, received_ts_ms=ts)
+            _stage_done("meta_asset_ctxs", stage_started)
             # Add L2 for a bounded hot set to produce execution/microstructure features.
+            stage_started = time.perf_counter()
             for symbol in symbols[: max(1, self.settings.autonomy_max_hot_l2_assets)]:
                 try:
                     book = await self.hyperliquid.l2_book(symbol)
@@ -165,6 +186,7 @@ class InstitutionalEngineService:
                     received_ts_ms=now_ms(),
                 )
                 await self.feature_store.features_for_event(event)
+            _stage_done("l2_books", stage_started)
 
             all_candidates: list[AlphaCandidate] = []
             estimates = {}
@@ -176,14 +198,22 @@ class InstitutionalEngineService:
             risk_market_snapshot_cache: dict[str, dict[str, Any]] = {}
             strategy_selection_summaries: dict[str, Any] = {}
             for symbol in symbols:
+                stage_started = time.perf_counter()
                 await self._record_world_model_features(symbol)
+                _stage_done("world_model", stage_started)
+                stage_started = time.perf_counter()
                 await self._record_liquidation_features(symbol)
+                _stage_done("liquidations", stage_started)
+                stage_started = time.perf_counter()
                 features = await self.feature_store.latest(asset=symbol, limit=200)
                 if not features:
+                    _stage_done("regime", stage_started)
                     continue
                 regime = self.regime_engine.compute(features, primary_asset=symbol)
                 await self._persist_regime(regime)
                 snapshot = self.feature_store.snapshot(asset=symbol)
+                _stage_done("regime", stage_started)
+                stage_started = time.perf_counter()
                 symbol_candidates = []
                 selection = self.strategy_selector.select(self.strategies, regime)
                 strategy_selection_summaries[symbol] = selection.summary()
@@ -195,6 +225,8 @@ class InstitutionalEngineService:
                 throttle_events.extend(symbol_throttle_events)
                 all_candidates.extend(symbol_candidates)
                 await self.candidate_book.add_many(symbol_candidates)
+                _stage_done("strategy_generate", stage_started)
+                stage_started = time.perf_counter()
                 for candidate in symbol_candidates:
                     ev = await self.scorer.score(candidate, regime)
                     estimates[candidate.candidate_id] = ev
@@ -321,16 +353,33 @@ class InstitutionalEngineService:
                     self.execution_reports_created += 1
                     executed.append(report)
                     await self.positions.open_from_execution(candidate, report)
+                _stage_done("candidate_pipeline", stage_started)
+            stage_started = time.perf_counter()
             book = await self.candidate_book.snapshot(estimates, as_of_ms=ts)
+            _stage_done("book_snapshot", stage_started)
             self.candidates_created += len(all_candidates)
             self.last_throttle_summary = self._throttle_summary(throttle_events=throttle_events, timestamp_ms=ts)
             self.last_diversity_summary = self._diversity_summary(diversity_decisions=diversity_decisions, timestamp_ms=ts)
             self.last_strategy_selection_summary = {"timestamp_ms": ts, "symbols": strategy_selection_summaries}
             self.last_run_at_ms = ts
             self.run_count += 1
-            return {"candidate_book_id": book.candidate_book_id, "candidates": len(all_candidates), "executed": len(executed), "throttle_events": len(throttle_events), "throttle_summary": self.last_throttle_summary, "diversity_summary": self.last_diversity_summary}
+            duration_ms = round((time.perf_counter() - run_started) * 1000, 3)
+            self.last_run_duration_ms = duration_ms
+            self.last_stage_ms = stage_ms
+            return {
+                "candidate_book_id": book.candidate_book_id,
+                "candidates": len(all_candidates),
+                "executed": len(executed),
+                "throttle_events": len(throttle_events),
+                "throttle_summary": self.last_throttle_summary,
+                "diversity_summary": self.last_diversity_summary,
+                "duration_ms": duration_ms,
+                "stage_ms": stage_ms,
+            }
         except Exception as exc:
             self.last_error = type(exc).__name__
+            self.last_run_duration_ms = round((time.perf_counter() - run_started) * 1000, 3)
+            self.last_stage_ms = stage_ms
             raise
 
     def _throttle_summary(self, *, throttle_events: list[dict[str, Any]], timestamp_ms: int) -> dict[str, Any]:
@@ -541,6 +590,8 @@ class InstitutionalEngineService:
             return
         try:
             payload = named_signals(symbol)
+            if inspect.isawaitable(payload):
+                payload = await payload
         except Exception:
             return
         if not isinstance(payload, dict):

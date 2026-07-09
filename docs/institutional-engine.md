@@ -71,6 +71,29 @@ NEWSWIRE_GATEWAY_ENABLED=true
 AUTONOMY_LEGACY_NEWS_POLL_ENABLED=false
 NEWS_SIGNAL_GENERATION_ENABLED=true
 NEWS_EVENT_RISK_BLOCKS_ENABLED=true
+
+# Bounded in-memory feature store (2h general / 25h funding series) and
+# traded-symbol-only feature emission (escape hatch for research).
+ENGINE_FEATURE_STORE_MAX_AGE_SECONDS=7200
+ENGINE_FEATURE_STORE_FUNDING_MAX_AGE_SECONDS=90000
+ENGINE_FEATURE_STORE_MAX_POINTS_PER_SERIES=4096
+ENGINE_FEATURE_FULL_UNIVERSE_ENABLED=false
+
+# DB-backed liquidation features in the trader (cascade/mean-revert strategies
+# cannot fire without them). Requires the `liquidations` compose profile
+# service running with at least one adapter, e.g.:
+#   LIQUIDATIONS_HL_PUBLIC_ENABLED=true
+#   docker compose --profile liquidations up -d liquidations
+ENGINE_LIQUIDATION_FEATURES_ENABLED=true
+
+# Scheduled evidence refreshers (trader-owned): hourly strategy-regime
+# scorecard refresh + daily baseline-equivalence replay comparison.
+ENGINE_STRATEGY_REGIME_REFRESH_ENABLED=true
+ENGINE_STRATEGY_REGIME_REFRESH_INTERVAL_SECONDS=3600
+ENGINE_REPLAY_COMPARISON_SCHEDULE_ENABLED=true
+ENGINE_REPLAY_COMPARISON_INTERVAL_SECONDS=86400
+ENGINE_EVIDENCE_REFRESH_WINDOW_HOURS=24
+ENGINE_REPLAY_MIN_SAMPLE_CANDIDATES=50
 ```
 
 ## Discord validation digest

@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import math
 import statistics
+from bisect import bisect_right, insort
+from collections import deque
 from itertools import pairwise
 from typing import Any
 
@@ -11,30 +13,104 @@ from hyperliquid_trading_agent.app.engine.schemas import FeatureSnapshot, Featur
 
 FEATURE_VERSION = "engine_features_v1"
 
+ROLLUP_SOURCE_FEATURES = (
+    "mid",
+    "open_interest",
+    "top_depth_usd",
+    "spread_bps",
+    "perp_basis_bps",
+    "funding_hourly",
+    "day_volume_usd",
+)
+_LONG_WINDOW_FEATURES = {"funding_hourly"}
+_POINT_TS = 0
+_POINT_VALUE = 1
+_POINT_FID = 2
+
 
 class FeatureStore:
-    """Point-in-time feature store with repository-backed persistence."""
+    """Point-in-time feature store with repository-backed persistence.
 
-    def __init__(self, repository: Any | None = None, *, cross_venue_dexes: list[str] | None = None):
+    In-memory state is bounded: scalar histories live in per-(asset, feature)
+    time-ordered lists with age/length eviction, so per-event rollups touch only
+    the points inside their lookback window instead of the full process history.
+    """
+
+    def __init__(
+        self,
+        repository: Any | None = None,
+        *,
+        cross_venue_dexes: list[str] | None = None,
+        max_age_seconds: int = 7200,
+        funding_max_age_seconds: int = 90000,
+        max_points_per_series: int = 4096,
+        full_universe_enabled: bool = False,
+        recent_buffer_size: int = 512,
+    ):
         self.repository = repository
         self.cross_venue_dexes = [dex.lower().strip() for dex in (cross_venue_dexes or []) if dex and dex.strip()]
-        self._features: dict[str, FeatureValue] = {}
+        self.max_age_ms = max(60, int(max_age_seconds)) * 1000
+        self.funding_max_age_ms = max(self.max_age_ms, int(funding_max_age_seconds) * 1000)
+        self.max_points_per_series = max(16, int(max_points_per_series))
+        self.full_universe_enabled = bool(full_universe_enabled)
+        self._series: dict[tuple[str, str], list[tuple[int, float, str]]] = {}
+        self._latest: dict[str, dict[str, FeatureValue]] = {}
+        self._recent: dict[str, deque[FeatureValue]] = {}
+        self._recent_buffer_size = max(32, int(recent_buffer_size))
 
     async def record(self, feature: FeatureValue) -> FeatureValue:
-        self._features[feature.feature_id] = feature
+        asset = feature.asset
+        by_name = self._latest.setdefault(asset, {})
+        current = by_name.get(feature.feature_name)
+        if current is None or feature.computed_ts_ms >= current.computed_ts_ms:
+            by_name[feature.feature_name] = feature
+        self._recent.setdefault(asset, deque(maxlen=self._recent_buffer_size)).append(feature)
+        if feature.scalar_value is not None:
+            self._append_point(asset, feature.feature_name, feature.computed_ts_ms, float(feature.scalar_value), feature.feature_id)
         if self.repository is not None and getattr(self.repository, "enabled", False):
             record = getattr(self.repository, "record_feature_value", None)
             if callable(record):
                 await record(feature.model_dump(mode="json"))
         return feature
 
+    def _append_point(self, asset: str, feature_name: str, ts_ms: int, value: float, feature_id: str) -> None:
+        key = (asset, feature_name)
+        points = self._series.setdefault(key, [])
+        if points and points[-1][_POINT_FID] == feature_id:
+            return
+        point = (ts_ms, value, feature_id)
+        if points and ts_ms < points[-1][_POINT_TS]:
+            insort(points, point, key=lambda item: item[_POINT_TS])
+        else:
+            points.append(point)
+        max_age_ms = self.funding_max_age_ms if feature_name in _LONG_WINDOW_FEATURES else self.max_age_ms
+        horizon = points[-1][_POINT_TS] - max_age_ms
+        if points[0][_POINT_TS] < horizon:
+            del points[: bisect_right(points, horizon, key=lambda item: item[_POINT_TS])]
+        if len(points) > self.max_points_per_series:
+            del points[: len(points) - self.max_points_per_series]
+
+    def _series_slice(self, asset: str, feature_name: str, *, as_of_ms: int) -> list[tuple[int, float]]:
+        points = self._series.get((asset, feature_name)) or []
+        idx = bisect_right(points, as_of_ms, key=lambda item: item[_POINT_TS])
+        return [(ts, value) for ts, value, _ in points[:idx]]
+
+    def _rollups_for(self, asset: str, *, as_of_ms: int | None = None) -> list[FeatureValue]:
+        tails = [points[-1][_POINT_TS] for name in ROLLUP_SOURCE_FEATURES if (points := self._series.get((asset, name)))]
+        cutoff = as_of_ms or (max(tails) if tails else now_ms())
+        series = {name: self._series_slice(asset, name, as_of_ms=cutoff) for name in ROLLUP_SOURCE_FEATURES}
+        return _compute_rollups(asset=asset, series=series, cutoff_ms=cutoff)
+
     async def features_for_event(self, event: NormalizedEvent) -> list[FeatureValue]:
         features = derive_features(event, cross_venue_dexes=self.cross_venue_dexes)
+        allowed = {str(symbol).upper() for symbol in (event.symbols or [])}
+        if allowed and not self.full_universe_enabled:
+            features = [feature for feature in features if feature.asset in allowed]
         for feature in features:
             await self.record(feature)
         rollups: list[FeatureValue] = []
         for asset in sorted({feature.asset for feature in features}):
-            rollups.extend(derive_rolling_features(asset=asset, features=list(self._features.values())))
+            rollups.extend(self._rollups_for(asset))
         for feature in rollups:
             await self.record(feature)
         return [*features, *rollups]
@@ -51,7 +127,7 @@ class FeatureStore:
             if callable(list_values):
                 return [FeatureValue(**item) for item in await list_values(asset=asset, feature_name=feature_name, limit=limit)]
         asset = asset.upper()
-        items = [item for item in self._features.values() if item.asset == asset]
+        items = list(self._recent.get(asset) or [])
         if feature_name:
             items = [item for item in items if item.feature_name == feature_name]
         return sorted(items, key=lambda item: item.computed_ts_ms, reverse=True)[:limit]
@@ -60,10 +136,20 @@ class FeatureStore:
         asset = asset.upper()
         cutoff = as_of_ms or now_ms()
         latest_by_name: dict[str, FeatureValue] = {}
-        for item in sorted(self._features.values(), key=lambda feature: feature.computed_ts_ms):
-            if item.asset == asset and item.computed_ts_ms <= cutoff:
-                latest_by_name[item.feature_name] = item
-        selected = list(latest_by_name.values())[-max_items:]
+        for name, item in (self._latest.get(asset) or {}).items():
+            if item.computed_ts_ms <= cutoff:
+                latest_by_name[name] = item
+                continue
+            # Latest value is newer than the requested cutoff: rewind scalar
+            # series to the last point at-or-before the cutoff when available.
+            points = self._series.get((asset, name)) or []
+            idx = bisect_right(points, cutoff, key=lambda point: point[_POINT_TS]) - 1
+            if idx >= 0:
+                ts, value, fid = points[idx]
+                latest_by_name[name] = item.model_copy(
+                    update={"feature_id": fid, "scalar_value": value, "computed_ts_ms": ts, "value": {name: value}}
+                )
+        selected = sorted(latest_by_name.values(), key=lambda item: item.computed_ts_ms)[-max_items:]
         features = {item.feature_name: item.value if item.scalar_value is None else item.scalar_value for item in selected}
         quality_flags = [f"low_quality:{item.feature_name}" for item in selected if item.quality_score < 0.5]
         snapshot_id = "fs_" + hashlib.sha1(f"{asset}:{cutoff}:{sorted(features.items())}".encode()).hexdigest()[:24]
@@ -528,13 +614,20 @@ def _cross_venue_features(event: NormalizedEvent, *, enabled_dexes: list[str]) -
 def derive_rolling_features(*, asset: str, features: list[FeatureValue], as_of_ms: int | None = None) -> list[FeatureValue]:
     asset = asset.upper()
     cutoff = as_of_ms or max((item.computed_ts_ms for item in features if item.asset == asset), default=now_ms())
-    mids = _series(features, asset=asset, feature_name="mid", as_of_ms=cutoff)
-    oi = _series(features, asset=asset, feature_name="open_interest", as_of_ms=cutoff)
-    depth = _series(features, asset=asset, feature_name="top_depth_usd", as_of_ms=cutoff)
-    spread = _series(features, asset=asset, feature_name="spread_bps", as_of_ms=cutoff)
-    basis = _series(features, asset=asset, feature_name="perp_basis_bps", as_of_ms=cutoff)
-    funding = _series(features, asset=asset, feature_name="funding_hourly", as_of_ms=cutoff)
-    volume = _series(features, asset=asset, feature_name="day_volume_usd", as_of_ms=cutoff)
+    series = {name: _series(features, asset=asset, feature_name=name, as_of_ms=cutoff) for name in ROLLUP_SOURCE_FEATURES}
+    return _compute_rollups(asset=asset, series=series, cutoff_ms=cutoff)
+
+
+def _compute_rollups(*, asset: str, series: dict[str, list[tuple[int, float]]], cutoff_ms: int) -> list[FeatureValue]:
+    asset = asset.upper()
+    cutoff = cutoff_ms
+    mids = series.get("mid") or []
+    oi = series.get("open_interest") or []
+    depth = series.get("top_depth_usd") or []
+    spread = series.get("spread_bps") or []
+    basis = series.get("perp_basis_bps") or []
+    funding = series.get("funding_hourly") or []
+    volume = series.get("day_volume_usd") or []
     out: list[FeatureValue] = []
     if len(mids) >= 2:
         latest_ts, latest_mid = mids[-1]
@@ -592,6 +685,11 @@ def derive_rolling_features(*, asset: str, features: list[FeatureValue], as_of_m
             change = latest_funding - baseline
             out.append(_rollup_feature(asset=asset, name="funding_change_15m", value=change, computed_ts_ms=cutoff))
             out.append(_rollup_feature(asset=asset, name="funding_curve_slope", value=change, computed_ts_ms=cutoff))
+        trailing_abs = [abs(value) for ts, value in funding if ts >= latest_ts - 86_400_000]
+        if len(trailing_abs) >= 24:
+            trailing_abs.sort()
+            p90 = trailing_abs[max(0, math.ceil(0.9 * len(trailing_abs)) - 1)]
+            out.append(_rollup_feature(asset=asset, name="funding_abs_p90_24h", value=p90, computed_ts_ms=cutoff))
     if volume and depth and spread:
         liquidity_score = _volume_liquidity_score(volume[-1][1], depth[-1][1], spread[-1][1])
         out.append(_rollup_feature(asset=asset, name="volume_liquidity_score", value=liquidity_score, computed_ts_ms=cutoff))
