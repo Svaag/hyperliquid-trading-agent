@@ -29,11 +29,16 @@ class RssFetchResult:
     warning: str | None = None
 
 
-def fetch_rss_feed_sync(feed_url: str, limit: int = 5) -> RssFetchResult:
+def fetch_rss_feed_sync(
+    feed_url: str,
+    limit: int = 5,
+    *,
+    user_agent: str | None = None,
+) -> RssFetchResult:
     """Fetch one feed without allowing it to poison the remaining RSS layer."""
 
     try:
-        parsed = feedparser.parse(feed_url)
+        parsed = feedparser.parse(feed_url, agent=user_agent) if user_agent else feedparser.parse(feed_url)
     except Exception as exc:  # pragma: no cover - feedparser/network boundary
         return RssFetchResult(
             feed_url=feed_url,
@@ -98,8 +103,13 @@ async def fetch_rss_items(feed_urls: Iterable[str], limit_per_feed: int = 5) -> 
     return await asyncio.to_thread(fetch_rss_items_sync, list(feed_urls), limit_per_feed)
 
 
-async def fetch_rss_feed(feed_url: str, limit: int = 5) -> RssFetchResult:
-    return await asyncio.to_thread(fetch_rss_feed_sync, feed_url, limit)
+async def fetch_rss_feed(
+    feed_url: str,
+    limit: int = 5,
+    *,
+    user_agent: str | None = None,
+) -> RssFetchResult:
+    return await asyncio.to_thread(fetch_rss_feed_sync, feed_url, limit, user_agent=user_agent)
 
 
 def _clean_summary(summary: str) -> str:
