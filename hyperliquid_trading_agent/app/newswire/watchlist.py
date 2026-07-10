@@ -176,7 +176,10 @@ def resolve_entities(event: NewswireEvent, snapshot: WatchSetSnapshot) -> Entity
     text = " ".join([event.headline, event.body]).strip()
     explicit = {str(symbol).upper().lstrip("$") for symbol in event.symbols if symbol}
     symbols = set(explicit)
-    reasons: dict[str, list[str]] = {symbol: ["provider_symbol"] for symbol in explicit}
+    trusted = {str(symbol).upper() for symbol in event.metadata.get("trusted_source_symbols", [])}
+    reasons: dict[str, list[str]] = {
+        symbol: ["trusted_source_symbol" if symbol in trusted else "provider_symbol"] for symbol in explicit
+    }
     for symbol in snapshot.symbols:
         match_reasons = _symbol_match_reasons(text, symbol, snapshot.aliases.get(symbol, ()))
         if match_reasons:

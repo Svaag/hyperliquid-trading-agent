@@ -338,7 +338,7 @@ def test_repository_persists_story_revision_delivery_and_risk_state() -> None:
                 "entered_at_ms": 1_000,
                 "updated_at_ms": 1_000,
                 "expires_at_ms": 2_000,
-                "assessment_version": "newswire_assessment_v2",
+                "assessment_version": "newswire_assessment_v2.1",
                 "transition_reason": "test",
             }
         )
@@ -364,7 +364,7 @@ def test_repository_persists_story_revision_delivery_and_risk_state() -> None:
 
     result = anyio.run(run)
 
-    assert result["story"]["assessment"]["assessment_version"] == "newswire_assessment_v2"
+    assert result["story"]["assessment"]["assessment_version"] == "newswire_assessment_v2.1"
     assert len(result["revisions"]) == 1
     assert len(result["due"]) == 1
     assert result["duplicate_claim"] == []

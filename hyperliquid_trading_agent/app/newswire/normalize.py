@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import re
 import time
 from datetime import datetime
 from email.utils import parsedate_to_datetime
@@ -18,6 +19,23 @@ from hyperliquid_trading_agent.app.newswire.schemas import Freshness, NewswireEv
 
 _BREAKING_MS = 30 * 60 * 1000
 _FRESH_MS = 24 * 60 * 60 * 1000
+_NASDAQ_SYMBOL_STOPWORDS = {
+    "NASDAQ",
+    "TRADE",
+    "TRADING",
+    "HALT",
+    "HALTED",
+    "PAUSE",
+    "PAUSED",
+    "RESUME",
+    "RESUMED",
+    "NEWS",
+    "MARKET",
+    "CODE",
+    "TIME",
+    "REASON",
+    "QUOTE",
+}
 
 
 def normalize(raw: RawNewsItem, *, symbols_universe: list[str], received_at_ms: int | None = None) -> NewswireEvent | None:
@@ -32,7 +50,10 @@ def normalize(raw: RawNewsItem, *, symbols_universe: list[str], received_at_ms: 
     received = received_at_ms or now_ms()
     text = f"{raw.query or ''} {headline} {body}"
 
-    symbols = [s.upper() for s in raw.symbols] if raw.symbols else tag_assets(text, symbols_universe)
+    provider_symbols = [s.upper().lstrip("$") for s in raw.symbols if s]
+    universe_symbols = tag_assets(text, symbols_universe)
+    trusted_symbols = extract_trusted_source_symbols(raw.source, f"{headline} {body}")
+    symbols = list(dict.fromkeys([*provider_symbols, *trusted_symbols, *universe_symbols]))
     asset_class = classify_asset_class(raw.source, text, symbols, hint=raw.asset_class)
     event_type = classify_event_type(raw.source, text, hint=raw.event_type)
     importance = score_importance(headline, body, raw.query or "", raw.public_metrics)
@@ -64,7 +85,41 @@ def normalize(raw: RawNewsItem, *, symbols_universe: list[str], received_at_ms: 
         confidence=_confidence(raw, score),
         source_score=score,
         tradability=Tradability(),
-        metadata={"query": raw.query, "raw": raw.raw} if raw.raw or raw.query else {},
+        metadata={
+            **({"query": raw.query} if raw.query else {}),
+            **({"raw": raw.raw} if raw.raw else {}),
+            **({"trusted_source_symbols": trusted_symbols} if trusted_symbols else {}),
+        },
+    )
+
+
+def extract_trusted_source_symbols(source: str, text: str) -> list[str]:
+    """Extract bare exchange tickers only where the source itself is authoritative.
+
+    NASDAQ halt RSS items frequently carry a bare symbol instead of a cashtag or a
+    provider ``symbols`` array.  Applying this grammar to arbitrary prose would create
+    false positives, so it is deliberately source-scoped.
+    """
+    if source.lower() != "nasdaq_halts":
+        return []
+    cleaned = " ".join(str(text or "").split())
+    candidates: list[str] = []
+    patterns = (
+        r"(?i:\b(?:symbol|issue)\s*[:#-]\s*)([A-Z][A-Z0-9.]{0,7})\b",
+        r"(?i:\b(?:trading\s+)?(?:halt|halted|pause|paused|resume|resumed)\s*(?:in|on|for|:|-)?\s*)([A-Z][A-Z0-9.]{0,7})\b",
+        r"^\s*([A-Z][A-Z0-9.]{0,7})\s*(?i:(?:-|:|\|)\s*(?:trading\s+)?(?:halt|pause|resume)\b)",
+    )
+    for pattern in patterns:
+        candidates.extend(re.findall(pattern, cleaned))
+    if re.fullmatch(r"\s*[A-Z][A-Z0-9.]{0,7}\s*", cleaned):
+        candidates.append(cleaned.strip())
+    return list(
+        dict.fromkeys(
+            symbol.upper()
+            for symbol in candidates
+            if symbol.upper() not in _NASDAQ_SYMBOL_STOPWORDS
+            and re.fullmatch(r"[A-Z][A-Z0-9.]{0,7}", symbol.upper())
+        )
     )
 
 

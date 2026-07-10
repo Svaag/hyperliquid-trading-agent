@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from hyperliquid_trading_agent.app.agent.model_gateway import ModelGateway
@@ -28,10 +29,24 @@ class NewswireWorker(BaseWorker):
             model_gateway=model_gateway,
         )
         await self.service.start()
+        command_task = asyncio.create_task(
+            self.command_loop({"newswire_reclassify": self._handle_reclassify}),
+            name="newswire-command-loop",
+        )
         try:
             await self.wait_until_stopped()
         finally:
+            command_task.cancel()
+            try:
+                await command_task
+            except asyncio.CancelledError:
+                pass
             await self.service.stop()
+
+    async def _handle_reclassify(self, command: dict[str, Any]) -> dict[str, Any]:
+        if self.service is None:
+            raise RuntimeError("newswire_service_unavailable")
+        return await self.service.reclassify_stories(dict(command.get("payload") or {}))
 
     def heartbeat_metadata(self) -> dict[str, Any]:
         if self.service is None:

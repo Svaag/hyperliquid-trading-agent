@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from typing import Any
 
@@ -12,6 +13,7 @@ from hyperliquid_trading_agent.app.engine.bandit import OfflineContextualBanditR
 from hyperliquid_trading_agent.app.engine.evidence_loop import EngineEvidenceRefreshLoopService
 from hyperliquid_trading_agent.app.engine.monitor import EngineValidationMonitorService
 from hyperliquid_trading_agent.app.engine.newswire_bridge import EngineNewsConsumer
+from hyperliquid_trading_agent.app.engine.newswire_replay import NewswireEngineReplayService
 from hyperliquid_trading_agent.app.engine.operator_proposals import EngineOperatorProposalService
 from hyperliquid_trading_agent.app.engine.pnl_loop import EnginePnLAttributionLoopService
 from hyperliquid_trading_agent.app.engine.replay_compare import EngineReplayComparisonService
@@ -93,6 +95,7 @@ class TraderWorker(BaseWorker):
             "engine_position_thesis_cleanup": self._handle_engine_position_thesis_cleanup,
             "engine_bandit_run": self._handle_engine_bandit_run,
             "engine_replay_comparison_run": self._handle_engine_replay_comparison_run,
+            "engine_newswire_replay": self._handle_engine_newswire_replay,
             "engine_operator_proposal_ack": self._handle_engine_operator_proposal_ack,
             "engine_operator_proposal_reject": self._handle_engine_operator_proposal_reject,
             "engine_operator_proposal_expire": self._handle_engine_operator_proposal_expire,
@@ -305,6 +308,25 @@ class TraderWorker(BaseWorker):
             variant_id=str(payload.get("variant_id") or "") or None,
         )
         return self._result(command, window_start_ms=start_ms, window_end_ms=end_ms, result=artifact)
+
+    async def _handle_engine_newswire_replay(self, command: dict[str, Any]) -> dict[str, Any]:
+        self._record_command(command)
+        payload = dict(self._payload(command))
+        payload.setdefault(
+            "replay_run_id",
+            "nwr_" + hashlib.sha1(str(command.get("command_id") or self.instance_id).encode()).hexdigest()[:20],
+        )
+        result = await NewswireEngineReplayService(
+            settings=self.settings,
+            repository=self.repository,
+        ).run(payload)
+        return self._result(
+            command,
+            result=result,
+            report_only=True,
+            execution_authority="none",
+            live_consumer_offset_write_performed=False,
+        )
 
     async def _handle_engine_operator_proposal_ack(self, command: dict[str, Any]) -> dict[str, Any]:
         self._record_command(command)

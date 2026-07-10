@@ -13,6 +13,7 @@ from hyperliquid_trading_agent.app.engine.runtime import resolve_engine_runtime
 from hyperliquid_trading_agent.app.engine.validation_report import build_engine_validation_report
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.metrics import ENGINE_VALIDATION_ALERTS, ENGINE_VALIDATION_DIGESTS
+from hyperliquid_trading_agent.app.newswire.observability import build_engine_newsfeed_health
 
 log = get_logger(__name__)
 
@@ -200,6 +201,16 @@ class EngineValidationMonitorService:
                 )
         if service_status.get("last_error"):
             alerts.append({"type": "engine_loop_error", "severity": "critical", "detail": str(service_status.get("last_error"))})
+        newsfeed_health = await self._newsfeed_health()
+        if newsfeed_health is not None:
+            for reason in newsfeed_health.get("reasons") or []:
+                alerts.append(
+                    {
+                        "type": f"newsfeed_{reason.get('code') or 'degraded'}",
+                        "severity": "critical" if reason.get("severity") == "degraded" else "warning",
+                        "detail": str(reason.get("detail") or "Engine Newswire consumer is degraded."),
+                    }
+                )
         duration_ms = service_status.get("last_run_duration_ms")
         interval_ms = max(5, int(self.settings.engine_loop_interval_seconds)) * 1000
         if duration_ms is not None and float(duration_ms) > interval_ms:
@@ -255,6 +266,35 @@ class EngineValidationMonitorService:
                     }
                 )
         return alerts
+
+    async def _newsfeed_health(self) -> dict[str, Any] | None:
+        list_heartbeats = getattr(self.repository, "list_service_heartbeats", None)
+        if not self.settings.engine_newsfeed_enabled or not callable(list_heartbeats):
+            return None
+        try:
+            heartbeats = await list_heartbeats(service_role="trader", limit=5)
+            trader = next((item for item in heartbeats if item.get("status") == "running"), None)
+            raw_metadata = trader.get("metadata") if isinstance(trader, dict) else None
+            metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+            raw_runtime = metadata.get("engine_newsfeed")
+            runtime = dict(raw_runtime) if isinstance(raw_runtime, dict) else {}
+            offset = await self.repository.get_consumer_offset(
+                "trader:engine_newswire",
+                source_table="newswire_story_revisions",
+            )
+            stories = await self.repository.list_newswire_stories(limit=1)
+            newswire_heartbeats = await list_heartbeats(service_role="newswire", limit=5)
+        except Exception:
+            return None
+        return build_engine_newsfeed_health(
+            self.settings,
+            runtime,
+            offset,
+            newswire_active=bool(
+                stories and any(item.get("status") == "running" for item in newswire_heartbeats)
+            ),
+            latest_source_at_ms=int(stories[0].get("last_updated_at_ms") or 0) if stories else None,
+        )
 
     async def _recent_risk_rejects(self, now_ms: int) -> list[dict[str, Any]]:
         window_ms = max(60, self.settings.engine_validation_digest_interval_seconds) * 1000

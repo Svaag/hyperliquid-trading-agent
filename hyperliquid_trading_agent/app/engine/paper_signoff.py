@@ -5,6 +5,7 @@ from typing import Any
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.engine.readiness import build_paper_readiness_scorecard
 from hyperliquid_trading_agent.app.engine.validation_report import build_engine_validation_report
+from hyperliquid_trading_agent.app.newswire.observability import build_newswire_soak_readiness
 
 
 async def build_paper_signoff_preflight(
@@ -26,10 +27,16 @@ async def build_paper_signoff_preflight(
     symbols = [symbol.upper() for symbol in symbols or []]
     readiness = await build_paper_readiness_scorecard(repository, settings, engine_service, window_hours=window_hours, limit=limit)
     validation = await build_engine_validation_report(repository, limit=limit)
+    newsfeed_evidence = await build_newswire_soak_readiness(repository, settings, limit=max(5000, limit))
     symbol_evidence = _symbol_evidence(validation, symbols=symbols)
     live_blocks = _live_exchange_blocks(settings, validation)
     evidence_quality = _evidence_quality(readiness, validation)
     ready = bool(readiness.get("ready_for_paper")) and not live_blocks and evidence_quality["passes_minimums"] and all(item["has_shadow_evidence"] for item in symbol_evidence)
+    next_actions = list(readiness.get("next_actions", []))
+    if settings.engine_newsfeed_enabled and not newsfeed_evidence.get("ready"):
+        next_actions.append(
+            "Continue the continuous Newswire engine-feed soak until /newswire/readiness passes; evidence remains advisory."
+        )
     return {
         "mode": "paper_signoff_preflight",
         "ready_for_paper_signoff": ready,
@@ -46,7 +53,8 @@ async def build_paper_signoff_preflight(
             "execution_simulations": validation.get("execution_simulations", {}),
             "allocation_status_counts": validation.get("allocation_status_counts", {}),
         },
-        "next_actions": readiness.get("next_actions", []),
+        "newsfeed_evidence": newsfeed_evidence,
+        "next_actions": next_actions,
         "paper_only": True,
         "live_execution_allowed": False,
     }

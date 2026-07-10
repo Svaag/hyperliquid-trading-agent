@@ -64,6 +64,7 @@ from hyperliquid_trading_agent.app.newswire.consumers.agent_feed import AgentNew
 from hyperliquid_trading_agent.app.newswire.consumers.discord_news import DiscordNewsPublisher
 from hyperliquid_trading_agent.app.newswire.enrich import Enricher
 from hyperliquid_trading_agent.app.newswire.gateway import register_newswire_routes
+from hyperliquid_trading_agent.app.newswire.observability import build_engine_newsfeed_health
 from hyperliquid_trading_agent.app.newswire.schemas import NewswireStory
 from hyperliquid_trading_agent.app.newswire.service import NewswireService
 from hyperliquid_trading_agent.app.orchestration.routes import register_orchestration_routes
@@ -492,11 +493,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if scheduler_heartbeats and isinstance(scheduler_heartbeats[0].get("metadata"), dict)
             else {}
         )
-        wave_runtime = (
-            dict(scheduler_metadata.get("wave_supervisor"))
-            if isinstance(scheduler_metadata.get("wave_supervisor"), dict)
-            else {}
-        )
+        raw_wave_runtime = scheduler_metadata.get("wave_supervisor")
+        wave_runtime = dict(raw_wave_runtime) if isinstance(raw_wave_runtime, dict) else {}
         return {
             "service_role": str(settings.service_role),
             "runtime_profile": settings.runtime_profile,
@@ -598,11 +596,57 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         heartbeats = _annotate_heartbeats(settings, await app.state.repository.list_service_heartbeats(limit=100))
         commands = _annotate_commands(settings, await app.state.repository.list_worker_commands(limit=500))
         offsets = _annotate_offsets(await app.state.repository.list_consumer_offsets(limit=100))
+        trader = next(
+            (
+                item
+                for item in heartbeats
+                if item.get("service_role") == "trader"
+                and item.get("status") == "running"
+                and item.get("stale") is not True
+            ),
+            None,
+        )
+        raw_trader_metadata = trader.get("metadata") if isinstance(trader, dict) else None
+        trader_metadata = dict(raw_trader_metadata) if isinstance(raw_trader_metadata, dict) else {}
+        raw_newsfeed_runtime = trader_metadata.get("engine_newsfeed")
+        newsfeed_runtime = dict(raw_newsfeed_runtime) if isinstance(raw_newsfeed_runtime, dict) else {}
+        newswire_worker = next(
+            (
+                item
+                for item in heartbeats
+                if item.get("service_role") == "newswire"
+                and item.get("status") == "running"
+                and item.get("stale") is not True
+            ),
+            None,
+        )
+        raw_newswire_metadata = newswire_worker.get("metadata") if isinstance(newswire_worker, dict) else None
+        newswire_metadata = dict(raw_newswire_metadata) if isinstance(raw_newswire_metadata, dict) else {}
+        raw_newswire_status = newswire_metadata.get("newswire")
+        newswire_status = dict(raw_newswire_status) if isinstance(raw_newswire_status, dict) else {}
+        latest_newswire_at_ms = int(newswire_status.get("last_event_at_ms") or 0) or None
+        newswire_active = bool(newswire_worker and latest_newswire_at_ms)
+        newsfeed_offset = next(
+            (item for item in offsets if item.get("consumer_name") == "trader:engine_newswire"),
+            {},
+        )
+        newsfeed_health = build_engine_newsfeed_health(
+            settings,
+            newsfeed_runtime,
+            newsfeed_offset,
+            newswire_active=newswire_active,
+            latest_source_at_ms=latest_newswire_at_ms,
+        )
         return {
             "runtime": {"service_role": str(settings.service_role), "runtime_profile": settings.runtime_profile, "environment": settings.environment},
             "heartbeats": {"items": heartbeats, "count": len(heartbeats), "stale_count": len([item for item in heartbeats if item.get("stale") is True])},
             "commands": {"items": commands[:100], "count": len(commands), "counts": _command_counts(commands)},
             "offsets": {"items": offsets, "count": len(offsets)},
+            "newsfeed": {
+                "runtime": newsfeed_runtime,
+                "offset": newsfeed_offset,
+                "health": newsfeed_health,
+            },
             "registry": command_registry_json(),
             "command_health": _command_health(heartbeats),
         }
@@ -1590,9 +1634,9 @@ def _runtime_dashboard_html() -> str:
 <!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Runtime Dashboard</title>
 <style>:root{color-scheme:dark;--bg:#0b1020;--panel:#121a2f;--muted:#94a3b8;--text:#e2e8f0;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444;--accent:#38bdf8}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui}header{padding:18px 22px;border-bottom:1px solid #1f2a44;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}main{padding:22px;display:grid;gap:14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}.panel{background:var(--panel);border:1px solid #1f2a44;border-radius:14px;padding:14px;overflow:auto}.metric{font-size:28px;font-weight:800}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}input,button,select{background:#0f172a;color:var(--text);border:1px solid #334155;border-radius:8px;padding:8px}button{cursor:pointer}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #243149;padding:7px;text-align:left;vertical-align:top}pre{white-space:pre-wrap;background:#0f172a;border-radius:10px;padding:10px}.pill{border-radius:999px;background:#1e293b;padding:2px 8px}.tabs button{margin-right:6px;margin-bottom:6px}.tab{display:none}.tab.active{display:block}</style></head>
 <body><header><div><h1>Runtime Dashboard</h1><div class="muted">Workers, commands, offsets, and command registry.</div></div><div><input id="token" type="password" placeholder="Bearer token"/><button onclick="saveToken()">Save</button><button onclick="load()">Refresh</button></div></header>
-<main><section class="grid" id="summary"></section><div class="tabs"><button onclick="show('workers')">Workers</button><button onclick="show('commands')">Commands</button><button onclick="show('offsets')">Offsets</button><button onclick="show('registry')">Registry</button><button onclick="show('raw')">Raw</button></div><section id="workers" class="tab active panel"></section><section id="commands" class="tab panel"></section><section id="offsets" class="tab panel"></section><section id="registry" class="tab panel"></section><section id="raw" class="tab panel"><pre id="rawpre"></pre></section></main>
+<main><section class="grid" id="summary"></section><div class="tabs"><button onclick="show('workers')">Workers</button><button onclick="show('newsfeed')">Engine Newsfeed</button><button onclick="show('commands')">Commands</button><button onclick="show('offsets')">Offsets</button><button onclick="show('registry')">Registry</button><button onclick="show('raw')">Raw</button></div><section id="workers" class="tab active panel"></section><section id="newsfeed" class="tab panel"></section><section id="commands" class="tab panel"></section><section id="offsets" class="tab panel"></section><section id="registry" class="tab panel"></section><section id="raw" class="tab panel"><pre id="rawpre"></pre></section></main>
 <script>
-const $=id=>document.getElementById(id);function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}function headers(){const t=localStorage.getItem('agentToken')||'';return t?{'Authorization':'Bearer '+t}:{}}function saveToken(){localStorage.setItem('agentToken',$('token').value.trim());load()}function show(id){document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));$(id).classList.add('active')}function metric(k,v,cls=''){return `<div class="panel"><div class="muted">${esc(k)}</div><div class="metric ${cls}">${esc(v)}</div></div>`}function table(items,cols){if(!items||!items.length)return '<div class="muted">No rows.</div>';return '<table><thead><tr>'+cols.map(c=>`<th>${esc(c[0])}</th>`).join('')+'</tr></thead><tbody>'+items.map(r=>'<tr>'+cols.map(c=>`<td>${c[2]?c[2](r):esc(r[c[1]])}</td>`).join('')+'</tr>').join('')+'</tbody></table>'}function fmtMs(ms){return ms==null?'':(ms/1000).toFixed(0)+'s'}async function api(p){const r=await fetch(p,{headers:headers()});if(!r.ok)throw new Error(r.status+' '+await r.text());return await r.json()}async function retry(id){await fetch('/commands/'+id+'/retry',{method:'POST',headers:headers()});load()}async function cancelCmd(id){await fetch('/commands/'+id+'/cancel',{method:'POST',headers:headers()});load()}async function load(){try{$('token').value=localStorage.getItem('agentToken')||'';const d=await api('/runtime/dashboard/data');const cc=d.commands.counts||{};$('summary').innerHTML=[metric('Workers',d.heartbeats.count,(d.heartbeats.stale_count?'bad':'ok')),metric('Stale',d.heartbeats.stale_count,d.heartbeats.stale_count?'bad':'ok'),metric('Commands',d.commands.count),metric('Failed',(cc.by_status||{}).failed||0,((cc.by_status||{}).failed?'bad':'ok')),metric('Offsets',d.offsets.count),metric('Missing roles',(d.command_health.missing_roles||[]).length,(d.command_health.missing_roles||[]).length?'warn':'ok')].join('');$('workers').innerHTML=table(d.heartbeats.items,[['Role','service_role'],['Status','status'],['Stale','stale',r=>r.stale?'<span class="bad">true</span>':'<span class="ok">false</span>'],['Age','heartbeat_age_ms',r=>fmtMs(r.heartbeat_age_ms)],['Errors','metadata',r=>esc(JSON.stringify((r.metadata||{}).world_model?.repository_last_error||(r.metadata||{}).newswire?.adapter_errors||''))]]);$('commands').innerHTML='<h2>Counts</h2><pre>'+esc(JSON.stringify(cc,null,2))+'</pre>'+table(d.commands.items,[['ID','command_id'],['Role','target_role'],['Type','command_type'],['Status','status'],['Age','age_ms',r=>fmtMs(r.age_ms)],['Error','last_error'],['Actions','command_id',r=>`<button onclick="retry('${esc(r.command_id)}')">Retry</button> <button onclick="cancelCmd('${esc(r.command_id)}')">Cancel</button>`]]);$('offsets').innerHTML=table(d.offsets.items,[['Consumer','consumer_name'],['Source','source_table'],['Last event','last_event_id'],['Event ts','last_event_ts_ms'],['Offset age','offset_age_ms',r=>fmtMs(r.offset_age_ms)]]);$('registry').innerHTML='<h2>Missing roles</h2><pre>'+esc(JSON.stringify(d.command_health.missing_roles,null,2))+'</pre>'+table(d.registry,[['Command','command_type'],['Role','target_role'],['Handler','handler_name'],['Side effect','external_side_effect'],['Paper mutation','paper_state_mutation']]);$('rawpre').textContent=JSON.stringify(d,null,2)}catch(e){$('summary').innerHTML=`<div class="panel bad"><b>Load failed</b><pre>${esc(e.message)}</pre></div>`}}load();
+const $=id=>document.getElementById(id);function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}function headers(){const t=localStorage.getItem('agentToken')||'';return t?{'Authorization':'Bearer '+t}:{}}function saveToken(){localStorage.setItem('agentToken',$('token').value.trim());load()}function show(id){document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));$(id).classList.add('active')}function metric(k,v,cls=''){return `<div class="panel"><div class="muted">${esc(k)}</div><div class="metric ${cls}">${esc(v)}</div></div>`}function table(items,cols){if(!items||!items.length)return '<div class="muted">No rows.</div>';return '<table><thead><tr>'+cols.map(c=>`<th>${esc(c[0])}</th>`).join('')+'</tr></thead><tbody>'+items.map(r=>'<tr>'+cols.map(c=>`<td>${c[2]?c[2](r):esc(r[c[1]])}</td>`).join('')+'</tr>').join('')+'</tbody></table>'}function fmtMs(ms){return ms==null?'':(ms/1000).toFixed(0)+'s'}async function api(p){const r=await fetch(p,{headers:headers()});if(!r.ok)throw new Error(r.status+' '+await r.text());return await r.json()}async function retry(id){await fetch('/commands/'+id+'/retry',{method:'POST',headers:headers()});load()}async function cancelCmd(id){await fetch('/commands/'+id+'/cancel',{method:'POST',headers:headers()});load()}async function load(){try{$('token').value=localStorage.getItem('agentToken')||'';const d=await api('/runtime/dashboard/data');const cc=d.commands.counts||{},nh=(d.newsfeed||{}).health||{},nc=nh.counters||{};$('summary').innerHTML=[metric('Workers',d.heartbeats.count,(d.heartbeats.stale_count?'bad':'ok')),metric('Stale',d.heartbeats.stale_count,d.heartbeats.stale_count?'bad':'ok'),metric('Newsfeed',nh.status||'unknown',nh.status==='healthy'?'ok':nh.status==='degraded'?'bad':'warn'),metric('News features',nc.features_created||0),metric('Commands',d.commands.count),metric('Failed',(cc.by_status||{}).failed||0,((cc.by_status||{}).failed?'bad':'ok')),metric('Offsets',d.offsets.count),metric('Missing roles',(d.command_health.missing_roles||[]).length,(d.command_health.missing_roles||[]).length?'warn':'ok')].join('');$('workers').innerHTML=table(d.heartbeats.items,[['Role','service_role'],['Status','status'],['Stale','stale',r=>r.stale?'<span class="bad">true</span>':'<span class="ok">false</span>'],['Age','heartbeat_age_ms',r=>fmtMs(r.heartbeat_age_ms)],['Errors','metadata',r=>esc(JSON.stringify((r.metadata||{}).world_model?.repository_last_error||(r.metadata||{}).newswire?.adapter_errors||''))]]);$('newsfeed').innerHTML='<h2>Engine Newsfeed</h2><div class="grid">'+metric('Health',nh.status||'unknown',nh.status==='healthy'?'ok':nh.status==='degraded'?'bad':'warn')+metric('Offset age',fmtMs(nh.offset_age_ms))+metric('Processed',nc.pump_processed||0)+metric('Received',nc.received||0)+metric('Recorded',nc.recorded||0)+metric('Features',nc.features_created||0)+'</div><h3>Degraded reasons</h3><pre>'+esc(JSON.stringify(nh.reasons||[],null,2))+'</pre><h3>Skip reasons</h3><pre>'+esc(JSON.stringify(nh.skip_reasons||{},null,2))+'</pre>';$('commands').innerHTML='<h2>Counts</h2><pre>'+esc(JSON.stringify(cc,null,2))+'</pre>'+table(d.commands.items,[['ID','command_id'],['Role','target_role'],['Type','command_type'],['Status','status'],['Age','age_ms',r=>fmtMs(r.age_ms)],['Error','last_error'],['Actions','command_id',r=>`<button onclick="retry('${esc(r.command_id)}')">Retry</button> <button onclick="cancelCmd('${esc(r.command_id)}')">Cancel</button>`]]);$('offsets').innerHTML=table(d.offsets.items,[['Consumer','consumer_name'],['Source','source_table'],['Last event','last_event_id'],['Event ts','last_event_ts_ms'],['Offset age','offset_age_ms',r=>fmtMs(r.offset_age_ms)]]);$('registry').innerHTML='<h2>Missing roles</h2><pre>'+esc(JSON.stringify(d.command_health.missing_roles,null,2))+'</pre>'+table(d.registry,[['Command','command_type'],['Role','target_role'],['Handler','handler_name'],['Side effect','external_side_effect'],['Paper mutation','paper_state_mutation']]);$('rawpre').textContent=JSON.stringify(d,null,2)}catch(e){$('summary').innerHTML=`<div class="panel bad"><b>Load failed</b><pre>${esc(e.message)}</pre></div>`}}load();
 </script></body></html>
 """.strip()
 
