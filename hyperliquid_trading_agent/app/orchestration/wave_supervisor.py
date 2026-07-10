@@ -15,6 +15,7 @@ from hyperliquid_trading_agent.app.engine.replay_compare import (
     EngineReplayComparisonService,
     latest_engine_replay_comparison,
 )
+from hyperliquid_trading_agent.app.engine.runtime import resolve_engine_runtime
 from hyperliquid_trading_agent.app.engine.strategy_performance import refresh_strategy_regime_performance
 from hyperliquid_trading_agent.app.engine.validation_report import build_engine_validation_report
 from hyperliquid_trading_agent.app.logging import get_logger
@@ -119,6 +120,7 @@ class WaveSupervisor:
         return {
             "enabled": self.settings.orchestration_wave_supervisor_enabled,
             "running": self._task is not None and not self._task.done(),
+            "owner_role": "scheduler",
             "interval_seconds": self.settings.orchestration_wave_supervisor_interval_seconds,
             "maintenance_enabled": self.settings.orchestration_wave_supervisor_maintenance_enabled,
             "escalation_enabled": self.settings.orchestration_wave_supervisor_escalation_enabled,
@@ -150,6 +152,15 @@ class WaveSupervisor:
         async with self._lock:
             run_id = trace_run_id()
             started_ms = _now_ms()
+            await self._persist_run(
+                {
+                    "run_id": run_id,
+                    "owner_role": "scheduler",
+                    "status": "running",
+                    "created_at_ms": started_ms,
+                    "updated_at_ms": started_ms,
+                }
+            )
             self.trace.emit("wave_supervisor_started", "Wave Supervisor run started", run_id=run_id, payload={"options": options.__dict__})
             actions: list[dict[str, Any]] = []
             try:
@@ -183,15 +194,36 @@ class WaveSupervisor:
                     "snapshot": _status_snapshot(after),
                     "safety": {
                         "direct_config_mutation": False,
-                        "paper_enabled": self.settings.engine_paper_enabled,
-                        "live_enabled": self.settings.engine_live_enabled,
-                        "wave2_enabled": self.settings.engine_wave2_enabled,
+                        "paper_enabled": bool(
+                            (after.get("engine_service") or {}).get(
+                                "paper_enabled", self.settings.engine_paper_enabled
+                            )
+                        ),
+                        "live_enabled": bool(
+                            (after.get("engine_service") or {}).get(
+                                "live_enabled", self.settings.engine_live_enabled
+                            )
+                        ),
+                        "wave2_enabled": bool(classification.get("wave2_enabled")),
                         "promotion_requires_pr_or_signed_operator_gate": True,
                     },
                 }
                 self._run_count += 1
                 self._last_result = result
                 self._last_error = None
+                await self._persist_run(
+                    {
+                        "run_id": run_id,
+                        "owner_role": "scheduler",
+                        "status": "completed",
+                        "classification_state": classification.get("state"),
+                        "created_at_ms": started_ms,
+                        "completed_at_ms": result["completed_at_ms"],
+                        "duration_ms": result["duration_ms"],
+                        "result": result,
+                        "updated_at_ms": result["completed_at_ms"],
+                    }
+                )
                 self.trace.emit(
                     "wave_supervisor_completed",
                     f"Wave Supervisor classified state={classification.get('state')}",
@@ -203,8 +235,30 @@ class WaveSupervisor:
                 return result
             except Exception as exc:
                 self._last_error = f"{type(exc).__name__}: {str(exc)[:200]}"
+                failed_at_ms = _now_ms()
+                await self._persist_run(
+                    {
+                        "run_id": run_id,
+                        "owner_role": "scheduler",
+                        "status": "failed",
+                        "created_at_ms": started_ms,
+                        "completed_at_ms": failed_at_ms,
+                        "duration_ms": failed_at_ms - started_ms,
+                        "last_error": self._last_error,
+                        "updated_at_ms": failed_at_ms,
+                    }
+                )
                 self.trace.emit("wave_supervisor_failed", self._last_error, run_id=run_id, payload={"error": type(exc).__name__})
                 raise
+
+    async def _persist_run(self, run: dict[str, Any]) -> None:
+        persist = getattr(self.repository, "record_wave_supervisor_run", None)
+        if not callable(persist):
+            return
+        try:
+            await persist(run)
+        except Exception as exc:  # pragma: no cover - observability cannot stop supervision
+            log.warning("wave_supervisor_run_persistence_failed", error=type(exc).__name__)
 
     async def _loop(self) -> None:
         while True:
@@ -226,8 +280,16 @@ class WaveSupervisor:
             limit=1000,
         )
         replay = await _safe_latest_replay(self.repository)
-        service_status = self.engine_service.status() if self.engine_service is not None and callable(getattr(self.engine_service, "status", None)) else {}
-        registry_status = {}
+        service_status = await resolve_engine_runtime(
+            self.repository,
+            self.settings,
+            local_service=self.engine_service,
+        )
+        registry_status = (
+            dict(service_status.get("strategy_registry"))
+            if isinstance(service_status.get("strategy_registry"), dict)
+            else {}
+        )
         registry = getattr(self.engine_service, "strategy_registry", None) if self.engine_service is not None else None
         if registry is not None and callable(getattr(registry, "metadata", None)):
             registry_status = registry.metadata()
@@ -337,6 +399,16 @@ class GitHubIssueEscalator:
 
 def classify_wave_state(settings: Settings, readiness: dict[str, Any], replay: dict[str, Any] | None, *, service_status: dict[str, Any] | None = None) -> dict[str, Any]:
     service_status = service_status or {}
+    wave_policy = service_status.get("wave_policy") if isinstance(service_status.get("wave_policy"), dict) else {}
+    engine_enabled = bool(service_status.get("enabled", settings.engine_enabled))
+    paper_enabled = bool(service_status.get("paper_enabled", settings.engine_paper_enabled))
+    live_enabled = bool(service_status.get("live_enabled", settings.engine_live_enabled))
+    wave1c_enabled = bool(
+        service_status.get("wave1c_enabled", wave_policy.get("wave1c_enabled", settings.engine_wave1c_enabled))
+    )
+    wave2_enabled = bool(
+        service_status.get("wave2_enabled", wave_policy.get("wave2_enabled", settings.engine_wave2_enabled))
+    )
     hard_blocks = [item for item in readiness.get("hard_blocks", []) if isinstance(item, dict)]
     warnings = [item for item in readiness.get("warnings", []) if isinstance(item, dict)]
     wait_blocks = [item for item in hard_blocks if str(item.get("code")) in _WAIT_CODES]
@@ -350,12 +422,12 @@ def classify_wave_state(settings: Settings, readiness: dict[str, Any], replay: d
     elif replay_status == "failed" and "replay_comparison_failed" not in existing_codes:
         spine_blocks.append({"code": "replay_comparison_failed", "severity": "critical", "detail": f"Latest replay status={replay_status}."})
 
-    if not settings.engine_enabled:
+    if not engine_enabled:
         state = "engine_disabled"
-    elif settings.engine_live_enabled or settings.engine_paper_enabled:
+    elif live_enabled or paper_enabled:
         state = "unsafe_execution_mode"
-    elif settings.engine_wave1c_enabled:
-        state = "wave1c_canary_regressed" if spine_blocks else "wave1c_canary"
+    elif wave1c_enabled:
+        state = "wave1c_canary_blocked" if hard_blocks or spine_blocks or other_blocks else "wave1c_canary"
     elif spine_blocks or other_blocks:
         state = "blocked"
     elif wait_blocks:
@@ -365,21 +437,21 @@ def classify_wave_state(settings: Settings, readiness: dict[str, Any], replay: d
         # the controlled problem Wave 1C is meant to solve after the evidence spine is clean.
         state = "wave1c_promotion_candidate"
 
-    handoff_recommended = state in {"blocked", "wave1c_promotion_candidate", "wave1c_canary_regressed"}
+    handoff_recommended = state in {"blocked", "wave1c_promotion_candidate", "wave1c_canary_blocked"}
     objective_key = {
         "wave1c_promotion_candidate": "enable-wave1c-controlled-canary-v1",
-        "wave1c_canary_regressed": "stabilize-wave1c-canary-v1",
+        "wave1c_canary_blocked": "stabilize-wave1c-canary-v1",
         "blocked": "resolve-wave-readiness-blockers-v1",
     }.get(state, "continue-wave1a-shadow-observation-v1")
     return {
         "state": state,
         "objective_key": objective_key,
-        "phase": "wave1c" if settings.engine_wave1c_enabled else "wave1a",
+        "phase": "wave1c" if wave1c_enabled else "wave1a",
         "ready_for_paper": bool(readiness.get("ready_for_paper")),
         "readiness_grade": readiness.get("grade"),
         "readiness_score": readiness.get("score"),
-        "wave1c_enabled": settings.engine_wave1c_enabled,
-        "wave2_enabled": settings.engine_wave2_enabled,
+        "wave1c_enabled": wave1c_enabled,
+        "wave2_enabled": wave2_enabled,
         "handoff_recommended": handoff_recommended,
         "promotion_candidate": state == "wave1c_promotion_candidate",
         "blockers": [*spine_blocks, *other_blocks, *wait_blocks, *breadth_blocks],
@@ -407,8 +479,11 @@ def _recommendations_for_state(state: str, *, spine_blocks: list[dict[str, Any]]
         return ["Continue Wave 1A shadow observation until minimum time/sample gates pass."]
     if state == "wave1c_canary":
         return ["Continue Wave 1C canary verification; do not advance Wave 2 until Wave 1C evidence is stable."]
-    if state == "wave1c_canary_regressed":
-        return ["Escalate canary regression and prepare rollback to ENGINE_WAVE1C_ENABLED=false."]
+    if state == "wave1c_canary_blocked":
+        return [
+            "Keep Wave 1C enabled as a shadow-only canary while readiness blockers are remediated.",
+            "Keep paper, live, and Wave 2 disabled; do not promote from this state.",
+        ]
     if spine_blocks:
         return ["Escalate evidence/replay/risk/council/outcome spine blockers to Engineering Loop with bounded evidence."]
     if breadth_blocks:

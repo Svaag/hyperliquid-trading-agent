@@ -27,16 +27,21 @@ class SchedulerWorker(BaseWorker):
         self._wave_supervisor: WaveSupervisor | None = None
 
     async def run(self) -> None:
-        await self.command_loop(
-            {
-                "orchestration_wave_run_once": self._handle_orchestration_wave_run_once,
-                "autonomy_evaluations_run": self._handle_autonomy_evaluations_run,
-                "autonomy_evaluations_backfill": self._handle_autonomy_evaluations_backfill,
-                "autonomy_event_evaluations_backfill": self._handle_autonomy_event_evaluations_backfill,
-                "autonomy_daily_report_run": self._handle_autonomy_daily_report_run,
-                "autonomy_weekly_report_run": self._handle_autonomy_weekly_report_run,
-            }
-        )
+        supervisor = self._get_wave_supervisor()
+        await supervisor.start()
+        try:
+            await self.command_loop(
+                {
+                    "orchestration_wave_run_once": self._handle_orchestration_wave_run_once,
+                    "autonomy_evaluations_run": self._handle_autonomy_evaluations_run,
+                    "autonomy_evaluations_backfill": self._handle_autonomy_evaluations_backfill,
+                    "autonomy_event_evaluations_backfill": self._handle_autonomy_event_evaluations_backfill,
+                    "autonomy_daily_report_run": self._handle_autonomy_daily_report_run,
+                    "autonomy_weekly_report_run": self._handle_autonomy_weekly_report_run,
+                }
+            )
+        finally:
+            await supervisor.stop()
 
     async def _handle_orchestration_wave_run_once(self, command: dict[str, Any]) -> dict[str, Any]:
         self._record_command(command)
@@ -143,4 +148,12 @@ class SchedulerWorker(BaseWorker):
         return self._wave_supervisor
 
     def heartbeat_metadata(self) -> dict[str, Any]:
-        return {"scheduler": {"command_count": self.command_count, "last_command_type": self.last_command_type}}
+        supervisor_status = getattr(self._wave_supervisor, "status", None)
+        return {
+            "scheduler": {"command_count": self.command_count, "last_command_type": self.last_command_type},
+            "wave_supervisor": (
+                supervisor_status()
+                if callable(supervisor_status)
+                else {"enabled": self.settings.orchestration_wave_supervisor_enabled, "running": False}
+            ),
+        }

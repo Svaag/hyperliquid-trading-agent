@@ -35,21 +35,41 @@ class BaseWorker:
         self.repository = Repository(None)
         self._stop = asyncio.Event()
         self._heartbeat_task: asyncio.Task | None = None
+        self._last_heartbeat_prune_at_ms = 0
 
     async def run_forever(self) -> None:
         self.engine = create_engine(self.settings)
         self.sessionmaker = create_sessionmaker(self.engine)
         self.repository = Repository(self.sessionmaker)
-        await self._heartbeat("starting")
+        failed = False
         try:
+            await self._heartbeat("starting")
             if self.lock_name:
                 async with self.sessionmaker() as session:
                     async with postgres_advisory_lock(session, self.lock_name):
                         await self._run_with_heartbeat()
             else:
                 await self._run_with_heartbeat()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            failed = True
+            await self.repository.mark_service_failed(
+                self.role.value,
+                self.instance_id,
+                error=f"{type(exc).__name__}: {exc}",
+                metadata=self.heartbeat_metadata(),
+            )
+            raise
         finally:
-            await self.stop()
+            if not failed:
+                await self.stop()
+                await self.repository.mark_service_stopped(
+                    self.role.value,
+                    self.instance_id,
+                    metadata=self.heartbeat_metadata(),
+                )
+            await self._prune_heartbeat_history(force=True)
             if self.engine is not None:
                 await self.engine.dispose()
 
@@ -100,6 +120,24 @@ class BaseWorker:
             version=__version__,
             metadata=self.heartbeat_metadata(),
         )
+        await self._prune_heartbeat_history()
+
+    async def _prune_heartbeat_history(self, *, force: bool = False) -> None:
+        now = now_ms()
+        if not force and now - self._last_heartbeat_prune_at_ms < 5 * 60_000:
+            return
+        prune = getattr(self.repository, "prune_service_heartbeat_history", None)
+        if callable(prune):
+            retention_ms = max(60, int(self.settings.service_heartbeat_history_retention_seconds)) * 1000
+            try:
+                await prune(before_ms=now - retention_ms)
+            except Exception as exc:  # pragma: no cover - cleanup must not stop a worker
+                log.warning(
+                    "service_heartbeat_history_prune_failed",
+                    role=self.role.value,
+                    error=type(exc).__name__,
+                )
+        self._last_heartbeat_prune_at_ms = now
 
     def heartbeat_metadata(self) -> dict[str, Any]:
         return {}

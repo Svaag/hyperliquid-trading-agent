@@ -9,7 +9,7 @@ from hyperliquid_trading_agent.app.agent.runner import AgentContext, AgentRespon
 from hyperliquid_trading_agent.app.charting import ChartingService
 from hyperliquid_trading_agent.app.config import ServiceRole, Settings
 from hyperliquid_trading_agent.app.db.repository import Repository
-from hyperliquid_trading_agent.app.discord_bot import DiscordTradingBot
+from hyperliquid_trading_agent.app.discord_bot import DiscordMentionPathDiagnostics, DiscordTradingBot
 from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.tradfi.client import TradFiClient
@@ -22,29 +22,46 @@ log = get_logger(__name__)
 class CommandBackedAgentRunner:
     """Discord-facing runner proxy that keeps LLM execution in the agent worker."""
 
-    def __init__(self, *, repository: Repository, settings: Settings, requested_by: str = "discord_bot") -> None:
+    def __init__(
+        self,
+        *,
+        repository: Repository,
+        settings: Settings,
+        requested_by: str = "discord_bot",
+        diagnostics: DiscordMentionPathDiagnostics | None = None,
+    ) -> None:
         self.repository = repository
         self.settings = settings
         self.requested_by = requested_by
+        self.diagnostics = diagnostics
 
     async def answer(self, prompt: str, context: AgentContext | None = None) -> AgentResponse:
         context = context or AgentContext(source="discord")
         request_id = f"discord_{uuid4().hex}"
-        command = await self.repository.enqueue_worker_command(
-            target_role=ServiceRole.AGENT.value,
-            command_type="ask",
-            payload={"prompt": prompt, "context": _agent_context_payload(context), "request_id": request_id},
-            requested_by=self.requested_by,
-            idempotency_key=f"{self.requested_by}:ask:{request_id}",
-            metadata={"source": "discord", "discord_thread_id": context.discord_thread_id, "discord_channel_id": context.discord_channel_id},
-        )
+        try:
+            command = await self.repository.enqueue_worker_command(
+                target_role=ServiceRole.AGENT.value,
+                command_type="ask",
+                payload={"prompt": prompt, "context": _agent_context_payload(context), "request_id": request_id},
+                requested_by=self.requested_by,
+                idempotency_key=f"{self.requested_by}:ask:{request_id}",
+                metadata={"source": "discord", "discord_thread_id": context.discord_thread_id, "discord_channel_id": context.discord_channel_id},
+            )
+        except Exception as exc:
+            if self.diagnostics is not None:
+                self.diagnostics.command_finished("enqueue_failed", error=f"{type(exc).__name__}: {exc}")
+            raise
         command_id = str(command.get("command_id") or "")
+        if self.diagnostics is not None:
+            self.diagnostics.command_enqueued(command_id)
         timeout_seconds = max(10.0, float(getattr(self.settings, "discord_command_timeout_seconds", 180.0)))
         deadline = asyncio.get_running_loop().time() + timeout_seconds
         while asyncio.get_running_loop().time() < deadline:
             current = await self.repository.get_worker_command(command_id)
             status = str((current or command).get("status") or "")
             if status == "completed":
+                if self.diagnostics is not None:
+                    self.diagnostics.command_finished("completed")
                 result = (current or {}).get("result") or {}
                 if not isinstance(result, dict):
                     result = {}
@@ -59,8 +76,12 @@ class CommandBackedAgentRunner:
                 )
             if status in {"failed", "cancelled"}:
                 last_error = str((current or {}).get("last_error") or "unknown error")
+                if self.diagnostics is not None:
+                    self.diagnostics.command_finished(status, error=last_error)
                 return AgentResponse(content=f"Trading agent command `{command_id}` {status}: {last_error}. No trade was placed.", fallback_used=True)
             await asyncio.sleep(1.0)
+        if self.diagnostics is not None:
+            self.diagnostics.command_finished("timeout", error=f"timeout_after_{int(timeout_seconds)}s")
         return AgentResponse(
             content=(
                 f"I accepted the request as worker command `{command_id}`, but it did not finish within "
@@ -82,12 +103,17 @@ class DiscordBotWorker(BaseWorker):
         self.tradfi: TradFiClient | None = None
         self._bot_task: asyncio.Task | None = None
         self._last_error: str | None = None
+        self.diagnostics = DiscordMentionPathDiagnostics()
 
     async def run(self) -> None:
         if not self.settings.discord_bot_enabled or not self.settings.discord_bot_token:
             await self.wait_until_stopped()
             return
-        self.runner = CommandBackedAgentRunner(repository=self.repository, settings=self.settings)
+        self.runner = CommandBackedAgentRunner(
+            repository=self.repository,
+            settings=self.settings,
+            diagnostics=self.diagnostics,
+        )
         charting_service = None
         if self.settings.discord_chart_command_enabled or self.settings.prediction_market_paper_enabled:
             self.hyperliquid = HyperliquidClient(settings=self.settings)
@@ -96,7 +122,13 @@ class DiscordBotWorker(BaseWorker):
                 self.hyperliquid = HyperliquidClient(settings=self.settings)
             self.tradfi = await build_tradfi_client(self.settings)
             charting_service = ChartingService(settings=self.settings, hyperliquid=self.hyperliquid, tradfi=self.tradfi)
-        self.bot = DiscordTradingBot(settings=self.settings, runner=self.runner, charting_service=charting_service, hyperliquid=self.hyperliquid)
+        self.bot = DiscordTradingBot(
+            settings=self.settings,
+            runner=self.runner,
+            charting_service=charting_service,
+            hyperliquid=self.hyperliquid,
+            diagnostics=self.diagnostics,
+        )
         self._bot_task = asyncio.create_task(self.bot.start(), name="discord-command-bot")
         stop_task = asyncio.create_task(self.wait_until_stopped(), name="discord-command-bot-stop")
         try:
@@ -147,6 +179,7 @@ class DiscordBotWorker(BaseWorker):
                 "ready": bool(client is not None and callable(getattr(client, "is_ready", None)) and client.is_ready()),
                 "message_content_intent": bool(getattr(getattr(client, "intents", None), "message_content", False)) if client is not None else False,
                 "runner": "agent_worker_command_proxy" if self.runner is not None else None,
+                "mention_path": self.diagnostics.status(),
                 "charting": {
                     "enabled": self.settings.discord_chart_command_enabled,
                     "configured": self.bot is not None and getattr(self.bot, "charting_service", None) is not None,

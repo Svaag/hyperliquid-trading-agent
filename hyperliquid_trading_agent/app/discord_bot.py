@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Any
@@ -53,6 +54,78 @@ class DiscordContext:
     author_id: int | None
 
 
+class DiscordMentionPathDiagnostics:
+    """In-process proof points for the interactive Discord mention path."""
+
+    def __init__(self) -> None:
+        self.gateway_ready_at_ms: int | None = None
+        self.last_message_seen_at_ms: int | None = None
+        self.last_authorized_mention_at_ms: int | None = None
+        self.last_authorized_path_at_ms: int | None = None
+        self.last_command_id_enqueued: str | None = None
+        self.last_command_status: str | None = None
+        self.last_command_error: str | None = None
+        self.last_reply_success_at_ms: int | None = None
+        self.last_reply_error_at_ms: int | None = None
+        self.last_reply_error: str | None = None
+        self.auth_rejection_count = 0
+        self.thread_fallback_count = 0
+        self.last_thread_error: str | None = None
+
+    def gateway_ready(self) -> None:
+        self.gateway_ready_at_ms = _diagnostic_now_ms()
+
+    def message_seen(self) -> None:
+        self.last_message_seen_at_ms = _diagnostic_now_ms()
+
+    def authorized_path(self, *, mentioned: bool) -> None:
+        now = _diagnostic_now_ms()
+        self.last_authorized_path_at_ms = now
+        if mentioned:
+            self.last_authorized_mention_at_ms = now
+
+    def auth_rejected(self) -> None:
+        self.auth_rejection_count += 1
+
+    def command_enqueued(self, command_id: str) -> None:
+        self.last_command_id_enqueued = str(command_id)
+        self.last_command_status = "enqueued"
+        self.last_command_error = None
+
+    def command_finished(self, status: str, *, error: str | None = None) -> None:
+        self.last_command_status = str(status)
+        self.last_command_error = str(error)[:500] if error else None
+
+    def reply_succeeded(self) -> None:
+        self.last_reply_success_at_ms = _diagnostic_now_ms()
+        self.last_reply_error = None
+
+    def reply_failed(self, error: str) -> None:
+        self.last_reply_error_at_ms = _diagnostic_now_ms()
+        self.last_reply_error = str(error)[:500]
+
+    def thread_fallback(self, error: str) -> None:
+        self.thread_fallback_count += 1
+        self.last_thread_error = str(error)[:500]
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "gateway_ready_at_ms": self.gateway_ready_at_ms,
+            "last_message_seen_at_ms": self.last_message_seen_at_ms,
+            "last_authorized_mention_at_ms": self.last_authorized_mention_at_ms,
+            "last_authorized_path_at_ms": self.last_authorized_path_at_ms,
+            "last_command_id_enqueued": self.last_command_id_enqueued,
+            "last_command_status": self.last_command_status,
+            "last_command_error": self.last_command_error,
+            "last_reply_success_at_ms": self.last_reply_success_at_ms,
+            "last_reply_error_at_ms": self.last_reply_error_at_ms,
+            "last_reply_error": self.last_reply_error,
+            "auth_rejection_count": self.auth_rejection_count,
+            "thread_fallback_count": self.thread_fallback_count,
+            "last_thread_error": self.last_thread_error,
+        }
+
+
 class DiscordTradingBot:
     """Mention-driven Discord support desk bot."""
 
@@ -64,6 +137,7 @@ class DiscordTradingBot:
         autonomy_service: Any | None = None,
         charting_service: ChartingService | None = None,
         hyperliquid: Any | None = None,
+        diagnostics: DiscordMentionPathDiagnostics | None = None,
     ):
         self.settings = settings
         self.runner = runner
@@ -71,6 +145,7 @@ class DiscordTradingBot:
         self.autonomy_service = autonomy_service
         self.charting_service = charting_service
         self.hyperliquid = hyperliquid
+        self.diagnostics = diagnostics or DiscordMentionPathDiagnostics()
         self.client = None
         if discord is not None:
             intents = discord.Intents.default()
@@ -121,12 +196,14 @@ class DiscordTradingBot:
 
         @self.client.event
         async def on_ready():
+            self.diagnostics.gateway_ready()
             log.info("discord_bot_ready", user=str(self.client.user), guild_count=len(self.client.guilds))
 
         @self.client.event
         async def on_message(message):
             if message.author.bot or self.client.user is None:
                 return
+            self.diagnostics.message_seen()
             raw_content = str(getattr(message, "content", "") or "")
             chart_command = parse_chart_command(raw_content)
             channel_id = _authorized_channel_id(message)
@@ -156,9 +233,11 @@ class DiscordTradingBot:
             if not mentioned and not thread_continuation and not prediction_market_context_reply and not (autonomy_command is not None and autonomy_alert_channel):
                 return
             if not self.is_authorized(context, role_ids=role_ids) and not (autonomy_command is not None and autonomy_alert_channel):
+                self.diagnostics.auth_rejected()
                 DISCORD_MESSAGES.labels(result="unauthorized").inc()
                 await message.reply("Not authorized for this bot/channel.", mention_author=False)
                 return
+            self.diagnostics.authorized_path(mentioned=mentioned)
             if not prompt:
                 await message.reply("Mention me with a trading, Hyperliquid, market, macro, or news question.", mention_author=False)
                 return
@@ -205,7 +284,7 @@ class DiscordTradingBot:
                         DISCORD_MESSAGES.labels(result="no_runner").inc()
                         await message.reply("Trading agent runtime is not ready yet.", mention_author=False)
                         return
-                    thread = await _ensure_thread(message, prompt)
+                    thread = await _ensure_thread(message, prompt, diagnostics=self.diagnostics)
                     thread_id = _maybe_str(getattr(thread, "id", None))
                     if tracking_command is not None and self.tracking_service is not None:
                         content = await self.tracking_service.handle_thread_command(tracking_command, thread_id or "")
@@ -237,10 +316,12 @@ class DiscordTradingBot:
                     response = await self.runner.answer(prompt, context=agent_context)
                     for chunk in _chunk(response.content, self.settings.discord_max_response_chars):
                         await thread.send(chunk)
+                    self.diagnostics.reply_succeeded()
                     if repository is not None:
                         await repository.add_message(db_thread_id, "assistant", response.content)
                 DISCORD_MESSAGES.labels(result="ok").inc()
             except Exception as exc:  # pragma: no cover - Discord runtime behavior
+                self.diagnostics.reply_failed(f"{type(exc).__name__}: {exc}")
                 DISCORD_MESSAGES.labels(result="error").inc()
                 log.exception("discord_message_failed", error=type(exc).__name__)
                 await message.reply("I hit an internal error while answering. No trade was placed.", mention_author=False)
@@ -846,7 +927,12 @@ def _authorized_channel_id(message) -> int | None:
     return getattr(parent, "id", None) or getattr(channel, "id", None)
 
 
-async def _ensure_thread(message, prompt: str):
+async def _ensure_thread(
+    message,
+    prompt: str,
+    *,
+    diagnostics: DiscordMentionPathDiagnostics | None = None,
+):
     if _is_thread_channel(getattr(message, "channel", None)):
         return message.channel
     if callable(getattr(message, "create_thread", None)):
@@ -857,10 +943,18 @@ async def _ensure_thread(message, prompt: str):
             try:
                 return await message.create_thread(name)
             except Exception as exc:  # pragma: no cover - Discord permission/runtime behavior
+                if diagnostics is not None:
+                    diagnostics.thread_fallback(f"{type(exc).__name__}: {exc}")
                 log.warning("discord_thread_create_failed", error=type(exc).__name__)
         except Exception as exc:  # pragma: no cover - Discord permission/runtime behavior
+            if diagnostics is not None:
+                diagnostics.thread_fallback(f"{type(exc).__name__}: {exc}")
             log.warning("discord_thread_create_failed", error=type(exc).__name__)
     return message.channel
+
+
+def _diagnostic_now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 def _is_thread_channel(channel) -> bool:

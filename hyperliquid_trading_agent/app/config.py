@@ -134,6 +134,7 @@ class Settings(BaseSettings):
     discord_publisher_enabled: bool = False
     service_heartbeat_interval_seconds: int = 15
     service_heartbeat_stale_seconds: int = 90
+    service_heartbeat_history_retention_seconds: int = 3600
     worker_command_poll_seconds: float = 1.0
     worker_command_claim_stale_seconds: int = 300
     consumer_poll_seconds: float = 1.0

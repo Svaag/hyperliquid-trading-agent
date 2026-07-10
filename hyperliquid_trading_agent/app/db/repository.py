@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Callable, cast
 from uuid import uuid4
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -136,6 +136,7 @@ from hyperliquid_trading_agent.app.db.models import (
     TradeProposalRecord,
     TradeSignalRecord,
     TuningProposalRecord,
+    WaveSupervisorRunRecord,
     WeeklyReportRecord,
     WorkerCommandRecord,
     WorldEventRecord,
@@ -206,6 +207,32 @@ class Repository:
             return None
         now_ms = updated_at_ms or _runtime_now_ms()
         async with self.sessionmaker() as session:
+            effective_status = str(status)
+            effective_started_at_ms = int(started_at_ms or now_ms)
+            if effective_status in {"starting", "running"}:
+                newer = await session.execute(
+                    select(func.count())
+                    .select_from(ServiceHeartbeatRecord)
+                    .where(
+                        ServiceHeartbeatRecord.service_role == str(service_role),
+                        ServiceHeartbeatRecord.instance_id != str(instance_id),
+                        ServiceHeartbeatRecord.started_at_ms > effective_started_at_ms,
+                        ServiceHeartbeatRecord.status.in_(["starting", "running"]),
+                    )
+                )
+                if int(newer.scalar_one() or 0) > 0:
+                    effective_status = "superseded"
+                else:
+                    await session.execute(
+                        update(ServiceHeartbeatRecord)
+                        .where(
+                            ServiceHeartbeatRecord.service_role == str(service_role),
+                            ServiceHeartbeatRecord.instance_id != str(instance_id),
+                            ServiceHeartbeatRecord.started_at_ms <= effective_started_at_ms,
+                            ServiceHeartbeatRecord.status.in_(["starting", "running", "stopping"]),
+                        )
+                        .values(status="superseded", updated_at_ms=now_ms)
+                    )
             item = await session.get(ServiceHeartbeatRecord, {"service_role": str(service_role), "instance_id": str(instance_id)})
             if item is None:
                 item = ServiceHeartbeatRecord(
@@ -213,10 +240,10 @@ class Repository:
                     instance_id=str(instance_id),
                     started_at_ms=started_at_ms or now_ms,
                     updated_at_ms=now_ms,
-                    status=str(status),
+                    status=effective_status,
                 )
                 session.add(item)
-            item.status = str(status)
+            item.status = effective_status
             item.updated_at_ms = now_ms
             if started_at_ms is not None:
                 item.started_at_ms = int(started_at_ms)
@@ -234,15 +261,102 @@ class Repository:
     async def mark_service_stopping(self, service_role: str, instance_id: str, *, metadata: dict[str, Any] | None = None) -> None:
         await self.upsert_service_heartbeat(service_role=service_role, instance_id=instance_id, status="stopping", metadata=metadata)
 
-    async def list_service_heartbeats(self, *, service_role: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def mark_service_stopped(self, service_role: str, instance_id: str, *, metadata: dict[str, Any] | None = None) -> None:
+        await self.upsert_service_heartbeat(service_role=service_role, instance_id=instance_id, status="stopped", metadata=metadata)
+
+    async def mark_service_failed(
+        self,
+        service_role: str,
+        instance_id: str,
+        *,
+        error: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        await self.upsert_service_heartbeat(
+            service_role=service_role,
+            instance_id=instance_id,
+            status="failed",
+            metadata={**dict(metadata or {}), "terminal_error": str(error)[:1000]},
+        )
+
+    async def list_service_heartbeats(
+        self,
+        *,
+        service_role: str | None = None,
+        limit: int = 100,
+        include_history: bool = False,
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(ServiceHeartbeatRecord).order_by(ServiceHeartbeatRecord.updated_at_ms.desc()).limit(limit)
+            stmt = select(ServiceHeartbeatRecord).order_by(ServiceHeartbeatRecord.updated_at_ms.desc())
             if service_role:
                 stmt = stmt.where(ServiceHeartbeatRecord.service_role == str(service_role))
+            if not include_history:
+                stmt = stmt.where(ServiceHeartbeatRecord.status.in_(["starting", "running"]))
+            stmt = stmt.limit(max(1, min(10_000, int(limit if include_history else limit * 20))))
             result = await session.execute(stmt)
-            return [_service_heartbeat_to_dict(item) for item in result.scalars().all()]
+            rows = list(result.scalars().all())
+            if include_history:
+                return [
+                    {**_service_heartbeat_to_dict(item), "current": item.status in {"starting", "running"}}
+                    for item in rows
+                ]
+            current: list[dict[str, Any]] = []
+            seen_roles: set[str] = set()
+            for item in rows:
+                if item.service_role in seen_roles:
+                    continue
+                seen_roles.add(item.service_role)
+                current.append({**_service_heartbeat_to_dict(item), "current": True})
+                if len(current) >= max(1, int(limit)):
+                    break
+            return current
+
+    async def prune_service_heartbeat_history(self, *, before_ms: int) -> int:
+        if self.sessionmaker is None:
+            return 0
+        async with self.sessionmaker() as session:
+            result = await session.execute(
+                delete(ServiceHeartbeatRecord).where(ServiceHeartbeatRecord.updated_at_ms < int(before_ms))
+            )
+            await session.commit()
+            return int(result.rowcount or 0)
+
+    async def record_wave_supervisor_run(self, run: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            WaveSupervisorRunRecord(
+                run_id=str(run["run_id"]),
+                owner_role=str(run.get("owner_role") or "scheduler"),
+                status=str(run.get("status") or "running"),
+                classification_state=run.get("classification_state"),
+                created_at_ms=int(run.get("created_at_ms") or _runtime_now_ms()),
+                completed_at_ms=run.get("completed_at_ms"),
+                duration_ms=run.get("duration_ms"),
+                result_json=redact_secrets(dict(run.get("result") or {})),
+                last_error=str(run.get("last_error"))[:1000] if run.get("last_error") else None,
+                updated_at_ms=int(run.get("updated_at_ms") or _runtime_now_ms()),
+            ),
+            "run_id",
+        )
+
+    async def list_wave_supervisor_runs(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        filters = [WaveSupervisorRunRecord.status == str(status)] if status else []
+        return await self._list_engine_records(
+            WaveSupervisorRunRecord,
+            order_by=WaveSupervisorRunRecord.created_at_ms,
+            limit=limit,
+            filters=filters,
+        )
+
+    async def latest_wave_supervisor_run(self) -> dict[str, Any] | None:
+        rows = await self.list_wave_supervisor_runs(limit=1)
+        return rows[0] if rows else None
 
     async def get_consumer_offset(self, consumer_name: str, *, source_table: str = "newswire_events") -> dict[str, Any]:
         if self.sessionmaker is None:

@@ -7,6 +7,7 @@ from typing import Any
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.engine.attribution import OUTCOME_WINDOWS_MS
 from hyperliquid_trading_agent.app.engine.replay_compare import latest_engine_replay_comparison
+from hyperliquid_trading_agent.app.engine.runtime import resolve_engine_runtime
 from hyperliquid_trading_agent.app.engine.validation_report import build_engine_validation_report
 
 
@@ -102,55 +103,17 @@ async def _maybe_list(repository: Any, method_name: str, **kwargs) -> list[dict[
 
 
 async def _latest_trader_engine_loop_status(repository: Any, settings: Settings, *, generated_at_ms: int) -> dict[str, Any]:
-    method = getattr(repository, "list_service_heartbeats", None)
-    if not callable(method):
-        return {}
-    try:
-        heartbeats = await method(service_role="trader", limit=5)
-    except TypeError:
-        heartbeats = await method()
-    stale_after_ms = max(1, int(settings.service_heartbeat_stale_seconds)) * 1000
-    best_stale: dict[str, Any] | None = None
-    for heartbeat in heartbeats:
-        if not isinstance(heartbeat, dict) or str(heartbeat.get("status") or "") != "running":
-            continue
-        updated_at_ms = _i(heartbeat.get("updated_at_ms"), 0)
-        metadata = heartbeat.get("metadata") if isinstance(heartbeat.get("metadata"), dict) else {}
-        engine_loop = metadata.get("engine_loop") if isinstance(metadata, dict) else None
-        if not isinstance(engine_loop, dict) or not engine_loop.get("enabled"):
-            continue
-        service = engine_loop.get("service") if isinstance(engine_loop.get("service"), dict) else {}
-        if not service:
-            continue
-        entry = {
-            **service,
-            "runtime_source": "trader_heartbeat",
-            "runtime_instance_id": heartbeat.get("instance_id"),
-            "runtime_updated_at_ms": updated_at_ms,
-            "runtime_running": bool(engine_loop.get("running")),
-        }
-        if updated_at_ms and generated_at_ms - updated_at_ms > stale_after_ms:
-            # Keep the freshest stale row so callers can report the true
-            # run_count/last_run instead of pretending the engine never ran;
-            # staleness itself still hard-blocks readiness elsewhere.
-            entry["runtime_stale"] = True
-            entry["runtime_age_ms"] = generated_at_ms - updated_at_ms
-            if best_stale is None or updated_at_ms > _i(best_stale.get("runtime_updated_at_ms"), 0):
-                best_stale = entry
-            continue
-        entry["runtime_stale"] = False
-        return entry
-    return best_stale or {}
+    runtime = await resolve_engine_runtime(repository, settings, generated_at_ms=generated_at_ms)
+    return runtime if runtime.get("runtime_source") == "trader_heartbeat" else {}
 
 
 async def _engine_service_status(repository: Any, settings: Settings, engine_service: Any | None, *, generated_at_ms: int) -> dict[str, Any]:
-    local = engine_service.status() if engine_service is not None and callable(getattr(engine_service, "status", None)) else {}
-    if _i(local.get("last_run_at_ms"), 0) > 0 or (local.get("enabled") and _i(local.get("run_count"), 0) > 0):
-        return {**local, "runtime_source": "local_service"}
-    runtime = await _latest_trader_engine_loop_status(repository, settings, generated_at_ms=generated_at_ms)
-    if runtime:
-        return runtime
-    return {**local, "runtime_source": "local_service" if local else "unavailable"}
+    return await resolve_engine_runtime(
+        repository,
+        settings,
+        local_service=engine_service,
+        generated_at_ms=generated_at_ms,
+    )
 
 
 async def build_paper_readiness_scorecard(
@@ -173,6 +136,11 @@ async def build_paper_readiness_scorecard(
     window_ms = max(1, hours) * 60 * 60 * 1000
     start_ms = max(generated_at_ms - window_ms, int(getattr(settings, "engine_readiness_clean_window_start_ms", 0) or 0))
     service_status = await _engine_service_status(repository, settings, engine_service, generated_at_ms=generated_at_ms)
+    engine_enabled = bool(service_status.get("enabled", settings.engine_enabled))
+    live_enabled = bool(service_status.get("live_enabled", settings.engine_live_enabled))
+    paper_enabled = bool(service_status.get("paper_enabled", settings.engine_paper_enabled))
+    shadow_enabled = bool(service_status.get("shadow_enabled", settings.engine_shadow_enabled))
+    execution_modes = service_status.get("execution_modes") or settings.engine_execution_mode_list
 
     expanded_limit = max(limit, int(settings.engine_readiness_min_candidates), int(settings.engine_readiness_min_shadow_intents))
     evidence_limit = max(expanded_limit * 2, 5000)
@@ -220,8 +188,8 @@ async def build_paper_readiness_scorecard(
     paper_reports = [item for item in reports if item.get("execution_mode") == "paper"]
     live_intents = [item for item in intents if item.get("execution_mode") == "live"]
     live_reports = [item for item in reports if item.get("execution_mode") == "live"]
-    shadow_only = settings.engine_shadow_enabled and not settings.engine_paper_enabled and settings.engine_execution_mode_list == ["shadow"]
-    if settings.engine_live_enabled:
+    shadow_only = shadow_enabled and not paper_enabled and execution_modes == ["shadow"]
+    if live_enabled:
         hard_blocks.append(_issue("live_enabled", "ENGINE_LIVE_ENABLED must remain false."))
     if shadow_only and (paper_intents or paper_reports):
         hard_blocks.append(_issue("paper_intents_in_shadow_only", f"paper_intents={len(paper_intents)} paper_reports={len(paper_reports)}"))
@@ -233,13 +201,13 @@ async def build_paper_readiness_scorecard(
         "paper_report_count": len(paper_reports),
         "live_intent_count": len(live_intents),
         "live_report_count": len(live_reports),
-        "live_enabled": settings.engine_live_enabled,
+        "live_enabled": live_enabled,
     }
 
     # Reliability and observation sample.
     last_run_at = service_status.get("last_run_at_ms")
     stale_after_ms = max(1, settings.engine_validation_alert_stale_loop_seconds) * 1000
-    if settings.engine_enabled and (not last_run_at or generated_at_ms - _i(last_run_at) > stale_after_ms):
+    if engine_enabled and (not last_run_at or generated_at_ms - _i(last_run_at) > stale_after_ms):
         hard_blocks.append(_issue("engine_loop_stale", f"last_run_at_ms={last_run_at}; stale_after_ms={stale_after_ms}"))
     if service_status.get("last_error"):
         hard_blocks.append(_issue("runtime_errors_present", f"last_error={service_status.get('last_error')}"))

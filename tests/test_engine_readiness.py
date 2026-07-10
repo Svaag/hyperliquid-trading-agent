@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.engine.paper_signoff import build_paper_signoff_preflight
 from hyperliquid_trading_agent.app.engine.readiness import build_paper_readiness_scorecard
+from hyperliquid_trading_agent.app.engine.runtime import resolve_engine_runtime
 from hyperliquid_trading_agent.app.main import create_app
 
 
@@ -267,6 +268,42 @@ def test_paper_readiness_uses_trader_engine_loop_heartbeat_when_api_service_is_p
     assert reliability["run_count"] == 3
     assert reliability["runtime_source"] == "trader_heartbeat"
     assert reliability["runtime_instance_id"] == "trader-1"
+
+
+def test_scheduler_resolves_engine_enabled_state_from_fresh_trader_heartbeat():
+    now_ms = int(time.time() * 1000)
+    repo = FakeReadinessRepository(now_ms=now_ms)
+    repo.heartbeats = [
+        {
+            "service_role": "trader",
+            "instance_id": "trader-runtime",
+            "status": "running",
+            "updated_at_ms": now_ms,
+            "metadata": {
+                "engine_loop": {
+                    "enabled": True,
+                    "running": True,
+                    "paper_enabled": False,
+                    "live_enabled": False,
+                    "wave1c_enabled": True,
+                    "wave2_enabled": False,
+                    "service": {
+                        "enabled": True,
+                        "run_count": 37,
+                        "last_run_at_ms": now_ms,
+                    },
+                }
+            },
+        }
+    ]
+    settings = readiness_settings(_env_file=None, engine_enabled=False)
+
+    runtime = anyio.run(resolve_engine_runtime, repo, settings)
+
+    assert runtime["enabled"] is True
+    assert runtime["runtime_source"] == "trader_heartbeat"
+    assert runtime["run_count"] == 37
+    assert runtime["wave1c_enabled"] is True
 
 
 def test_readiness_separates_shadow_research_breadth_from_paper_eligible_breadth():

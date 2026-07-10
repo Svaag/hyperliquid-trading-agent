@@ -16,6 +16,7 @@ from hyperliquid_trading_agent.app.engine.replay_compare import (
     latest_engine_replay_comparison,
     list_engine_replay_comparisons,
 )
+from hyperliquid_trading_agent.app.engine.runtime import resolve_engine_runtime
 from hyperliquid_trading_agent.app.engine.validation_report import (
     build_engine_validation_report,
     render_engine_validation_dashboard,
@@ -177,23 +178,25 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
         news_consumer = getattr(app.state, "engine_news_consumer", None)
         news_status = news_consumer.status() if news_consumer is not None and callable(getattr(news_consumer, "status", None)) else {}
         news_runtime = {} if news_status.get("running") else await _latest_trader_engine_newsfeed(repository)
-        engine_runtime = await _latest_trader_engine_loop(repository)
+        engine_runtime = await resolve_engine_runtime(repository, settings, local_service=service)
         operator_proposals_runtime = await _latest_trader_operator_proposals(repository)
         validation_monitor_runtime = await _latest_trader_validation_monitor(repository)
         return {
-            "enabled": settings.engine_enabled,
+            "enabled": bool(engine_runtime.get("enabled")),
+            "configured_for_api_role": settings.engine_enabled,
             "mode": settings.engine_mode,
-            "execution_modes": settings.engine_execution_mode_list,
-            "paper_enabled": settings.engine_paper_enabled,
-            "shadow_enabled": settings.engine_shadow_enabled,
-            "live_enabled": settings.engine_live_enabled,
+            "execution_modes": engine_runtime.get("execution_modes") or settings.engine_execution_mode_list,
+            "paper_enabled": bool(engine_runtime.get("paper_enabled", settings.engine_paper_enabled)),
+            "shadow_enabled": bool(engine_runtime.get("shadow_enabled", settings.engine_shadow_enabled)),
+            "live_enabled": bool(engine_runtime.get("live_enabled", settings.engine_live_enabled)),
             "wave_policy": {
-                "wave1c_enabled": settings.engine_wave1c_enabled,
-                "wave2_enabled": settings.engine_wave2_enabled,
+                "wave1c_enabled": bool(engine_runtime.get("wave1c_enabled", settings.engine_wave1c_enabled)),
+                "wave2_enabled": bool(engine_runtime.get("wave2_enabled", settings.engine_wave2_enabled)),
                 "wave2_status": "deferred_until_wave1_evidence_replay_readiness",
             },
             "repository_enabled": getattr(repository, "enabled", False),
-            "service": service_status,
+            "service": engine_runtime,
+            "local_service": service_status,
             "engine_runtime": engine_runtime,
             "operator_proposals": operator_proposals_runtime,
             "newsfeed": news_status,

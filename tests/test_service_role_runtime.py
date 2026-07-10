@@ -205,6 +205,30 @@ def test_repository_runtime_helpers() -> None:
         heartbeats = await repo.list_service_heartbeats(service_role="newswire")
         assert heartbeats[0]["status"] == "running"
 
+        await repo.upsert_service_heartbeat(
+            service_role="newswire",
+            instance_id="nw-2",
+            status="running",
+            started_at_ms=3,
+            updated_at_ms=4,
+        )
+        await repo.upsert_service_heartbeat(
+            service_role="newswire",
+            instance_id="nw-1",
+            status="running",
+            started_at_ms=1,
+            updated_at_ms=5,
+        )
+        current = await repo.list_service_heartbeats(service_role="newswire")
+        history = await repo.list_service_heartbeats(service_role="newswire", include_history=True)
+        assert [item["instance_id"] for item in current] == ["nw-2"]
+        assert {item["instance_id"]: item["status"] for item in history} == {
+            "nw-1": "superseded",
+            "nw-2": "running",
+        }
+        await repo.mark_service_stopped("newswire", "nw-2")
+        assert await repo.list_service_heartbeats(service_role="newswire") == []
+
         await repo.update_consumer_offset("world_model:newswire", last_event_id="nw_1", last_event_ts_ms=10)
         offset = await repo.get_consumer_offset("world_model:newswire")
         assert offset["last_event_id"] == "nw_1"

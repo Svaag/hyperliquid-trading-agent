@@ -16,7 +16,7 @@ This deployment has one public FastAPI process and dedicated non-web workers for
 | `discord_publisher` | send-only publishing from persisted Newswire events | dashboard port, news providers, trading loops |
 | `discord_bot` | optional command/control Discord session | dashboard port, ingestion/trading loops |
 | `liquidations` | liquidation-feed adapters when enabled | dashboard port, trading loops |
-| `scheduler` | lightweight periodic command scheduling | dashboard port |
+| `scheduler` | periodic commands and the single Wave Supervisor loop | dashboard port, engine execution |
 
 ## Local compose layout
 
@@ -31,6 +31,7 @@ Default Compose services start `api`, `newswire`, `world-model`, `trader`, `agen
 curl http://127.0.0.1:${HOST_PORT:-8081}/health
 curl http://127.0.0.1:${HOST_PORT:-8081}/runtime/status
 curl http://127.0.0.1:${HOST_PORT:-8081}/runtime/heartbeats
+curl http://127.0.0.1:${HOST_PORT:-8081}/runtime/heartbeats/history
 ```
 
 Optional workers are profile-gated:
@@ -53,6 +54,7 @@ Examples include:
 - autonomy pause/resume/evaluation/report/approval endpoints -> `trader`
 - tracking pause/resume/stop endpoints -> `trader`
 - `POST /newswire/discord/test` -> `discord_publisher`
+- `POST /orchestration/wave/run-once` -> `scheduler`
 - World Model adapter poll/dev seed -> `world_model`
 
 Poll, retry, or cancel command completion through the API:
@@ -127,4 +129,6 @@ assert '8091' not in '\n'.join(lines)
 PY
 ```
 
-At runtime, `/runtime/status` and `/runtime/heartbeats` include `heartbeat_age_ms`, `stale`, and stale-count fields. Stale or missing worker heartbeats indicate a stopped worker, not an API failure. Restart the role-specific service rather than starting another dashboard process.
+At runtime, `/runtime/status` and `/runtime/heartbeats` show one current active instance per role and include `heartbeat_age_ms`, `stale`, and stale-count fields. Superseded, stopped, and failed instances remain available for one hour through `/runtime/heartbeats/history`. Stale or missing worker heartbeats indicate a stopped worker, not an API failure. Restart the role-specific service rather than starting another dashboard process.
+
+For the interactive Discord command path, follow [the mention-path smoke test](../discord-mention-path-runbook.md). Gateway readiness alone is not proof that mentions reach the agent worker and receive a reply.
