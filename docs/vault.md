@@ -15,7 +15,69 @@ docker compose exec vault vault status
 
 The Compose Vault listener uses HTTP and `tls_disable=true` for local development only. Do not expose this port publicly.
 
+## Safe Local Bootstrap
+
+The repository includes an idempotent, local-address-only bootstrap command. It initializes a fresh Vault, unseals it, enables KV v2, seeds an allowlisted set of secret values from `.env`, creates a read-only policy/token, and prints only key names and counts:
+
+```bash
+python -m hyperliquid_trading_agent.app.vault_admin status
+python -m hyperliquid_trading_agent.app.vault_admin bootstrap-local
+```
+
+The bootstrap stores local development recovery material and the application token separately:
+
+```text
+.local/vault/admin/dev-credentials.json  # unseal key and root token; never mounted into apps
+.local/vault/app/token                   # read-only token; mounted at /run/secrets/vault/token
+```
+
+Both files are ignored by Git and written atomically with mode `0600`. Only `.gitkeep` placeholders are tracked. This is a development convenience, not a production secret-management design. Back up recovery material outside the repository if the local Vault data matters.
+
+The default bootstrap secret is `kv/hyperliquid-trading-agent/local`. Configure the app to read the same path:
+
+```env
+VAULT_ENABLED=true
+VAULT_ADDR=http://vault:8200
+VAULT_KV_MOUNT=kv
+VAULT_KV_VERSION=2
+VAULT_SECRET_PATH=hyperliquid-trading-agent/local
+VAULT_ENV_OVERRIDE=false
+VAULT_TOKEN=
+VAULT_TOKEN_FILE=/run/secrets/vault/token
+```
+
+Then recreate the migration and application services so the read-only token mount and Vault settings take effect:
+
+```bash
+docker compose up -d --build api newswire world-model trader agent scheduler
+```
+
+Verify without exposing credentials:
+
+```bash
+python -m hyperliquid_trading_agent.app.vault_admin status
+docker compose ps
+curl -fsS http://127.0.0.1:${HOST_PORT:-8081}/health
+curl -fsS http://127.0.0.1:${HOST_PORT:-8081}/ready
+```
+
+Application startup now reports a specific sealed/uninitialized diagnostic instead of a generic Vault HTTP error.
+
+## Lost Local Unseal Key
+
+An initialized 1-of-1 Vault cannot be unsealed without its key. `bootstrap-local` detects an initialized Vault with missing local recovery credentials and stops. It never resets a volume.
+
+Inspect the proposed recovery sequence with:
+
+```bash
+python -m hyperliquid_trading_agent.app.vault_admin reset-plan
+```
+
+The output names the one affected `vault_data` volume and marks its removal as destructive. Obtain separate explicit approval before running that volume-removal command, and first confirm there is no recoverable unseal key or snapshot. Stop dependent services before any approved reset, bootstrap the replacement Vault, verify reads with the narrow token, and only then re-enable applications.
+
 ## Initialize And Unseal
+
+The safe bootstrap above is preferred for local development. The following manual procedure is retained for operators who manage recovery material outside the repository.
 
 Run this once per fresh `vault_data` volume:
 
@@ -127,9 +189,10 @@ VAULT_ENABLED=true
 VAULT_ADDR=http://vault:8200
 VAULT_KV_MOUNT=kv
 VAULT_KV_VERSION=2
-VAULT_SECRET_PATH=hyperliquid-trading-agent/prod
+VAULT_SECRET_PATH=hyperliquid-trading-agent/local
 VAULT_ENV_OVERRIDE=false
-VAULT_TOKEN=<read-only-agent-token>
+VAULT_TOKEN=
+VAULT_TOKEN_FILE=/run/secrets/vault/token
 ```
 
 `VAULT_ENV_OVERRIDE=false` means already-present environment values win. Empty values can still be filled from Vault. Set `VAULT_ENV_OVERRIDE=true` only when you explicitly want Vault to replace non-empty local values.
@@ -160,10 +223,10 @@ Create a renewable token for the app:
 docker compose exec vault vault token create -policy=hyperliquid-trading-agent -period=24h
 ```
 
-Put that token in `.env` as `VAULT_TOKEN`, or mount it as a file and set:
+Prefer the Compose-mounted token created by `bootstrap-local`. For a separately managed token file, set:
 
 ```env
-VAULT_TOKEN_FILE=/run/secrets/vault_token
+VAULT_TOKEN_FILE=/run/secrets/vault/token
 ```
 
 ## Production Notes

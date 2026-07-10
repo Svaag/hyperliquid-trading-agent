@@ -16,6 +16,12 @@ venv/
 .env
 .env.*
 !.env.example
+.local/**
+!.local/vault/
+!.local/vault/admin/
+!.local/vault/admin/.gitkeep
+!.local/vault/app/
+!.local/vault/app/.gitkeep
 
 # Runtime data
 *.db

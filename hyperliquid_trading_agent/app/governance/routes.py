@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.governance.export import ReviewExportService
 from hyperliquid_trading_agent.app.governance.review import ReviewWorkflowService
 from hyperliquid_trading_agent.app.governance.shadow import ShadowComparisonService
 
@@ -152,6 +153,21 @@ def register_governance_routes(app: FastAPI, settings: Settings, require_auth: C
             raise HTTPException(status_code=404, detail="proposal not found")
         return item
 
+    @app.get("/governance/proposals/{proposal_id}/review-export")
+    async def governance_review_export(proposal_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        require_auth(settings, authorization)
+        repository = app.state.repository
+        if not getattr(repository, "enabled", False):
+            raise HTTPException(status_code=503, detail="governance repository unavailable")
+        recorder = getattr(app.state, "decision_context_recorder", None)
+        active_refs = recorder.active_refs() if recorder is not None else {}
+        try:
+            return await ReviewExportService(repository=repository).build(proposal_id, active_refs=active_refs)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="proposal not found") from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.post("/governance/proposals/{proposal_id}/request-replay")
     async def governance_request_replay(proposal_id: str, decision_id: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         require_auth(settings, authorization)
@@ -273,6 +289,14 @@ function table(items, cols){ if(!items || !items.length) return '<div class="mut
 async function runReplay(id){ await api(`/governance/proposals/${encodeURIComponent(id)}/request-replay`, {method:'POST'}); await loadDashboard(); }
 async function runShadow(id){ await api(`/governance/proposals/${encodeURIComponent(id)}/request-shadow`, {method:'POST'}); await loadDashboard(); }
 async function createReview(id){ try { await api(`/governance/proposals/${encodeURIComponent(id)}/review-packet`, {method:'POST'}); } catch(e){ alert(e.message); } await loadDashboard(); }
+async function exportReview(id){
+  try {
+    const bundle = await api(`/governance/proposals/${encodeURIComponent(id)}/review-export`);
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], {type:'application/json'});
+    const url = URL.createObjectURL(blob); const link = document.createElement('a');
+    link.href = url; link.download = `governance-review-${id}.json`; link.click(); URL.revokeObjectURL(url);
+  } catch(e){ alert(e.message); }
+}
 async function loadDashboard(){
   try{
     $('token').value = localStorage.getItem('agentToken') || '';
@@ -288,7 +312,7 @@ async function loadDashboard(){
     ].join('');
     $('statusCounts').textContent = JSON.stringify(s.proposal_status_counts || {}, null, 2);
     $('runtime').textContent = JSON.stringify({runtime:data.runtime, config:data.config}, null, 2);
-    const propCols = [['ID','proposal_id', r=>`<code>${esc(r.proposal_id)}</code>`], ['Status','status', r=>pill(r.status)], ['Risk','risk_direction', r=>pill(r.risk_direction)], ['Change','change_type'], ['Evidence','evidence', r=>esc((r.evidence||[]).length)], ['Actions','proposal_id', r=>`<span class="actions"><button onclick="runReplay('${esc(r.proposal_id)}')">Replay</button><button onclick="runShadow('${esc(r.proposal_id)}')">Shadow</button><button onclick="createReview('${esc(r.proposal_id)}')">Review packet</button></span>`]];
+    const propCols = [['ID','proposal_id', r=>`<code>${esc(r.proposal_id)}</code>`], ['Status','status', r=>pill(r.status)], ['Risk','risk_direction', r=>pill(r.risk_direction)], ['Change','change_type'], ['Evidence','evidence', r=>esc((r.evidence||[]).length)], ['Actions','proposal_id', r=>`<span class="actions"><button onclick="runReplay('${esc(r.proposal_id)}')">Replay</button><button onclick="runShadow('${esc(r.proposal_id)}')">Shadow</button><button onclick="createReview('${esc(r.proposal_id)}')">Review packet</button><button onclick="exportReview('${esc(r.proposal_id)}')">Export review</button></span>`]];
     $('reviewReady').innerHTML = table(data.review_ready || [], propCols);
     $('proposals').innerHTML = table(data.proposals || [], propCols);
     $('replays').innerHTML = table(data.replay_results || [], [['Replay','replay_id', r=>`<code>${esc(r.replay_id)}</code>`], ['Proposal','proposal_id'], ['Status','status', r=>pill(r.status)], ['Sample','baseline_metrics', r=>esc((r.baseline_metrics||{}).sample_size ?? '-')], ['Avg R Δ','diffs', r=>esc((r.diffs||{}).avg_r ?? '-')], ['Created','created_at_ms']]);
