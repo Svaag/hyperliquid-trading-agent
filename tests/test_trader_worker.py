@@ -19,7 +19,21 @@ class _Dumpable:
 class _DummyAutonomyService:
     def __init__(self) -> None:
         self.paused: bool | None = None
+        self.running = False
+        self.started = 0
+        self.stopped = 0
         self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+
+    async def start(self) -> None:
+        self.running = True
+        self.started += 1
+
+    async def stop(self) -> None:
+        self.running = False
+        self.stopped += 1
+
+    def status(self) -> dict[str, object]:
+        return {"enabled": True, "running": self.running, "last_error": None}
 
     async def pause(self, actor: str = "api") -> None:
         self.paused = True
@@ -186,6 +200,33 @@ def test_trader_engine_loop_starts_with_shared_engine_service() -> None:
             pass
         await worker._engine_news_consumer.stop()
         await worker._shutdown_engine_runtime()
+
+    anyio.run(run)
+
+
+def test_trader_owns_optional_legacy_autonomy_loop_and_reports_runtime() -> None:
+    async def run() -> None:
+        worker = TraderWorker(
+            Settings(
+                environment="test",
+                autonomy_enabled=True,
+                autonomy_signals_run_with_engine_enabled=True,
+                _env_file=None,
+            )
+        )
+        service = _DummyAutonomyService()
+        worker._autonomy_service = service
+
+        await worker._start_autonomy_loop()
+        metadata = worker.heartbeat_metadata()["autonomy_loop"]
+
+        assert service.started == 1
+        assert metadata["running"] is True
+        assert metadata["owner_role"] == "trader"
+        assert metadata["runtime_source"] == "trader_heartbeat"
+
+        await worker._shutdown_engine_runtime()
+        assert service.stopped == 1
 
     anyio.run(run)
 

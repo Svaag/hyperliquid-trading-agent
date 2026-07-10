@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>European Central Bank - Press releases</title>
+    <link>https://www.ecb.europa.eu/</link>
+    <description>Redacted regression fixture captured from the public RSS shape.</description>
+    <item>
+      <title>ECB publishes redacted monetary policy communication</title>
+      <link>https://www.ecb.europa.eu/press/pr/date/2026/html/redacted.en.html</link>
+      <pubDate>Fri, 10 Jul 2026 05:30:00 GMT</pubDate>
+      <description>Redacted central-bank communication.</description>
+    </item>
+  </channel>
+</rss>

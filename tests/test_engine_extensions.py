@@ -35,6 +35,24 @@ class ReplayRepo:
             {"candidate_id": "cand_2", "net_ev_bps": 15, "risk_adjusted_utility": 0.5, "created_at_ms": self.now_ms - 1000},
         ]
 
+    async def list_allocation_decisions(self, **kwargs):
+        return [
+            {
+                "allocation_id": "alloc_1",
+                "candidate_id": "cand_1",
+                "status": "allocate",
+                "allocated_notional_usd": 1000,
+                "created_at_ms": self.now_ms - 1000,
+            },
+            {
+                "allocation_id": "alloc_2",
+                "candidate_id": "cand_2",
+                "status": "allocate",
+                "allocated_notional_usd": 1000,
+                "created_at_ms": self.now_ms - 1000,
+            },
+        ]
+
     async def list_execution_reports(self, **kwargs):
         return [{"execution_mode": "shadow", "slippage_bps": 0, "fees_usd": 0, "created_at_ms": self.now_ms - 1000}]
 
@@ -59,7 +77,7 @@ class ReplayRepo:
 def test_engine_replay_compare_persists_immutable_artifact():
     now_ms = int(time.time() * 1000)
     repo = ReplayRepo(now_ms)
-    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_replay_min_sample_candidates=1))
+    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_replay_min_sample_candidates=1, engine_replay_min_shadow_intents=1))
 
     async def run():
         return await service.compare_variant(
@@ -105,7 +123,7 @@ def test_engine_replay_groups_candidate_outcomes_by_strategy_regime_asset_venue_
             "metadata": {"regime_label": "orderflow=buy_pressure"},
         }
     ]
-    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_readiness_max_strategy_allocation_share_pct=100, engine_replay_min_sample_candidates=1))
+    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_readiness_max_strategy_allocation_share_pct=100, engine_replay_min_sample_candidates=1, engine_replay_min_shadow_intents=1))
 
     async def run():
         return await service.compare_variant(
@@ -150,7 +168,7 @@ def _candidate(cid: str, strategy: str, score: float) -> AlphaCandidate:
 def test_engine_replay_compare_marks_safe_inconclusive_as_advisory_pass():
     now_ms = int(time.time() * 1000)
     repo = ReplayRepo(now_ms)
-    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_readiness_max_strategy_allocation_share_pct=100, engine_replay_min_sample_candidates=1))
+    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_readiness_max_strategy_allocation_share_pct=100, engine_replay_min_sample_candidates=1, engine_replay_min_shadow_intents=1))
 
     async def run():
         return await service.compare_variant(
@@ -172,7 +190,7 @@ def test_engine_replay_compare_marks_safe_inconclusive_as_advisory_pass():
 def test_engine_replay_compare_reports_insufficient_data_for_empty_window():
     now_ms = int(time.time() * 1000)
     repo = ReplayRepo(now_ms)
-    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_replay_min_sample_candidates=1))
+    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_replay_min_sample_candidates=1, engine_replay_min_shadow_intents=1))
 
     async def run():
         # Window entirely before any repo data exists.
@@ -195,7 +213,7 @@ def test_engine_replay_compare_reports_insufficient_data_for_empty_window():
 def test_engine_replay_compare_still_fails_genuinely_worse_variant():
     now_ms = int(time.time() * 1000)
     repo = ReplayRepo(now_ms)
-    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_readiness_max_strategy_allocation_share_pct=100, engine_replay_min_sample_candidates=1))
+    service = EngineReplayComparisonService(repository=repo, settings=Settings(environment="test", engine_readiness_max_strategy_allocation_share_pct=100, engine_replay_min_sample_candidates=1, engine_replay_min_shadow_intents=1))
 
     async def run():
         return await service.compare_variant(

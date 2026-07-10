@@ -28,3 +28,11 @@ class NewswireAdapter(ABC):
 
     def status(self) -> dict[str, Any]:
         return {"name": self.name}
+
+    def safe_error_detail(self, exc: Exception) -> str:
+        """Return an operator-safe error string for status and logs.
+
+        Adapters that place credentials in connection URLs must override this method.
+        """
+
+        return str(exc)[:500]

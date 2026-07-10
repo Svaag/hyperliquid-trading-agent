@@ -69,6 +69,7 @@ class TraderWorker(BaseWorker):
         await self._start_engine_pnl_attribution()
         await self._start_engine_evidence_refresh()
         await self._start_engine_newsfeed()
+        await self._start_autonomy_loop()
         tasks = [asyncio.create_task(self.command_loop(self._command_handlers()), name="trader-command-loop")]
         if self._engine_loop_task is not None:
             tasks.append(self._engine_loop_task)
@@ -144,6 +145,11 @@ class TraderWorker(BaseWorker):
             bootstrap_from_latest=True,
             bootstrap_metadata={"consumer": "engine_newsfeed", "owner_role": self.role.value},
         )
+
+    async def _start_autonomy_loop(self) -> None:
+        if not self.settings.autonomy_enabled:
+            return
+        await self._get_autonomy_service().start()
 
     async def _start_engine_loop(self) -> None:
         if self._engine_loop_task is not None or not self.settings.engine_enabled:
@@ -243,6 +249,9 @@ class TraderWorker(BaseWorker):
         return self._engine_service
 
     async def _shutdown_engine_runtime(self) -> None:
+        if self._autonomy_service is not None:
+            await self._autonomy_service.stop()
+            self._autonomy_service = None
         if self._engine_validation_monitor is not None:
             await self._engine_validation_monitor.stop()
             self._engine_validation_monitor = None
@@ -700,7 +709,7 @@ class TraderWorker(BaseWorker):
             self._autonomy_service = AutonomousTradingLoopService(
                 settings=self.settings,
                 repository=self.repository,
-                hyperliquid=None,
+                hyperliquid=self._get_hyperliquid_client(),
                 news=None,
                 memory_service=memory,
                 alert_sink=None,
@@ -720,6 +729,21 @@ class TraderWorker(BaseWorker):
     def heartbeat_metadata(self) -> dict[str, Any]:
         return {
             "trader": {"command_count": self.command_count, "last_command_type": self.last_command_type, "execution_authority": "paper-only/settings-gated"},
+            "autonomy_loop": (
+                {
+                    **self._autonomy_service.status(),
+                    "owner_role": "trader",
+                    "runtime_source": "trader_heartbeat",
+                }
+                if self._autonomy_service is not None
+                else {
+                    "enabled": self.settings.autonomy_enabled,
+                    "running": False,
+                    "owner_role": "trader",
+                    "runtime_source": "trader_heartbeat",
+                    "signals_run_with_engine_enabled": self.settings.autonomy_signals_run_with_engine_enabled,
+                }
+            ),
             "engine_loop": self._engine_loop_metadata(),
             "engine_pnl_attribution": self._engine_pnl_attribution_metadata(),
             "engine_evidence_refresh": self._engine_evidence_refresh.status() if self._engine_evidence_refresh is not None else {"enabled": False, "running": False},

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -461,3 +463,57 @@ def test_autonomy_api_requires_auth_outside_dev_and_no_execution_guardrail():
         assert "HYPERLIQUID_EXCHANGE_ENABLED" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("live exchange enable should be rejected")
+
+
+def test_autonomy_api_sources_trader_runtime_and_routes_enabled_legacy_review_commands():
+    app = create_app(
+        Settings(
+            environment="test",
+            autonomy_enabled=False,
+            autonomy_signals_run_with_engine_enabled=True,
+            engine_enabled=False,
+            hip4_enabled=False,
+            orchestration_wave_supervisor_enabled=False,
+            tradfi_enabled=False,
+            _env_file=None,
+        )
+    )
+    with TestClient(app) as client:
+        repo = app.state.repository
+        repo.list_service_heartbeats = AsyncMock(
+            return_value=[
+                {
+                    "service_role": "trader",
+                    "updated_at_ms": 1234,
+                    "metadata": {
+                        "autonomy_loop": {
+                            "enabled": True,
+                            "running": True,
+                            "last_error": None,
+                            "signals_run_with_engine_enabled": True,
+                        }
+                    },
+                }
+            ]
+        )
+        repo.get_autonomy_trade_signal = AsyncMock(return_value={"id": "legacy_1"})
+        repo.enqueue_worker_command = AsyncMock(
+            return_value={
+                "command_id": "cmd_legacy_approve",
+                "target_role": "trader",
+                "command_type": "autonomy_signal_approve",
+                "status": "pending",
+            }
+        )
+
+        runtime = client.get("/autonomy/status").json()
+        approval = client.post("/autonomy/signals/legacy_1/approve", json={"actor": "operator"})
+
+    assert runtime["enabled"] is True
+    assert runtime["running"] is True
+    assert runtime["owner_role"] == "trader"
+    assert runtime["runtime_source"] == "trader_heartbeat"
+    assert approval.status_code == 200
+    assert approval.json()["source"] == "legacy_signal_engine"
+    assert approval.json()["paper_only"] is True
+    repo.enqueue_worker_command.assert_awaited_once()

@@ -160,6 +160,10 @@ def test_engine_readonly_routes_are_registered_and_auth_protected_in_dev():
     report = client.get("/engine/validation-report").json()
     assert report["summary"]["risk_reject_count"] == 1
     assert "by_strategy" in report
+    assert report["signal_path_comparison"]["safety"]["execution_authority"] == "none"
+    assert client.get("/engine/signal-comparison").json()["path_mapping"]["engine"]["model"].startswith(
+        "AlphaCandidate"
+    )
     dashboard = client.get("/engine/dashboard")
     assert dashboard.status_code == 200
     assert "Engine Validation Dashboard" in dashboard.text

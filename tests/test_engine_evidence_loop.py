@@ -58,6 +58,9 @@ class FakeEvidenceRepo:
     async def list_ev_estimates(self, **kwargs):
         return [{"candidate_id": "cand_1", "net_ev_bps": 10, "risk_adjusted_utility": 0.5, "created_at_ms": self.now_ms - 1_000}]
 
+    async def list_allocation_decisions(self, **kwargs):
+        return [{"candidate_id": "cand_1", "status": "allocate", "allocated_notional_usd": 1000, "created_at_ms": self.now_ms - 1_000}]
+
     async def list_execution_reports(self, **kwargs):
         return [{"execution_mode": "shadow", "slippage_bps": 0, "fees_usd": 0, "created_at_ms": self.now_ms - 1_000}]
 
@@ -81,6 +84,7 @@ def _settings(**overrides) -> Settings:
         environment="test",
         engine_enabled=True,
         engine_replay_min_sample_candidates=1,
+        engine_replay_min_shadow_intents=1,
         engine_readiness_max_strategy_allocation_share_pct=100,
     )
     defaults.update(overrides)

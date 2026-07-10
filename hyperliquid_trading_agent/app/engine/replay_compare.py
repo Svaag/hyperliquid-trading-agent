@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections import Counter
+from collections import defaultdict
 from typing import Any
 
 from hyperliquid_trading_agent import __version__
@@ -67,22 +67,29 @@ class EngineReplayComparisonService:
         window = {"since_ms": window_start_ms, "until_ms": window_end_ms}
         candidates = await _list_windowed(self.repository.list_alpha_candidates, limit=5000, **window)
         evs = await _list_windowed(self.repository.list_ev_estimates, limit=5000, **window)
+        allocations = await _list_windowed(self.repository.list_allocation_decisions, limit=5000, **window)
         reports = await _list_windowed(self.repository.list_execution_reports, limit=5000, **window)
         risk_rejects = await _list_windowed(self.repository.list_risk_gateway_decisions, limit=5000, decision="reject", **window)
         pnl = await _list_windowed(self.repository.list_pnl_attribution, limit=5000, **window)
         outcomes = await _list_candidate_outcomes(self.repository, limit=5000, **window)
         candidates = [item for item in candidates if window_start_ms <= int(item.get("created_at_ms") or 0) <= window_end_ms and (not universe or str(item.get("asset") or "").upper() in universe)]
         ev_by_candidate = {str(item.get("candidate_id")): item for item in evs if window_start_ms <= int(item.get("created_at_ms") or 0) <= window_end_ms}
+        allocations = [item for item in allocations if window_start_ms <= int(item.get("created_at_ms") or 0) <= window_end_ms]
         reports = [item for item in reports if window_start_ms <= int(item.get("created_at_ms") or 0) <= window_end_ms]
         risk_rejects = [item for item in risk_rejects if window_start_ms <= int(item.get("created_at_ms") or 0) <= window_end_ms]
         pnl = [item for item in pnl if window_start_ms <= int(item.get("window_end_ms") or 0) <= window_end_ms]
         outcomes = [item for item in outcomes if window_start_ms <= int(item.get("window_end_ms") or item.get("created_at_ms") or 0) <= window_end_ms and (not universe or str(item.get("asset") or "").upper() in universe)]
-        baseline_metrics = self._metrics_for_config(candidates, ev_by_candidate, reports, risk_rejects, pnl, outcomes, baseline_config)
-        candidate_metrics = self._metrics_for_config(candidates, ev_by_candidate, reports, risk_rejects, pnl, outcomes, candidate_config)
+        baseline_metrics = self._metrics_for_config(candidates, ev_by_candidate, allocations, reports, risk_rejects, pnl, outcomes, baseline_config)
+        candidate_metrics = self._metrics_for_config(candidates, ev_by_candidate, allocations, reports, risk_rejects, pnl, outcomes, candidate_config)
         diffs = _diff_metrics(baseline_metrics, candidate_metrics)
         dominance_cap_pct = self.settings.engine_readiness_max_strategy_allocation_share_pct
         min_sample = max(1, int(getattr(self.settings, "engine_replay_min_sample_candidates", 50)))
-        if len(candidates) < min_sample or int(baseline_metrics.get("allocated_count") or 0) == 0:
+        min_shadow_intents = max(1, int(getattr(self.settings, "engine_replay_min_shadow_intents", 50)))
+        if (
+            len(candidates) < min_sample
+            or int(baseline_metrics.get("allocated_count") or 0) == 0
+            or int(baseline_metrics.get("shadow_intent_count") or 0) < min_shadow_intents
+        ):
             # An empty or thin window cannot fail nor pass a config; the old
             # behavior scored it "candidate_worse" and blocked readiness with a
             # misleading verdict.
@@ -109,7 +116,10 @@ class EngineReplayComparisonService:
             "baseline_metrics": baseline_metrics,
             "candidate_metrics": candidate_metrics,
             "diffs": diffs,
-            "caveats": ["ledger_replay_without_market_reconstruction_v1"],
+            "caveats": [
+                "ledger_replay_without_market_reconstruction_v1",
+                "candidate_threshold_variants_reuse_recorded_allocation_decisions",
+            ],
             "created_at_ms": ts,
             "metadata": {
                 "schema_version": 1,
@@ -126,6 +136,11 @@ class EngineReplayComparisonService:
                 "verdict": verdict,
                 "promotion_decision": promotion_decision,
                 "variant_id": variant_id,
+                "sample_requirements": {
+                    "min_candidates": min_sample,
+                    "min_shadow_intents": min_shadow_intents,
+                    "requires_approved_allocation": True,
+                },
                 "notes": [],
                 "exchange_actions": [],
             },
@@ -150,6 +165,7 @@ class EngineReplayComparisonService:
         self,
         candidates: list[dict[str, Any]],
         ev_by_candidate: dict[str, dict[str, Any]],
+        allocations: list[dict[str, Any]],
         reports: list[dict[str, Any]],
         risk_rejects: list[dict[str, Any]],
         pnl: list[dict[str, Any]],
@@ -159,7 +175,11 @@ class EngineReplayComparisonService:
         eligible: list[dict[str, Any]] = []
         net_evs: list[float] = []
         utilities: list[float] = []
-        strategy_counts: Counter[str] = Counter()
+        candidates_by_id = {
+            str(candidate.get("candidate_id") or ""): candidate
+            for candidate in candidates
+            if candidate.get("candidate_id")
+        }
         active_alpha_strategies: set[str] = set()
         active_alpha_families: set[str] = set()
         min_ev = float(config.get("engine_min_net_ev_bps", 0))
@@ -174,26 +194,61 @@ class EngineReplayComparisonService:
                 eligible.append(candidate)
                 net_evs.append(net_ev)
                 utilities.append(utility)
-                strategy_id = str(candidate.get("strategy_id") or "unknown")
-                strategy_counts[strategy_id] += 1
-                metadata = candidate.get("metadata") if isinstance(candidate.get("metadata"), dict) else {}
-                family = str(metadata.get("strategy_family") or candidate.get("strategy_family") or "unknown")
-                counts_for_breadth = bool(metadata.get("counts_for_breadth", candidate.get("counts_for_breadth", True)))
-                if counts_for_breadth and family not in {"legacy_bridge", "risk_off_defensive"} and candidate.get("side") != "flat":
-                    active_alpha_strategies.add(strategy_id)
-                    active_alpha_families.add(family)
-        allocated_count = len(eligible)
         eligible_ids = {str(item.get("candidate_id") or "") for item in eligible}
-        eligible_outcomes = [item for item in outcomes if str(item.get("candidate_id") or "") in eligible_ids]
-        outcome_groups = _outcome_groups(eligible_outcomes)
-        outcome_candidate_ids = {str(item.get("candidate_id") or "") for item in eligible_outcomes if item.get("candidate_id")}
+        latest_allocation_by_candidate: dict[str, dict[str, Any]] = {}
+        for allocation in allocations:
+            candidate_id = str(allocation.get("candidate_id") or "")
+            if candidate_id not in eligible_ids:
+                continue
+            current = latest_allocation_by_candidate.get(candidate_id)
+            if current is None or int(allocation.get("created_at_ms") or 0) > int(current.get("created_at_ms") or 0):
+                latest_allocation_by_candidate[candidate_id] = allocation
+        approved_allocations = [
+            allocation
+            for allocation in latest_allocation_by_candidate.values()
+            if str(allocation.get("status") or "") in {"allocate", "reduce"}
+            and float(allocation.get("allocated_notional_usd") or 0) > 0
+        ]
+        strategy_notional: dict[str, float] = defaultdict(float)
+        for allocation in approved_allocations:
+            allocated_candidate: dict[str, Any] = candidates_by_id.get(str(allocation.get("candidate_id") or "")) or {}
+            strategy_id = str(allocated_candidate.get("strategy_id") or "unknown")
+            strategy_notional[strategy_id] += float(allocation.get("allocated_notional_usd") or 0)
+            metadata_value = allocated_candidate.get("metadata")
+            metadata: dict[str, Any] = metadata_value if isinstance(metadata_value, dict) else {}
+            family = str(metadata.get("strategy_family") or allocated_candidate.get("strategy_family") or "unknown")
+            counts_for_breadth = bool(metadata.get("counts_for_breadth", allocated_candidate.get("counts_for_breadth", True)))
+            if counts_for_breadth and family not in {"legacy_bridge", "risk_off_defensive"} and allocated_candidate.get("side") != "flat":
+                active_alpha_strategies.add(strategy_id)
+                active_alpha_families.add(family)
+        allocated_count = len(approved_allocations)
+        approved_candidate_ids = {
+            str(item.get("candidate_id") or "") for item in approved_allocations
+        }
+        allocated_outcomes = [
+            item
+            for item in outcomes
+            if str(item.get("candidate_id") or "") in approved_candidate_ids
+        ]
+        outcome_groups = _outcome_groups(allocated_outcomes)
+        outcome_candidate_ids = {
+            str(item.get("candidate_id") or "")
+            for item in allocated_outcomes
+            if item.get("candidate_id")
+        }
         risk_denominator = allocated_count + len(risk_rejects)
-        strategy_share = {strategy: round(count / allocated_count * 100, 4) for strategy, count in strategy_counts.items()} if allocated_count else {}
+        total_allocated_notional = sum(strategy_notional.values())
+        strategy_share = {
+            strategy: round(notional / total_allocated_notional * 100, 4)
+            for strategy, notional in strategy_notional.items()
+        } if total_allocated_notional else {}
         return {
             "candidate_count": len(candidates),
             "ev_estimate_count": len(ev_by_candidate),
+            "eligible_candidate_count": len(eligible),
             "allocated_count": allocated_count,
-            "allocation_rate_pct": round(allocated_count / len(candidates) * 100, 4) if candidates else 0.0,
+            "allocated_notional_usd": round(total_allocated_notional, 4),
+            "allocation_rate_pct": round(allocated_count / len(eligible) * 100, 4) if eligible else 0.0,
             "shadow_intent_count": len([item for item in reports if item.get("execution_mode") == "shadow"]),
             "risk_reject_count": len(risk_rejects),
             "risk_reject_rate_pct": round(len(risk_rejects) / risk_denominator * 100, 4) if risk_denominator else 0.0,
@@ -208,7 +263,7 @@ class EngineReplayComparisonService:
             "active_alpha_family_count": len(active_alpha_families),
             "active_alpha_strategies": sorted(active_alpha_strategies),
             "active_alpha_families": sorted(active_alpha_families),
-            "outcome_attribution_count": len(eligible_outcomes),
+            "outcome_attribution_count": len(allocated_outcomes),
             "outcome_attribution_coverage_pct": round(len(outcome_candidate_ids) / allocated_count * 100, 4) if allocated_count else 0.0,
             "strategy_regime_outcome_groups": outcome_groups,
         }
@@ -274,7 +329,8 @@ async def _list_candidate_outcomes(repository: Any, *, limit: int, **kwargs: Any
 def _outcome_groups(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
     groups: dict[str, dict[str, Any]] = {}
     for outcome in outcomes:
-        metadata = outcome.get("metadata") if isinstance(outcome.get("metadata"), dict) else {}
+        metadata_value = outcome.get("metadata")
+        metadata: dict[str, Any] = metadata_value if isinstance(metadata_value, dict) else {}
         strategy_id = str(outcome.get("strategy_id") or "unknown")
         strategy_version = str(outcome.get("strategy_version") or "unknown")
         strategy_family = str(outcome.get("strategy_family") or "unknown")
