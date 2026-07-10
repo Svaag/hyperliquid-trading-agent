@@ -43,10 +43,18 @@ class RssAdapter(NewswireAdapter):
 
     name = "rss"
 
-    def __init__(self, feed_urls: list[str], *, poll_seconds: int = 60, limit_per_feed: int = 10):
+    def __init__(
+        self,
+        feed_urls: list[str],
+        *,
+        poll_seconds: int = 60,
+        limit_per_feed: int = 10,
+        user_agent: str | None = None,
+    ):
         self.feed_urls = feed_urls
         self.poll_seconds = max(15, poll_seconds)
         self.limit_per_feed = limit_per_feed
+        self.user_agent = user_agent.strip() if user_agent else None
         self._stop = asyncio.Event()
         self.poll_count = 0
         self.items_emitted = 0
@@ -78,7 +86,14 @@ class RssAdapter(NewswireAdapter):
         self.poll_count += 1
         polled_at_ms = int(time.time() * 1000)
         fetched = await asyncio.gather(
-            *(fetch_rss_feed(url, limit=self.limit_per_feed) for url in self.feed_urls),
+            *(
+                fetch_rss_feed(
+                    url,
+                    limit=self.limit_per_feed,
+                    user_agent=self.user_agent,
+                )
+                for url in self.feed_urls
+            ),
             return_exceptions=True,
         )
         successful_feeds = 0
@@ -142,6 +157,7 @@ class RssAdapter(NewswireAdapter):
             "poll_seconds": self.poll_seconds,
             "poll_count": self.poll_count,
             "items_emitted": self.items_emitted,
+            "user_agent_configured": bool(self.user_agent),
             "feed_health": self.feed_health,
         }
 

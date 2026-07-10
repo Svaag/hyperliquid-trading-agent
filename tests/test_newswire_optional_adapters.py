@@ -144,7 +144,13 @@ def test_rss_adapter_isolates_one_failed_feed_and_exposes_per_feed_telemetry(mon
     good_url = "https://www.ecb.europa.eu/rss/press.html"
     bad_url = "https://broken.example.invalid/private?token=secret"
 
-    async def fake_fetch(url: str, limit: int = 5) -> RssFetchResult:
+    async def fake_fetch(
+        url: str,
+        limit: int = 5,
+        *,
+        user_agent: str | None = None,
+    ) -> RssFetchResult:
+        assert user_agent == "agent@example.com"
         if url == bad_url:
             return RssFetchResult(feed_url=url, items=[], ok=False, error="http_status:503", http_status=503)
         return RssFetchResult(
@@ -163,7 +169,7 @@ def test_rss_adapter_isolates_one_failed_feed_and_exposes_per_feed_telemetry(mon
         )
 
     monkeypatch.setattr(rss_adapter_module, "fetch_rss_feed", fake_fetch)
-    adapter = RssAdapter([bad_url, good_url])
+    adapter = RssAdapter([bad_url, good_url], user_agent="agent@example.com")
     emitted: list[RawNewsItem] = []
 
     async def run() -> None:
@@ -180,5 +186,6 @@ def test_rss_adapter_isolates_one_failed_feed_and_exposes_per_feed_telemetry(mon
     health = adapter.status()["feed_health"]
     bad_key = next(key for key in health if key.startswith("broken.example.invalid"))
     assert health[bad_key]["errors"] == 1
+    assert adapter.status()["user_agent_configured"] is True
     assert "token" not in bad_key
     assert "secret" not in json.dumps(adapter.status())

@@ -54,7 +54,9 @@ telemetry under `/newswire/status -> adapters[rss].feed_health`. One failed feed
 longer restarts or suppresses healthy feeds. If every configured feed fails, the RSS
 adapter raises a provider-neutral error so the existing supervisor reconnect/backoff
 metrics still fire. Query strings and URL credentials are never included in health
-keys or persisted raw feed metadata.
+keys or persisted raw feed metadata. RSS requests use the configured
+`SEC_EDGAR_USER_AGENT`, including the contact-bearing User-Agent required by SEC EDGAR;
+the same standards-compliant identifier is accepted by the other public feeds.
 
 - ECB's official [RSS page](https://www.ecb.europa.eu/home/html/rss.en.html) publishes a
   stable press feed at `https://www.ecb.europa.eu/rss/press.html`; it is enabled by

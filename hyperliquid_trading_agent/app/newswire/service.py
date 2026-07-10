@@ -89,7 +89,13 @@ class NewswireService:
         adapters: list[NewswireAdapter] = []
         settings = self.settings
         if settings.newswire_rss_feed_urls:
-            adapters.append(RssAdapter(settings.newswire_rss_feed_urls, poll_seconds=settings.newswire_rss_poll_seconds))
+            adapters.append(
+                RssAdapter(
+                    settings.newswire_rss_feed_urls,
+                    poll_seconds=settings.newswire_rss_poll_seconds,
+                    user_agent=settings.sec_edgar_user_agent,
+                )
+            )
         if settings.alpaca_news_enabled and settings.alpaca_api_key and settings.alpaca_api_secret:
             from hyperliquid_trading_agent.app.newswire.adapters.alpaca_ws import AlpacaNewsAdapter
 
