@@ -901,6 +901,69 @@ class NewswireDeliveryRow(TimestampMixin, Base):
     updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+class OperationalNotificationRow(TimestampMixin, Base):
+    __tablename__ = "operational_notification_outbox"
+    __table_args__ = (
+        Index("ix_operational_notifications_due", "destination", "status", "next_attempt_at_ms"),
+        Index("ix_operational_notifications_category_created", "category", "scheduled_at_ms"),
+        Index("ix_operational_notifications_source", "source_type", "source_id"),
+    )
+
+    notification_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    dedupe_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_type: Mapped[str | None] = mapped_column(String(64))
+    source_id: Mapped[str | None] = mapped_column(String(128))
+    destination: Mapped[str] = mapped_column(String(32), nullable=False, default="discord")
+    channel_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, default="info")
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    scheduled_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    next_attempt_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    lease_expires_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    discord_message_id: Mapped[str | None] = mapped_column(String(64))
+    sent_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class EngineOperatorProposalRow(TimestampMixin, Base):
+    __tablename__ = "engine_operator_proposals"
+    __table_args__ = (
+        UniqueConstraint("candidate_id", name="uq_engine_operator_proposals_candidate"),
+        Index("ix_engine_operator_proposals_status_created", "status", "created_at_ms"),
+        Index("ix_engine_operator_proposals_asset_created", "asset", "created_at_ms"),
+        Index("ix_engine_operator_proposals_strategy_created", "strategy_id", "created_at_ms"),
+    )
+
+    proposal_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    packet_id: Mapped[str | None] = mapped_column(String(128))
+    council_review_id: Mapped[str | None] = mapped_column(String(128))
+    strategy_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    asset: Mapped[str] = mapped_column(String(64), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="proposed")
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    net_ev_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    risk_adjusted_utility: Mapped[float] = mapped_column(Float, nullable=False)
+    feature_coverage_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    allocated_notional_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expires_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    acknowledged_by: Mapped[str | None] = mapped_column(String(128))
+    acknowledged_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    rejected_by: Mapped[str | None] = mapped_column(String(128))
+    rejected_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    rejection_reason: Mapped[str | None] = mapped_column(Text)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 class NewswireRiskStateRecord(TimestampMixin, Base):
     __tablename__ = "newswire_risk_states"
     __table_args__ = (Index("ix_newswire_risk_states_mode_updated", "mode", "updated_at_ms"),)

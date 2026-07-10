@@ -55,9 +55,11 @@ def test_wave_1a_registry_has_active_alpha_nucleus():
         "liquidation_mean_revert_v1",
         "funding_carry_v1",
         "oi_breakout_v1",
-        "legacy_signal_adapter_v1",
         "regime_defensive_flat_v1",
     } <= ids
+    retired = registry.require_spec("legacy_signal_adapter_v1")
+    assert retired.enabled is False
+    assert retired.metadata["retired_reason"] == "institutional_engine_is_canonical_signal_source"
     alpha_specs = [spec for spec in registry.alpha_breadth_specs() if not spec.strategy_id.startswith("legacy")]
     assert len(alpha_specs) >= 5
     assert registry.require_spec("legacy_signal_adapter_v1").counts_for_breadth is False

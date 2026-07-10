@@ -10,6 +10,7 @@ from hyperliquid_trading_agent.app.newswire.bus import InProcessNewswireBus
 from hyperliquid_trading_agent.app.newswire.consumers.discord_news import DiscordNewsPublisher
 from hyperliquid_trading_agent.app.newswire.enrich import Enricher
 from hyperliquid_trading_agent.app.workers.base import BaseWorker
+from hyperliquid_trading_agent.app.workers.operational_notification_pump import OperationalNotificationPump
 from hyperliquid_trading_agent.app.workers.stored_newswire_story_pump import StoredNewswireStoryPump
 
 
@@ -22,6 +23,7 @@ class DiscordPublisherWorker(BaseWorker):
         self.client: SendOnlyDiscordClient | None = None
         self.publisher: DiscordNewsPublisher | None = None
         self.pump: StoredNewswireStoryPump | None = None
+        self.operational_pump: OperationalNotificationPump | None = None
         self.bus = InProcessNewswireBus()
 
     async def run(self) -> None:
@@ -34,11 +36,17 @@ class DiscordPublisherWorker(BaseWorker):
             enricher=Enricher(settings=self.settings, model_gateway=ModelGateway(settings=self.settings)),
             repository=self.repository,
         )
-        self.client.component_handler = self.publisher.handle_feedback_component
+        self.client.component_handler = self._handle_component
         self.pump = StoredNewswireStoryPump(
             consumer_name="discord_publisher:newswire",
             repository=self.repository,
             callbacks=[self.bus.publish],
+            poll_seconds=self.settings.consumer_poll_seconds,
+            batch_size=self.settings.consumer_batch_size,
+        )
+        self.operational_pump = OperationalNotificationPump(
+            repository=self.repository,
+            sink=sink,
             poll_seconds=self.settings.consumer_poll_seconds,
             batch_size=self.settings.consumer_batch_size,
         )
@@ -48,6 +56,7 @@ class DiscordPublisherWorker(BaseWorker):
         tasks = [
             client_task,
             asyncio.create_task(self.pump.run_forever(), name="discord-publisher-newswire-pump"),
+            asyncio.create_task(self.operational_pump.run_forever(), name="discord-publisher-operational-notification-pump"),
             asyncio.create_task(self.command_loop({"discord_test": self._handle_discord_test}), name="discord-publisher-command-loop"),
         ]
         try:
@@ -55,6 +64,8 @@ class DiscordPublisherWorker(BaseWorker):
         finally:
             if self.pump is not None:
                 await self.pump.stop()
+            if self.operational_pump is not None:
+                await self.operational_pump.stop()
             if self.publisher is not None:
                 await self.publisher.stop()
             if self.client is not None:
@@ -72,9 +83,44 @@ class DiscordPublisherWorker(BaseWorker):
         payload = command.get("payload") or {}
         return await self.publisher.send_test_message(channel_id=payload.get("channel_id"), dry_run=bool(payload.get("dry_run")))
 
+    async def _handle_component(
+        self,
+        custom_id: str,
+        user_id: str | None,
+        message_id: str | None,
+    ) -> str | None:
+        if custom_id.startswith("engine_proposal_ack:"):
+            proposal_id = custom_id.split(":", 1)[1]
+            await self.repository.enqueue_worker_command(
+                target_role="trader",
+                command_type="engine_operator_proposal_ack",
+                payload={"proposal_id": proposal_id, "actor": f"discord:{user_id or 'unknown'}"},
+                requested_by=f"discord:{user_id or 'unknown'}",
+                metadata={"discord_message_id": message_id},
+            )
+            return "Proposal acknowledgment queued. Shadow mode: no paper or live order will be created."
+        if custom_id.startswith("engine_proposal_reject:"):
+            proposal_id = custom_id.split(":", 1)[1]
+            await self.repository.enqueue_worker_command(
+                target_role="trader",
+                command_type="engine_operator_proposal_reject",
+                payload={
+                    "proposal_id": proposal_id,
+                    "actor": f"discord:{user_id or 'unknown'}",
+                    "reason": "discord_operator_reject",
+                },
+                requested_by=f"discord:{user_id or 'unknown'}",
+                metadata={"discord_message_id": message_id},
+            )
+            return "Proposal rejection queued. No order was created."
+        if self.publisher is not None:
+            return await self.publisher.handle_feedback_component(custom_id, user_id, message_id)
+        return None
+
     def heartbeat_metadata(self) -> dict[str, Any]:
         return {
             "discord": self.client.status() if self.client is not None and hasattr(self.client, "status") else {"configured": bool(self.settings.discord_bot_token)},
             "publisher": self.publisher.status() if self.publisher is not None else {},
             "pump": self.pump.status() if self.pump is not None else {},
+            "operational_notifications": self.operational_pump.status() if self.operational_pump is not None else {},
         }

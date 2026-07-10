@@ -7,7 +7,10 @@ from typing import Any
 from hyperliquid_trading_agent.app.autonomy.discord import AutonomyAlertSink
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.discord_bot import _chunk
-from hyperliquid_trading_agent.app.engine.readiness import _latest_trader_engine_loop_status, build_paper_readiness_scorecard
+from hyperliquid_trading_agent.app.engine.readiness import (
+    _latest_trader_engine_loop_status,
+    build_paper_readiness_scorecard,
+)
 from hyperliquid_trading_agent.app.engine.replay_compare import latest_engine_replay_comparison
 from hyperliquid_trading_agent.app.engine.validation_report import build_engine_validation_report
 from hyperliquid_trading_agent.app.logging import get_logger
@@ -21,7 +24,7 @@ def _now_ms() -> int:
 
 
 class EngineValidationMonitorService:
-    """Scheduled Discord digest and guardrail alerts for the shadow engine."""
+    """Trader-owned watchdog and digest producer for the shadow engine."""
 
     def __init__(
         self,
@@ -38,6 +41,7 @@ class EngineValidationMonitorService:
         self._task: asyncio.Task | None = None
         self.started_at_ms = _now_ms()
         self.last_digest_at_ms: int | None = None
+        self.last_watchdog_at_ms: int | None = None
         self.last_error: str | None = None
         self.digest_count = 0
         self.alert_count = 0
@@ -47,8 +51,11 @@ class EngineValidationMonitorService:
         return {
             "enabled": self.settings.engine_validation_digest_enabled,
             "running": self._task is not None and not self._task.done(),
+            "owner_role": "trader",
+            "delivery_transport": "operational_notification_outbox",
             "channel_configured": self.settings.autonomy_alert_channel_configured,
             "last_digest_at_ms": self.last_digest_at_ms,
+            "last_watchdog_at_ms": self.last_watchdog_at_ms,
             "last_error": self.last_error,
             "digest_count": self.digest_count,
             "alert_count": self.alert_count,
@@ -60,11 +67,12 @@ class EngineValidationMonitorService:
             return
         if not self.settings.engine_enabled:
             return
-        if self.alert_sink is None or not self.settings.autonomy_alert_channel_configured or not self.settings.discord_bot_token:
-            log.info("engine_validation_monitor_disabled", reason="discord-token-channel-or-sink-not-configured")
-            return
         self._task = asyncio.create_task(self._run(), name="engine-validation-monitor")
-        log.info("engine_validation_monitor_started", interval_seconds=self.settings.engine_validation_digest_interval_seconds)
+        log.info(
+            "engine_validation_monitor_started",
+            digest_interval_seconds=self.settings.engine_validation_digest_interval_seconds,
+            watchdog_interval_seconds=self.settings.engine_validation_watchdog_interval_seconds,
+        )
 
     async def stop(self) -> None:
         if self._task is None:
@@ -91,36 +99,91 @@ class EngineValidationMonitorService:
             ENGINE_VALIDATION_ALERTS.labels(alert_type=str(alert.get("type") or "unknown")).inc()
         message = format_engine_validation_digest(report, alerts, settings=self.settings, service_status=await self._engine_status(), readiness=readiness, latest_replay=latest_replay)
         if post:
-            await self._send(message)
-            self.last_digest_at_ms = _now_ms()
+            sent_at_ms = _now_ms()
+            digest_bucket = sent_at_ms // (max(60, self.settings.engine_validation_digest_interval_seconds) * 1000)
+            await self._send(
+                message,
+                category="engine_validation_digest",
+                dedupe_key=f"engine-validation-digest:{digest_bucket}",
+                severity="warning" if alerts else "info",
+            )
+            self.last_digest_at_ms = sent_at_ms
             self.digest_count += 1
         return {"report": report, "readiness": readiness, "latest_replay": latest_replay, "alerts": alerts, "message": message}
 
     async def _run(self) -> None:
-        # Send once after the engine has had time to complete at least one loop.
-        await asyncio.sleep(max(15, min(60, self.settings.autonomy_loop_interval_seconds * 2)))
+        # Allow the engine to finish its first loop before evaluating staleness.
+        await asyncio.sleep(max(15, min(60, self.settings.engine_loop_interval_seconds)))
         while True:
             try:
-                await self.run_once(post=True)
+                watchdog_alerts = await self._detect_alerts({})
+                self.last_watchdog_at_ms = _now_ms()
+                self.last_alerts = watchdog_alerts
+                await self._send_watchdog_alerts(watchdog_alerts)
+                digest_due = self.last_digest_at_ms is None or (
+                    self.last_watchdog_at_ms - self.last_digest_at_ms
+                    >= max(60, self.settings.engine_validation_digest_interval_seconds) * 1000
+                )
+                if digest_due:
+                    await self.run_once(post=True)
                 self.last_error = None
             except Exception as exc:  # pragma: no cover - runtime safety net
                 self.last_error = type(exc).__name__
                 ENGINE_VALIDATION_DIGESTS.labels(result="error").inc()
                 log.warning("engine_validation_digest_failed", error=type(exc).__name__)
-            await asyncio.sleep(max(60, self.settings.engine_validation_digest_interval_seconds))
+            await asyncio.sleep(max(10, self.settings.engine_validation_watchdog_interval_seconds))
 
-    async def _send(self, content: str) -> None:
-        if self.alert_sink is None or not self.settings.autonomy_alert_channel_id:
+    async def _send(
+        self,
+        content: str,
+        *,
+        category: str,
+        dedupe_key: str,
+        severity: str,
+    ) -> None:
+        channel_id = str(self.settings.autonomy_alert_channel_id or "").strip()
+        if not channel_id:
+            ENGINE_VALIDATION_DIGESTS.labels(result="skipped").inc()
             return
         try:
             sent = False
-            for chunk in _chunk(content, self.settings.discord_max_response_chars):
-                result = await self.alert_sink.send(self.settings.autonomy_alert_channel_id, chunk)
-                sent = sent or bool(result)
+            enqueue = getattr(self.repository, "enqueue_operational_notification", None)
+            chunks = _chunk(content, self.settings.discord_max_response_chars)
+            if callable(enqueue):
+                for index, chunk in enumerate(chunks):
+                    notification_id = await enqueue(
+                        dedupe_key=f"{dedupe_key}:{index}",
+                        category=category,
+                        severity=severity,
+                        source_type="engine_validation_monitor",
+                        source_id=str(self.last_watchdog_at_ms or self.last_digest_at_ms or _now_ms()),
+                        channel_id=channel_id,
+                        payload={"content": chunk},
+                    )
+                    sent = sent or bool(notification_id)
+            elif self.alert_sink is not None:  # compatibility fallback for isolated tests
+                for chunk in chunks:
+                    result = await self.alert_sink.send(channel_id, chunk)
+                    sent = sent or bool(result)
             ENGINE_VALIDATION_DIGESTS.labels(result="ok" if sent else "skipped").inc()
         except Exception as exc:  # pragma: no cover
             ENGINE_VALIDATION_DIGESTS.labels(result="error").inc()
-            log.warning("engine_validation_discord_send_failed", error=type(exc).__name__)
+            log.warning("engine_validation_notification_enqueue_failed", error=type(exc).__name__)
+
+    async def _send_watchdog_alerts(self, alerts: list[dict[str, Any]]) -> None:
+        now = _now_ms()
+        bucket_seconds = max(300, self.settings.engine_validation_alert_stale_loop_seconds)
+        bucket = now // (bucket_seconds * 1000)
+        for alert in alerts:
+            alert_type = str(alert.get("type") or "unknown")
+            severity = str(alert.get("severity") or "warning")
+            ENGINE_VALIDATION_ALERTS.labels(alert_type=alert_type).inc()
+            await self._send(
+                f"{'🚨' if severity == 'critical' else '⚠️'} **Engine validation alert** `{alert_type}`\n{alert.get('detail')}",
+                category="engine_validation_alert",
+                dedupe_key=f"engine-validation-alert:{alert_type}:{bucket}",
+                severity=severity,
+            )
 
     async def _detect_alerts(self, report: dict[str, Any]) -> list[dict[str, Any]]:
         alerts: list[dict[str, Any]] = []
@@ -143,7 +206,7 @@ class EngineValidationMonitorService:
         interval_ms = max(5, int(self.settings.engine_loop_interval_seconds)) * 1000
         if duration_ms is not None and float(duration_ms) > interval_ms:
             stage_ms = service_status.get("last_stage_ms") if isinstance(service_status.get("last_stage_ms"), dict) else {}
-            slowest_stage = max(stage_ms, key=stage_ms.get) if stage_ms else "unknown"
+            slowest_stage = max(stage_ms, key=lambda name: float(stage_ms.get(name) or 0)) if stage_ms else "unknown"
             alerts.append(
                 {
                     "type": "engine_loop_duration_overrun",

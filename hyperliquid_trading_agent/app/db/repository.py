@@ -40,6 +40,7 @@ from hyperliquid_trading_agent.app.db.models import (
     DecisionRoleOutput,
     DecisionRun,
     DecisionStateSnapshot,
+    EngineOperatorProposalRow,
     EquityOptionsFlowEventRecord,
     EquityPaperFillRecord,
     EquityPaperOrderRecord,
@@ -87,6 +88,7 @@ from hyperliquid_trading_agent.app.db.models import (
     NewswireStoryRevisionRow,
     NewswireStoryRow,
     NormalizedEventRecord,
+    OperationalNotificationRow,
     OperatorFeedbackRecord,
     OperatorOutputLessonRecord,
     OrderIntentRecord,
@@ -3135,6 +3137,365 @@ class Repository:
                 "oldest_pending_error": pending.last_error if pending is not None else None,
             }
 
+    async def enqueue_operational_notification(
+        self,
+        *,
+        dedupe_key: str,
+        category: str,
+        channel_id: str,
+        payload: dict[str, Any],
+        severity: str = "info",
+        source_type: str | None = None,
+        source_id: str | None = None,
+        destination: str = "discord",
+        scheduled_at_ms: int | None = None,
+    ) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        notification_id = _operational_notification_id(dedupe_key)
+        now = _runtime_now_ms()
+        scheduled = int(scheduled_at_ms or now)
+        try:
+            async with self.sessionmaker() as session:
+                item = await session.get(OperationalNotificationRow, notification_id)
+                if item is None:
+                    item = OperationalNotificationRow(
+                        notification_id=notification_id,
+                        dedupe_key=_operational_dedupe_value(dedupe_key),
+                        category=str(category)[:64],
+                        source_type=str(source_type)[:64] if source_type else None,
+                        source_id=str(source_id)[:128] if source_id else None,
+                        destination=str(destination)[:32],
+                        channel_id=str(channel_id),
+                        severity=str(severity)[:16],
+                        status="pending",
+                        scheduled_at_ms=scheduled,
+                        next_attempt_at_ms=scheduled,
+                        attempt_count=0,
+                        payload_json=redact_secrets(payload),
+                        updated_at_ms=now,
+                    )
+                    session.add(item)
+                elif item.status in {"pending", "failed"}:
+                    item.payload_json = redact_secrets(payload)
+                    item.severity = str(severity)[:16]
+                    item.scheduled_at_ms = min(int(item.scheduled_at_ms), scheduled)
+                    item.next_attempt_at_ms = min(int(item.next_attempt_at_ms), scheduled)
+                    item.updated_at_ms = now
+                await session.commit()
+                return notification_id
+        except IntegrityError:
+            return notification_id
+        except Exception as exc:  # pragma: no cover - persistence must not break producer loops
+            log.warning("operational_notification_enqueue_failed", category=category, error=type(exc).__name__)
+            return None
+
+    async def claim_due_operational_notifications(
+        self,
+        *,
+        now_ms: int,
+        destination: str = "discord",
+        limit: int = 50,
+        lease_ms: int = 120_000,
+    ) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            await session.execute(
+                update(OperationalNotificationRow)
+                .where(
+                    OperationalNotificationRow.destination == str(destination),
+                    OperationalNotificationRow.status == "sending",
+                    OperationalNotificationRow.lease_expires_at_ms.is_not(None),
+                    OperationalNotificationRow.lease_expires_at_ms <= int(now_ms),
+                )
+                .values(
+                    status="failed",
+                    next_attempt_at_ms=int(now_ms),
+                    lease_expires_at_ms=None,
+                    last_error="stale_notification_lease",
+                    updated_at_ms=int(now_ms),
+                )
+            )
+            stmt = (
+                select(OperationalNotificationRow)
+                .where(
+                    OperationalNotificationRow.destination == str(destination),
+                    OperationalNotificationRow.status.in_(["pending", "failed"]),
+                    OperationalNotificationRow.next_attempt_at_ms <= int(now_ms),
+                )
+                .order_by(OperationalNotificationRow.scheduled_at_ms.asc(), OperationalNotificationRow.notification_id.asc())
+                .limit(max(1, int(limit)))
+                .with_for_update(skip_locked=True)
+            )
+            rows = list((await session.execute(stmt)).scalars().all())
+            for item in rows:
+                item.status = "sending"
+                item.lease_expires_at_ms = int(now_ms) + max(1, int(lease_ms))
+                item.last_error = None
+                item.updated_at_ms = int(now_ms)
+            await session.commit()
+            return [_operational_notification_to_dict(item) for item in rows]
+
+    async def mark_operational_notification_sent(
+        self,
+        notification_id: str,
+        *,
+        message_id: str | None,
+        now_ms: int,
+    ) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            await session.execute(
+                update(OperationalNotificationRow)
+                .where(OperationalNotificationRow.notification_id == str(notification_id))
+                .values(
+                    status="sent",
+                    discord_message_id=message_id,
+                    sent_at_ms=int(now_ms),
+                    lease_expires_at_ms=None,
+                    last_error=None,
+                    updated_at_ms=int(now_ms),
+                )
+            )
+            await session.commit()
+
+    async def mark_operational_notification_failed(
+        self,
+        notification_id: str,
+        *,
+        error: str,
+        now_ms: int,
+        max_attempts: int = 8,
+    ) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            item = await session.get(OperationalNotificationRow, str(notification_id))
+            if item is None:
+                return
+            item.attempt_count = int(item.attempt_count or 0) + 1
+            item.status = "dead_letter" if item.attempt_count >= max(1, int(max_attempts)) else "failed"
+            item.next_attempt_at_ms = int(now_ms) + min(900_000, 5_000 * (2 ** min(item.attempt_count - 1, 8)))
+            item.lease_expires_at_ms = None
+            item.last_error = str(error)[:1000]
+            item.updated_at_ms = int(now_ms)
+            await session.commit()
+
+    async def operational_notification_status(self, *, destination: str = "discord") -> dict[str, Any]:
+        if self.sessionmaker is None:
+            return {"enabled": False, "counts": {}}
+        async with self.sessionmaker() as session:
+            result = await session.execute(
+                select(OperationalNotificationRow.status, func.count())
+                .where(OperationalNotificationRow.destination == str(destination))
+                .group_by(OperationalNotificationRow.status)
+            )
+            counts = {str(status): int(count) for status, count in result.all()}
+            oldest = (
+                await session.execute(
+                    select(OperationalNotificationRow)
+                    .where(
+                        OperationalNotificationRow.destination == str(destination),
+                        OperationalNotificationRow.status.in_(["pending", "failed", "sending"]),
+                    )
+                    .order_by(OperationalNotificationRow.scheduled_at_ms.asc())
+                    .limit(1)
+                )
+            ).scalars().first()
+            latest = (
+                await session.execute(
+                    select(OperationalNotificationRow)
+                    .where(
+                        OperationalNotificationRow.destination == str(destination),
+                        OperationalNotificationRow.status == "sent",
+                    )
+                    .order_by(OperationalNotificationRow.sent_at_ms.desc())
+                    .limit(1)
+                )
+            ).scalars().first()
+            return {
+                "enabled": True,
+                "counts": counts,
+                "oldest_pending_at_ms": oldest.scheduled_at_ms if oldest is not None else None,
+                "oldest_pending_error": oldest.last_error if oldest is not None else None,
+                "last_sent_at_ms": latest.sent_at_ms if latest is not None else None,
+                "last_sent_category": latest.category if latest is not None else None,
+            }
+
+    async def upsert_engine_operator_proposal(self, proposal: dict[str, Any]) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        proposal_id = str(proposal["proposal_id"])
+        now = int(proposal.get("updated_at_ms") or _runtime_now_ms())
+        try:
+            async with self.sessionmaker() as session:
+                item = await session.get(EngineOperatorProposalRow, proposal_id)
+                if item is None:
+                    item = EngineOperatorProposalRow(
+                        proposal_id=proposal_id,
+                        candidate_id=str(proposal["candidate_id"]),
+                        packet_id=proposal.get("packet_id"),
+                        council_review_id=proposal.get("council_review_id"),
+                        strategy_id=str(proposal.get("strategy_id") or "unknown"),
+                        asset=str(proposal.get("asset") or "").upper(),
+                        side=str(proposal.get("side") or "flat"),
+                        status="proposed",
+                        score=float(proposal.get("score") or 0),
+                        confidence=float(proposal.get("confidence") or 0),
+                        net_ev_bps=float(proposal.get("net_ev_bps") or 0),
+                        risk_adjusted_utility=float(proposal.get("risk_adjusted_utility") or 0),
+                        feature_coverage_pct=float(proposal.get("feature_coverage_pct") or 0),
+                        allocated_notional_usd=float(proposal.get("allocated_notional_usd") or 0),
+                        created_at_ms=int(proposal.get("created_at_ms") or now),
+                        expires_at_ms=int(proposal.get("expires_at_ms") or now),
+                        payload_json=redact_secrets(dict(proposal.get("payload") or {})),
+                        metadata_json=redact_secrets(dict(proposal.get("metadata") or {})),
+                        updated_at_ms=now,
+                    )
+                    session.add(item)
+                elif item.status == "proposed":
+                    item.packet_id = proposal.get("packet_id") or item.packet_id
+                    item.council_review_id = proposal.get("council_review_id") or item.council_review_id
+                    item.score = float(proposal.get("score") or item.score)
+                    item.confidence = float(proposal.get("confidence") or item.confidence)
+                    item.net_ev_bps = float(proposal.get("net_ev_bps") or item.net_ev_bps)
+                    item.risk_adjusted_utility = float(
+                        proposal.get("risk_adjusted_utility") or item.risk_adjusted_utility
+                    )
+                    item.feature_coverage_pct = float(
+                        proposal.get("feature_coverage_pct") or item.feature_coverage_pct
+                    )
+                    item.allocated_notional_usd = float(
+                        proposal.get("allocated_notional_usd") or item.allocated_notional_usd
+                    )
+                    item.expires_at_ms = int(proposal.get("expires_at_ms") or item.expires_at_ms)
+                    item.payload_json = redact_secrets(dict(proposal.get("payload") or item.payload_json or {}))
+                    item.metadata_json = redact_secrets(dict(proposal.get("metadata") or item.metadata_json or {}))
+                    item.updated_at_ms = now
+                await session.commit()
+                return proposal_id
+        except IntegrityError:
+            return proposal_id
+        except Exception as exc:  # pragma: no cover - engine loop must remain resilient
+            log.warning("engine_operator_proposal_upsert_failed", proposal_id=proposal_id, error=type(exc).__name__)
+            return None
+
+    async def get_engine_operator_proposal(self, proposal_id: str) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(EngineOperatorProposalRow, str(proposal_id))
+            return _engine_operator_proposal_to_dict(item) if item is not None else None
+
+    async def get_engine_operator_proposal_by_candidate(self, candidate_id: str) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = (
+                await session.execute(
+                    select(EngineOperatorProposalRow).where(
+                        EngineOperatorProposalRow.candidate_id == str(candidate_id)
+                    )
+                )
+            ).scalars().first()
+            return _engine_operator_proposal_to_dict(item) if item is not None else None
+
+    async def list_engine_operator_proposals(
+        self,
+        *,
+        status: str | None = None,
+        asset: str | None = None,
+        since_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(EngineOperatorProposalRow)
+            if status:
+                stmt = stmt.where(EngineOperatorProposalRow.status == str(status))
+            if asset:
+                stmt = stmt.where(EngineOperatorProposalRow.asset == str(asset).upper())
+            if since_ms is not None:
+                stmt = stmt.where(EngineOperatorProposalRow.created_at_ms >= int(since_ms))
+            stmt = stmt.order_by(EngineOperatorProposalRow.created_at_ms.desc()).limit(
+                max(1, min(10_000, int(limit)))
+            )
+            rows = (await session.execute(stmt)).scalars().all()
+            return [_engine_operator_proposal_to_dict(item) for item in rows]
+
+    async def update_engine_operator_proposal_status(
+        self,
+        proposal_id: str,
+        *,
+        status: str,
+        actor: str,
+        now_ms: int,
+        reason: str = "",
+    ) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        if status not in {"acknowledged", "rejected", "expired"}:
+            raise ValueError("unsupported_engine_operator_proposal_status")
+        async with self.sessionmaker() as session:
+            item = await session.get(EngineOperatorProposalRow, str(proposal_id))
+            if item is None:
+                return None
+            if item.status != "proposed":
+                return _engine_operator_proposal_to_dict(item)
+            item.status = status
+            item.updated_at_ms = int(now_ms)
+            if status == "acknowledged":
+                item.acknowledged_by = str(actor)[:128]
+                item.acknowledged_at_ms = int(now_ms)
+            elif status == "rejected":
+                item.rejected_by = str(actor)[:128]
+                item.rejected_at_ms = int(now_ms)
+                item.rejection_reason = str(reason)[:1000]
+            await session.commit()
+            return _engine_operator_proposal_to_dict(item)
+
+    async def expire_engine_operator_proposals(self, *, now_ms: int) -> int:
+        if self.sessionmaker is None:
+            return 0
+        async with self.sessionmaker() as session:
+            result = await session.execute(
+                update(EngineOperatorProposalRow)
+                .where(
+                    EngineOperatorProposalRow.status == "proposed",
+                    EngineOperatorProposalRow.expires_at_ms <= int(now_ms),
+                )
+                .values(status="expired", updated_at_ms=int(now_ms))
+            )
+            await session.commit()
+            return int(result.rowcount or 0)
+
+    async def engine_operator_proposal_status(self) -> dict[str, Any]:
+        if self.sessionmaker is None:
+            return {"enabled": False, "counts": {}}
+        async with self.sessionmaker() as session:
+            result = await session.execute(
+                select(EngineOperatorProposalRow.status, func.count()).group_by(
+                    EngineOperatorProposalRow.status
+                )
+            )
+            counts = {str(status): int(count) for status, count in result.all()}
+            latest = (
+                await session.execute(
+                    select(EngineOperatorProposalRow)
+                    .order_by(EngineOperatorProposalRow.created_at_ms.desc())
+                    .limit(1)
+                )
+            ).scalars().first()
+            return {
+                "enabled": True,
+                "counts": counts,
+                "last_proposal_id": latest.proposal_id if latest is not None else None,
+                "last_proposal_at_ms": latest.created_at_ms if latest is not None else None,
+            }
+
     async def was_newswire_story_delivered(
         self,
         story_id: str,
@@ -5288,6 +5649,17 @@ def _newswire_delivery_id(destination: str, channel_id: str, story_id: str, stor
     return "nwdlv_" + hashlib.sha1(key.encode()).hexdigest()[:32]
 
 
+def _operational_notification_id(dedupe_key: str) -> str:
+    return "opn_" + hashlib.sha1(str(dedupe_key).encode()).hexdigest()[:32]
+
+
+def _operational_dedupe_value(dedupe_key: str) -> str:
+    value = str(dedupe_key)
+    if len(value) <= 255:
+        return value
+    return f"{value[:214]}:{hashlib.sha1(value.encode()).hexdigest()}"
+
+
 def _newswire_kwargs(event: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": int(event.get("schema_version") or 1),
@@ -5660,6 +6032,58 @@ def _newswire_delivery_to_dict(item: NewswireDeliveryRow) -> dict[str, Any]:
         "posted_at_ms": item.posted_at_ms,
         "last_error": item.last_error,
         "skip_reason": item.skip_reason,
+        "updated_at_ms": item.updated_at_ms,
+    }
+
+
+def _operational_notification_to_dict(item: OperationalNotificationRow) -> dict[str, Any]:
+    return {
+        "notification_id": item.notification_id,
+        "dedupe_key": item.dedupe_key,
+        "category": item.category,
+        "source_type": item.source_type,
+        "source_id": item.source_id,
+        "destination": item.destination,
+        "channel_id": item.channel_id,
+        "severity": item.severity,
+        "status": item.status,
+        "scheduled_at_ms": item.scheduled_at_ms,
+        "next_attempt_at_ms": item.next_attempt_at_ms,
+        "lease_expires_at_ms": item.lease_expires_at_ms,
+        "attempt_count": item.attempt_count,
+        "payload": item.payload_json or {},
+        "discord_message_id": item.discord_message_id,
+        "sent_at_ms": item.sent_at_ms,
+        "last_error": item.last_error,
+        "updated_at_ms": item.updated_at_ms,
+    }
+
+
+def _engine_operator_proposal_to_dict(item: EngineOperatorProposalRow) -> dict[str, Any]:
+    return {
+        "proposal_id": item.proposal_id,
+        "candidate_id": item.candidate_id,
+        "packet_id": item.packet_id,
+        "council_review_id": item.council_review_id,
+        "strategy_id": item.strategy_id,
+        "asset": item.asset,
+        "side": item.side,
+        "status": item.status,
+        "score": item.score,
+        "confidence": item.confidence,
+        "net_ev_bps": item.net_ev_bps,
+        "risk_adjusted_utility": item.risk_adjusted_utility,
+        "feature_coverage_pct": item.feature_coverage_pct,
+        "allocated_notional_usd": item.allocated_notional_usd,
+        "created_at_ms": item.created_at_ms,
+        "expires_at_ms": item.expires_at_ms,
+        "acknowledged_by": item.acknowledged_by,
+        "acknowledged_at_ms": item.acknowledged_at_ms,
+        "rejected_by": item.rejected_by,
+        "rejected_at_ms": item.rejected_at_ms,
+        "rejection_reason": item.rejection_reason,
+        "payload": item.payload_json or {},
+        "metadata": item.metadata_json or {},
         "updated_at_ms": item.updated_at_ms,
     }
 

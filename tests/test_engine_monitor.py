@@ -82,6 +82,16 @@ class FakeMonitorRepository:
         return None
 
 
+class OutboxMonitorRepository(FakeMonitorRepository):
+    def __init__(self):
+        super().__init__()
+        self.notifications: list[dict] = []
+
+    async def enqueue_operational_notification(self, **kwargs):
+        self.notifications.append(kwargs)
+        return f"opn_{len(self.notifications)}"
+
+
 def test_engine_validation_digest_formats_summary():
     settings = Settings(engine_enabled=True, engine_paper_enabled=False, engine_execution_modes="shadow")
     message = format_engine_validation_digest(
@@ -167,3 +177,59 @@ def test_engine_validation_monitor_alerts_on_loop_duration_overrun():
     overruns = [item for item in result["alerts"] if item["type"] == "engine_loop_duration_overrun"]
     assert overruns and overruns[0]["severity"] == "critical"
     assert "slowest_stage=meta_asset_ctxs" in overruns[0]["detail"]
+
+
+def test_engine_validation_monitor_enqueues_digest_in_durable_outbox():
+    settings = Settings(
+        _env_file=None,
+        engine_enabled=True,
+        engine_paper_enabled=False,
+        engine_shadow_enabled=True,
+        engine_execution_modes="shadow",
+        autonomy_core_universe="BTC,ETH",
+        autonomy_alert_channel_id="alerts",
+    )
+    repo = OutboxMonitorRepository()
+    service = EngineValidationMonitorService(
+        settings=settings,
+        repository=repo,
+        engine_service=FakeEngineService({"run_count": 1, "last_error": None, "last_run_at_ms": repo.now}),
+        alert_sink=None,
+    )
+
+    async def run_once():
+        await service.run_once(post=True)
+
+    anyio.run(run_once)
+
+    assert repo.notifications
+    assert {item["category"] for item in repo.notifications} == {"engine_validation_digest"}
+    assert all(item["dedupe_key"].startswith("engine-validation-digest:") for item in repo.notifications)
+    assert service.status()["delivery_transport"] == "operational_notification_outbox"
+
+
+def test_trader_owned_monitor_starts_without_local_discord_client():
+    settings = Settings(
+        _env_file=None,
+        engine_enabled=True,
+        engine_validation_digest_enabled=True,
+        autonomy_alert_channel_id="",
+        discord_bot_token="",
+    )
+    service = EngineValidationMonitorService(
+        settings=settings,
+        repository=FakeMonitorRepository(),
+        engine_service=FakeEngineService({}),
+        alert_sink=None,
+    )
+
+    async def run():
+        await service.start()
+        status = service.status()
+        await service.stop()
+        return status
+
+    status = anyio.run(run)
+
+    assert status["running"] is True
+    assert status["owner_role"] == "trader"
