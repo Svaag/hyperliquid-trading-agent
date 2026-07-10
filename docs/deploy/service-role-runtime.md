@@ -79,7 +79,7 @@ open http://127.0.0.1:${HOST_PORT:-8081}/runtime/dashboard
 Persisted canonical story revisions fan out through independent `consumer_offsets` entries:
 
 - `world_model:newswire` updates world-model events, beliefs, narratives, and memories.
-- `discord_publisher:newswire` routes V2 `standard|high|breaking` assessments through a durable immediate/digest outbox.
+- `discord_publisher:newswire` routes V2 `standard|high|breaking` assessments through a durable outbox. High/breaking stories release immediately; standard stories release on schedule as individual rich posts with feedback controls.
 - `trader:engine_newswire` feeds the Institutional Engine ledger, features, and news-risk state from explicit engine actions without enabling news provider connections in the trader process.
 
 `SERVICE_ROLE=trader` must keep `NEWSWIRE_ENABLED=false`; the trader consumes stored revisions only. Consumer offsets now identify `source_table=newswire_story_revisions`. Use a dedicated replay/backfill tool if historical engine news features are desired.

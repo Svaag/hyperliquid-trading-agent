@@ -8,15 +8,18 @@ from hyperliquid_trading_agent.app.newswire.schemas import NewswireEvent
 _COLOR_BREAKING = 0xE74C3C
 _COLOR_HIGH = 0xF39C12
 _COLOR_DIGEST = 0x3498DB
-_COLOR_NORMAL = 0x95A5A6
+_COLOR_NORMAL = 0x3498DB
+_DISCORD_MAX_EMBEDS = 10
 
 
 def _icon(event: NewswireEvent) -> str:
+    if event.action == "removed":
+        return "⛔"
     if event.urgency == "breaking":
         return "🚨"
     if event.importance_score >= 70:
         return "⚠️"
-    return "📰"
+    return ""
 
 
 def _symbols(event: NewswireEvent) -> str:
@@ -25,9 +28,9 @@ def _symbols(event: NewswireEvent) -> str:
 
 def _action_note(event: NewswireEvent) -> str:
     if event.action == "updated":
-        return " (correction/update)"
+        return " · Updated"
     if event.action == "removed":
-        return " (retracted)"
+        return " · Retracted"
     return ""
 
 
@@ -39,6 +42,34 @@ def _color(event: NewswireEvent) -> int:
     return _COLOR_NORMAL
 
 
+def _event_title(event: NewswireEvent, *, limit: int = 256) -> str:
+    icon = _icon(event)
+    prefix = f"{icon} " if icon else ""
+    return _trim(f"{prefix}{event.headline}{_action_note(event)}", limit)
+
+
+def _source_label(event: NewswireEvent) -> str:
+    labels: list[str] = []
+    seen: set[str] = set()
+    for raw in (event.provider, event.source):
+        normalized = str(raw or "").strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        labels.append(_display_name(normalized))
+    return " · ".join(labels) or "Unknown source"
+
+
+def _display_name(value: str) -> str:
+    aliases = {
+        "ecb": "ECB",
+        "sec_edgar": "SEC EDGAR",
+        "x": "X",
+        "x_cashtag": "X",
+    }
+    return aliases.get(value, value.replace("_", " ").title())
+
+
 def _trim(value: Any, limit: int) -> str:
     text = _clean_text(value)
     if len(text) <= limit:
@@ -46,8 +77,25 @@ def _trim(value: Any, limit: int) -> str:
     return text[: max(0, limit - 1)].rstrip() + "…"
 
 
+def _trim_multiline(value: Any, limit: int) -> str:
+    text = _clean_multiline(value)
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
 def _clean_text(value: Any) -> str:
     return html.unescape(" ".join(str(value or "").split()))
+
+
+def _clean_multiline(value: Any) -> str:
+    raw = html.unescape(str(value or "").replace("\r\n", "\n").replace("\r", "\n"))
+    lines = [" ".join(line.split()) for line in raw.split("\n")]
+    cleaned: list[str] = []
+    for line in lines:
+        if line or (cleaned and cleaned[-1]):
+            cleaned.append(line)
+    return "\n".join(cleaned).strip()
 
 
 def _event_description(event: NewswireEvent) -> str:
@@ -60,7 +108,7 @@ def _event_description(event: NewswireEvent) -> str:
         parts.append(f"**Why it matters:** {_trim(event.enrichment['why_it_matters'], 450)}")
     if event.tradability.halted_symbols:
         parts.append(f"⛔ Halt state: {', '.join(event.tradability.halted_symbols)} — confirm before acting.")
-    return _trim("\n\n".join(parts), 3500) or _trim(event.headline, 3500)
+    return _trim_multiline("\n\n".join(parts), 3500) or _trim(event.headline, 3500)
 
 
 def format_news_event(event: NewswireEvent) -> str:
@@ -74,8 +122,8 @@ def format_news_event(event: NewswireEvent) -> str:
     if event.tradability.halted_symbols:
         halt = f"\n⛔ Halt state: {', '.join(event.tradability.halted_symbols)} — confirm before acting."
     return (
-        f"{_icon(event)} **{_trim(event.headline, 500)}**{_action_note(event)}\n"
-        f"`{event.source}` · {event.event_type} · {event.asset_class} · {event.sentiment} · "
+        f"**{_event_title(event, limit=500)}**\n"
+        f"{_source_label(event)} · {event.event_type} · {event.asset_class} · {event.sentiment} · "
         f"score {event.importance_score:.0f} · {symbols}"
         f"{why}{url}{halt}"
     )
@@ -83,12 +131,16 @@ def format_news_event(event: NewswireEvent) -> str:
 
 def format_news_digest(events: list[NewswireEvent]) -> str:
     """Plaintext fallback retained for tests, logs, and non-embed sinks."""
-    lines = [f"📰 **Newswire digest — {len(events)} update(s)**"]
+    items: list[str] = []
     for event in events[:25]:
         symbols = _symbols(event)
-        tail = f" · {symbols}" if symbols else ""
-        lines.append(f"- {_icon(event)} `{event.source}` {_trim(event.headline, 160)}{tail} (score {event.importance_score:.0f})")
-    return "\n".join(lines)
+        market = symbols or event.asset_class.title()
+        url = f"\n{event.url}" if event.url else ""
+        items.append(
+            f"**{_event_title(event, limit=120)}**\n"
+            f"{market} · {_source_label(event)} · {event.importance_score:.0f}/100{url}"
+        )
+    return "\n\n".join(items)
 
 
 def format_news_event_message(event: NewswireEvent) -> dict[str, Any]:
@@ -100,51 +152,75 @@ def format_news_event_message(event: NewswireEvent) -> dict[str, Any]:
     symbols = _symbols(event) or "—"
     fallback_content = format_news_event(event)
     fields = [
-        {"name": "Source", "value": _trim(f"{event.source} / {event.provider}", 1024), "inline": True},
-        {"name": "Type", "value": _trim(f"{event.event_type} · {event.asset_class}", 1024), "inline": True},
-        {"name": "Score", "value": f"{event.importance_score:.0f} · {event.urgency}", "inline": True},
+        {"name": "Source", "value": _trim(_source_label(event), 1024), "inline": True},
+        {
+            "name": "Type",
+            "value": _trim(f"{event.event_type.title()} · {event.asset_class.title()}", 1024),
+            "inline": True,
+        },
+        {"name": "Score", "value": f"{event.importance_score:.0f}/100 · {event.urgency.title()}", "inline": True},
         {"name": "Symbols", "value": _trim(symbols, 1024), "inline": True},
-        {"name": "Sentiment", "value": event.sentiment, "inline": True},
+        {"name": "Sentiment", "value": event.sentiment.title(), "inline": True},
     ]
     decision = _policy_decision(event)
     if decision:
         fields.extend(
             [
-                {"name": "Policy", "value": _trim(f"{decision.get('newswire_action')} / {decision.get('engine_action')}", 1024), "inline": True},
+                {
+                    "name": "Policy",
+                    "value": _trim(f"{decision.get('newswire_action')} / {decision.get('engine_action')}", 1024),
+                    "inline": True,
+                },
                 {"name": "Quality", "value": f"{float(decision.get('quality_score') or 0):.0f}", "inline": True},
                 {"name": "Impact", "value": f"{float(decision.get('market_impact_score') or 0):.0f}", "inline": True},
             ]
         )
     embed: dict[str, Any] = {
-        "title": _trim(f"{_icon(event)} {event.headline}{_action_note(event)}", 256),
+        "title": _event_title(event),
         "description": _event_description(event),
         "color": _color(event),
         "fields": fields,
     }
     if event.url:
         embed["url"] = event.url
-    return {"content": "", "fallback_content": _trim(fallback_content, 1800), "embeds": [embed], "components": _feedback_components(event)}
+    return {
+        "content": "",
+        "fallback_content": _trim_multiline(fallback_content, 1800),
+        "embeds": [embed],
+        "components": _feedback_components(event),
+    }
 
 
 def format_news_digest_message(events: list[NewswireEvent], *, max_items: int = 10) -> dict[str, Any]:
-    shown = events[: max(1, max_items)]
-    lines = []
-    for event in shown:
-        symbols = _symbols(event)
-        tail = f" · {symbols}" if symbols else ""
-        lines.append(f"{_icon(event)} **{_trim(event.headline, 160)}**{tail} — score {event.importance_score:.0f} (`{event.source}`)")
-    hidden = max(0, len(events) - len(shown))
-    if hidden:
-        lines.append(f"…and {hidden} more update(s) in this digest batch.")
-    embed = {
-        "title": f"📰 Newswire digest — {len(events)} update(s)",
-        "description": _trim("\n".join(lines), 3500) or "No digest items.",
-        "color": _COLOR_DIGEST,
+    """Compatibility formatter for sinks that can accept several embeds at once.
+
+    The live publisher sends scheduled stories as individual messages so every story
+    can retain its own feedback controls. This helper deliberately has no batch title:
+    each event is represented by its own compact Discord card.
+    """
+    limit = min(_DISCORD_MAX_EMBEDS, max(1, max_items))
+    shown = events[:limit]
+    embeds = [_digest_embed(event) for event in shown]
+    fallback_content = format_news_digest(shown) or "No news items."
+    return {"content": "", "fallback_content": _trim_multiline(fallback_content, 1800), "embeds": embeds}
+
+
+def _digest_embed(event: NewswireEvent) -> dict[str, Any]:
+    symbols = _symbols(event) or event.asset_class.title()
+    decision = _policy_decision(event)
+    priority = str(decision.get("newswire_action") or event.urgency or "standard").replace("_", " ").title()
+    embed: dict[str, Any] = {
+        "title": _event_title(event),
+        "color": _color(event) if event.urgency == "breaking" or event.importance_score >= 70 else _COLOR_DIGEST,
+        "fields": [
+            {"name": "Market", "value": _trim(symbols, 1024), "inline": True},
+            {"name": "Priority", "value": f"{event.importance_score:.0f}/100 · {priority}", "inline": True},
+            {"name": "Source", "value": _trim(_source_label(event), 1024), "inline": True},
+        ],
     }
-    fallback_content = format_news_digest(events[: max(1, max_items)])
-    if hidden:
-        fallback_content += f"\n…and {hidden} more update(s) in this digest batch."
-    return {"content": "", "fallback_content": _trim(fallback_content, 1800), "embeds": [embed]}
+    if event.url:
+        embed["url"] = event.url
+    return embed
 
 
 def _policy_decision(event: NewswireEvent) -> dict[str, Any]:

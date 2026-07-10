@@ -60,10 +60,11 @@ docker compose --profile discord-publisher up -d discord-publisher
 
 - [ ] `POST /newswire/discord/test` returns an accepted command for `discord_publisher`; poll the returned `/commands/{id}` until completed
 - [ ] V2 `high`/`breaking` stories appear immediately, capped by `NEWSWIRE_DISCORD_MAX_IMMEDIATE_PER_HOUR`
-- [ ] V2 `standard` stories appear in periodic digest posts (every `NEWSWIRE_DIGEST_INTERVAL_SECONDS`)
+- [ ] V2 `standard` stories release on the periodic schedule (every `NEWSWIRE_DIGEST_INTERVAL_SECONDS`) as individual rich posts
 - [ ] `/newswire/status` reports Discord gateway `ready=true`; a merely running worker is not reported as ready
 - [ ] `/newswire/status` reports a healthy delivery outbox with no growing `failed`/old `pending` count
-- [ ] Messages render as a single Discord embed without a duplicated plaintext digest
+- [ ] Every posted story renders as one Discord embed with no visible digest heading or concatenated story list
+- [ ] Every posted story, including scheduled `standard` stories, has story-specific feedback controls
 - [ ] Headlines render decoded punctuation such as apostrophes instead of HTML entities like `&#39;`
 - [ ] Halt-state events (`⛔ Halt state`) show the halt warning when applicable
 

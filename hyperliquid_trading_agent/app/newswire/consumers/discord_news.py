@@ -11,7 +11,7 @@ from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.metrics import NEWSWIRE_DISCORD_POSTS, NEWSWIRE_DISCORD_SKIPS
 from hyperliquid_trading_agent.app.newswire.bus import NewswireBus
 from hyperliquid_trading_agent.app.newswire.enrich import Enricher
-from hyperliquid_trading_agent.app.newswire.format import format_news_digest_message, format_news_event_message
+from hyperliquid_trading_agent.app.newswire.format import format_news_event_message
 from hyperliquid_trading_agent.app.newswire.schemas import NewswireEvent, NewswireFilter
 
 log = get_logger(__name__)
@@ -20,8 +20,9 @@ log = get_logger(__name__)
 class DiscordNewsPublisher:
     """Routes the curated Newswire feed to a dedicated #news channel.
 
-    Breaking / high-importance events post immediately; the rest roll up into a periodic
-    batched digest. Posting is fresh-only to avoid startup backlog blasts and uses the
+    Breaking / high-importance events post immediately; standard events are released on
+    a periodic schedule. Every published event gets its own rich message and feedback
+    controls. Posting is fresh-only to avoid startup backlog blasts and uses the
     repository publish ledger when available to prevent restart/multi-process dupes.
     """
 
@@ -62,7 +63,11 @@ class DiscordNewsPublisher:
     @property
     def enabled(self) -> bool:
         owns_news_channel = self.settings.newswire_enabled or self.settings.discord_publisher_enabled
-        return bool(owns_news_channel and self.settings.newswire_discord_enabled and self.settings.newswire_news_channel_configured)
+        return bool(
+            owns_news_channel
+            and self.settings.newswire_discord_enabled
+            and self.settings.newswire_news_channel_configured
+        )
 
     async def start(self) -> None:
         if not self.enabled or self._running:
@@ -122,7 +127,8 @@ class DiscordNewsPublisher:
         breaking = (
             str(decision.get("newswire_action") or "") in {"high", "breaking"}
             if decision
-            else event.urgency == "breaking" or _legacy_importance(event) >= self.settings.newswire_breaking_min_importance
+            else event.urgency == "breaking"
+            or _legacy_importance(event) >= self.settings.newswire_breaking_min_importance
         )
         if breaking:
             claimed = await self._claim(event, mode="breaking")
@@ -151,7 +157,8 @@ class DiscordNewsPublisher:
             else str(decision.get("newswire_action") or "standard")
             if decision
             else "breaking"
-            if event.urgency == "breaking" or _legacy_importance(event) >= self.settings.newswire_breaking_min_importance
+            if event.urgency == "breaking"
+            or _legacy_importance(event) >= self.settings.newswire_breaking_min_importance
             else "standard"
         )
         now = _now_ms()
@@ -163,7 +170,9 @@ class DiscordNewsPublisher:
             and not self._within_immediate_budget(now)
         ):
             mode = "digest"
-        scheduled_at = now if mode == "breaking" else _next_digest_at(now, self.settings.newswire_digest_interval_seconds)
+        scheduled_at = (
+            now if mode == "breaking" else _next_digest_at(now, self.settings.newswire_digest_interval_seconds)
+        )
         story_id = str(event.story_id or event.metadata.get("story_id") or event.event_id)
         story_revision = int(event.story_revision or event.metadata.get("story_revision") or 1)
         status = "skipped" if skip_reason is not None else "pending"
@@ -200,10 +209,13 @@ class DiscordNewsPublisher:
 
     async def _dispatch_due_deliveries(self) -> None:
         repo = self.repository
-        if repo is None or not callable(getattr(repo, "list_due_newswire_deliveries", None)):
+        if repo is None:
             return
         claim = getattr(repo, "claim_due_newswire_deliveries", None)
-        list_due = claim if callable(claim) else repo.list_due_newswire_deliveries
+        fallback = getattr(repo, "list_due_newswire_deliveries", None)
+        list_due = claim if callable(claim) else fallback
+        if not callable(list_due):
+            return
         rows = await list_due(
             channel_id=self._channel_id,
             now_ms=_now_ms(),
@@ -216,36 +228,40 @@ class DiscordNewsPublisher:
         for row in breaking:
             event = _delivery_event(row)
             if event is None:
-                await repo.mark_newswire_deliveries_failed([str(row["delivery_id"])], error="invalid_event_payload", now_ms=_now_ms())
+                await repo.mark_newswire_deliveries_failed(
+                    [str(row["delivery_id"])], error="invalid_event_payload", now_ms=_now_ms()
+                )
                 continue
             await self._enrich(event)
             message_id = await self._send_payload(format_news_event_message(event), mode="breaking")
             if message_id:
-                await repo.mark_newswire_deliveries_posted([str(row["delivery_id"])], message_id=message_id, now_ms=_now_ms())
+                await repo.mark_newswire_deliveries_posted(
+                    [str(row["delivery_id"])], message_id=message_id, now_ms=_now_ms()
+                )
                 self._last_post_at_ms = _now_ms()
                 self._posted_count += 1
             else:
-                await repo.mark_newswire_deliveries_failed([str(row["delivery_id"])], error=self._last_error or "send_skipped", now_ms=_now_ms())
-        max_items = max(1, self.settings.newswire_discord_digest_max_items)
-        for chunk in _event_chunks(digests, max_items):
-            pairs: list[tuple[dict[str, Any], NewswireEvent]] = []
-            for row in chunk:
-                event = _delivery_event(row)
-                if event is not None:
-                    pairs.append((row, event))
-            if not pairs:
+                await repo.mark_newswire_deliveries_failed(
+                    [str(row["delivery_id"])], error=self._last_error or "send_skipped", now_ms=_now_ms()
+                )
+        for row in digests:
+            event = _delivery_event(row)
+            if event is None:
+                await repo.mark_newswire_deliveries_failed(
+                    [str(row["delivery_id"])], error="invalid_event_payload", now_ms=_now_ms()
+                )
                 continue
-            events = [event for _, event in pairs]
-            for event in events[:3]:
-                await self._enrich(event)
-            message_id = await self._send_payload(format_news_digest_message(events, max_items=max_items), mode="digest")
-            ids = [str(row["delivery_id"]) for row, _ in pairs]
+            await self._enrich(event)
+            message_id = await self._send_payload(format_news_event_message(event), mode="digest")
+            delivery_id = str(row["delivery_id"])
             if message_id:
-                await repo.mark_newswire_deliveries_posted(ids, message_id=message_id, now_ms=_now_ms())
+                await repo.mark_newswire_deliveries_posted([delivery_id], message_id=message_id, now_ms=_now_ms())
                 self._last_post_at_ms = _now_ms()
-                self._posted_count += len(ids)
+                self._posted_count += 1
             else:
-                await repo.mark_newswire_deliveries_failed(ids, error=self._last_error or "send_skipped", now_ms=_now_ms())
+                await repo.mark_newswire_deliveries_failed(
+                    [delivery_id], error=self._last_error or "send_skipped", now_ms=_now_ms()
+                )
 
     async def _flush_loop(self) -> None:
         while True:
@@ -273,17 +289,13 @@ class DiscordNewsPublisher:
                 self._skip("duplicate")
         if not publishable:
             return
-        max_items = max(1, self.settings.newswire_discord_digest_max_items)
-        for chunk in _event_chunks(publishable, max_items):
-            for event in chunk[:3]:
-                await self._enrich(event)
-            payload = format_news_digest_message(chunk, max_items=max_items)
-            ids = [event.event_id for event in chunk]
-            message_id = await self._send_payload(payload, mode="digest")
+        for event in publishable:
+            await self._enrich(event)
+            message_id = await self._send_payload(format_news_event_message(event), mode="digest")
             if message_id:
-                await self._mark_posted(ids, message_id)
+                await self._mark_posted([event.event_id], message_id)
             else:
-                await self._mark_failed(ids, self._last_error or "send_skipped")
+                await self._mark_failed([event.event_id], self._last_error or "send_skipped")
 
     async def _enrich(self, event: NewswireEvent) -> None:
         if self.enricher is None or event.enrichment is not None:
@@ -336,7 +348,9 @@ class DiscordNewsPublisher:
             await self._throttle()
             try:
                 try:
-                    result = await sink.send(self._channel_id, content, embeds=embeds, components=payload.get("components"))
+                    result = await sink.send(
+                        self._channel_id, content, embeds=embeds, components=payload.get("components")
+                    )
                 except TypeError:
                     try:
                         # Compatibility with older/fake sinks that accept embeds but no components.
@@ -380,7 +394,9 @@ class DiscordNewsPublisher:
                 return "startup_backlog"
         return None
 
-    async def handle_feedback_component(self, custom_id: str, user_id: str | None, message_id: str | None) -> str | None:
+    async def handle_feedback_component(
+        self, custom_id: str, user_id: str | None, message_id: str | None
+    ) -> str | None:
         parts = str(custom_id or "").split(":", 3)
         if len(parts) != 4 or parts[0] != "nwfb":
             return None
@@ -440,7 +456,13 @@ class DiscordNewsPublisher:
             ],
         }
         if dry_run:
-            return {"sent": False, "dry_run": True, "channel_id": target, "payload": payload, "publisher": self.status()}
+            return {
+                "sent": False,
+                "dry_run": True,
+                "channel_id": target,
+                "payload": payload,
+                "publisher": self.status(),
+            }
         original_channel = self.settings.newswire_news_channel_id
         try:
             if channel_id:
@@ -448,7 +470,12 @@ class DiscordNewsPublisher:
             message_id = await self._send_payload(payload, mode="test")
             if message_id:
                 self._last_post_at_ms = _now_ms()
-            return {"sent": bool(message_id), "channel_id": target, "message_id": message_id, "publisher": self.status()}
+            return {
+                "sent": bool(message_id),
+                "channel_id": target,
+                "message_id": message_id,
+                "publisher": self.status(),
+            }
         finally:
             self.settings.newswire_news_channel_id = original_channel
 
@@ -482,9 +509,19 @@ class DiscordNewsPublisher:
     async def status_async(self) -> dict[str, Any]:
         status = self.status()
         repo = self.repository
-        if self._running and repo is not None and callable(getattr(repo, "newswire_publish_status", None)) and self._channel_id:
+        if (
+            self._running
+            and repo is not None
+            and callable(getattr(repo, "newswire_publish_status", None))
+            and self._channel_id
+        ):
             status["ledger"] = await repo.newswire_publish_status(self._channel_id)
-        if self._running and repo is not None and callable(getattr(repo, "newswire_delivery_status", None)) and self._channel_id:
+        if (
+            self._running
+            and repo is not None
+            and callable(getattr(repo, "newswire_delivery_status", None))
+            and self._channel_id
+        ):
             status["delivery_outbox"] = await repo.newswire_delivery_status(self._channel_id)
         return status
 
@@ -497,12 +534,10 @@ def _sink_status(sink: Any | None) -> dict[str, Any]:
         return {"configured": True, **client.status()}
     bot = getattr(sink, "bot", None)
     discord_client = getattr(bot, "client", None)
-    ready = bool(discord_client is not None and callable(getattr(discord_client, "is_ready", None)) and discord_client.is_ready())
+    ready = bool(
+        discord_client is not None and callable(getattr(discord_client, "is_ready", None)) and discord_client.is_ready()
+    )
     return {"configured": True, "ready": ready}
-
-
-def _event_chunks(events: list[Any], size: int) -> list[list[Any]]:
-    return [events[index : index + size] for index in range(0, len(events), max(1, size))]
 
 
 def _delivery_event(row: dict[str, Any]) -> NewswireEvent | None:

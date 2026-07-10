@@ -74,7 +74,9 @@ def test_normalize_returns_none_for_empty_item():
 def test_event_id_is_stable_for_updates():
     created = _raw(source="alpaca", external_id="42", headline="Headline v1")
     updated = _raw(source="alpaca", external_id="42", headline="Headline v2 corrected", action="updated")
-    assert normalize(created, symbols_universe=UNIVERSE).event_id == normalize(updated, symbols_universe=UNIVERSE).event_id
+    assert (
+        normalize(created, symbols_universe=UNIVERSE).event_id == normalize(updated, symbols_universe=UNIVERSE).event_id
+    )
 
 
 def test_classify_event_type_and_urgency_and_source_score():
@@ -108,9 +110,33 @@ def test_discord_embed_payloads_are_embed_first_and_decode_entities():
 
     digest = format_news_digest_message([event], max_items=10)
     assert digest["content"] == ""
-    assert "Newswire digest" in digest["embeds"][0]["title"]
-    assert "ETH rallies 'hard'" in digest["embeds"][0]["description"]
+    assert len(digest["embeds"]) == 1
+    assert "Newswire digest" not in digest["fallback_content"]
+    assert "ETH rallies 'hard'" in digest["embeds"][0]["title"]
+    assert {field["name"] for field in digest["embeds"][0]["fields"]} == {"Market", "Priority", "Source"}
     assert "footer" not in digest["embeds"][0]
+
+
+def test_discord_batch_compatibility_formatter_uses_one_card_per_story_without_heading():
+    first = _event(
+        source="alpaca", provider="alpaca", external_id="one", headline="Company raises guidance", symbols=["NVDA"]
+    )
+    second = _event(
+        source="cointelegraph",
+        provider="cointelegraph",
+        external_id="two",
+        headline="Protocol ships upgrade",
+        symbols=["ETH"],
+    )
+
+    payload = format_news_digest_message([first, second], max_items=10)
+
+    assert payload["content"] == ""
+    assert len(payload["embeds"]) == 2
+    assert [embed["title"] for embed in payload["embeds"]] == ["Company raises guidance", "Protocol ships upgrade"]
+    assert all("digest" not in embed["title"].lower() for embed in payload["embeds"])
+    assert "\n\n" in payload["fallback_content"]
+    assert "Newswire digest" not in payload["fallback_content"]
 
 
 def test_keyword_matcher_uses_exact_terms_and_penalizes_low_value_posts():
@@ -303,7 +329,9 @@ def test_service_ingest_persists_policy_decision():
     async def run():
         repo = Repo()
         service = NewswireService(settings=Settings(newswire_enabled=True), repository=repo)
-        event = await service._ingest(_raw(source="coindesk", external_id="d1", headline="ETH ETF inflows rise", symbols=["ETH"]))
+        event = await service._ingest(
+            _raw(source="coindesk", external_id="d1", headline="ETH ETF inflows rise", symbols=["ETH"])
+        )
         return service, repo, event
 
     service, repo, event = anyio.run(run)
@@ -360,11 +388,17 @@ def test_alpaca_frame_parses_into_raw_item():
 
 class _FakeSink:
     def __init__(self) -> None:
-        self.sent: list[tuple[str, str, list[dict] | None]] = []
+        self.sent: list[tuple[str, str, list[dict] | None, list[dict] | None]] = []
 
-    async def send(self, channel_id: str, content: str, embeds: list[dict] | None = None) -> str | None:
-        self.sent.append((channel_id, content, embeds))
-        return "msg-1"
+    async def send(
+        self,
+        channel_id: str,
+        content: str,
+        embeds: list[dict] | None = None,
+        components: list[dict] | None = None,
+    ) -> str | None:
+        self.sent.append((channel_id, content, embeds, components))
+        return f"msg-{len(self.sent)}"
 
 
 def test_discord_publisher_role_can_run_without_owning_news_ingestion():
@@ -385,7 +419,7 @@ def test_discord_publisher_role_can_run_without_owning_news_ingestion():
     assert publisher.enabled is True
 
 
-def test_discord_publisher_posts_breaking_immediately_and_batches_rest():
+def test_discord_publisher_posts_breaking_immediately_and_releases_standard_as_individual_feedback_posts():
     async def run():
         settings = Settings(
             newswire_news_channel_id="999",
@@ -399,8 +433,12 @@ def test_discord_publisher_posts_breaking_immediately_and_batches_rest():
         normal = _event(source="coindesk", external_id="n", headline="ETH slowly grinds higher", symbols=["ETH"])
         normal.urgency = "normal"
         normal.importance_score = 30.0
+        second_normal = _event(source="alpaca", external_id="n2", headline="Company raises guidance", symbols=["NVDA"])
+        second_normal.urgency = "normal"
+        second_normal.importance_score = 35.0
         await publisher._on_event(breaking)
         await publisher._on_event(normal)
+        await publisher._on_event(second_normal)
         before_flush = list(sink.sent)
         await publisher._flush()
         return before_flush, sink.sent
@@ -409,9 +447,62 @@ def test_discord_publisher_posts_breaking_immediately_and_batches_rest():
     assert len(before_flush) == 1  # only the breaking event posted immediately
     assert before_flush[0][1] == ""
     assert before_flush[0][2]  # embed payload included
-    assert len(after_flush) == 2  # digest flushed the buffered normal event
-    assert after_flush[1][1] == ""
-    assert "digest" in after_flush[1][2][0]["title"].lower()
+    assert before_flush[0][3]  # story-specific feedback controls included
+    assert len(after_flush) == 3  # each scheduled story gets its own message
+    assert [item[2][0]["title"] for item in after_flush[1:]] == ["Company raises guidance", "ETH slowly grinds higher"]
+    assert all(item[1] == "" for item in after_flush[1:])
+    assert all(len(item[2]) == 1 for item in after_flush[1:])
+    assert all(item[3] for item in after_flush[1:])
+    assert all("digest" not in item[2][0]["title"].lower() for item in after_flush[1:])
+
+
+def test_discord_delivery_outbox_marks_each_scheduled_story_with_its_own_message():
+    class Repo:
+        def __init__(self, rows: list[dict]) -> None:
+            self.rows = rows
+            self.posted: list[tuple[list[str], str]] = []
+            self.failed: list[tuple[list[str], str]] = []
+
+        async def claim_due_newswire_deliveries(self, **_kwargs) -> list[dict]:
+            rows, self.rows = self.rows, []
+            return rows
+
+        async def mark_newswire_deliveries_posted(self, ids: list[str], *, message_id: str, now_ms: int) -> None:
+            assert now_ms > 0
+            self.posted.append((ids, message_id))
+
+        async def mark_newswire_deliveries_failed(self, ids: list[str], *, error: str, now_ms: int) -> None:
+            assert now_ms > 0
+            self.failed.append((ids, error))
+
+    async def run():
+        first = _event(source="alpaca", external_id="scheduled-1", headline="Company raises guidance", symbols=["NVDA"])
+        second = _event(
+            source="coindesk", external_id="scheduled-2", headline="ETH protocol upgrade ships", symbols=["ETH"]
+        )
+        repo = Repo(
+            [
+                {"delivery_id": "delivery-1", "mode": "digest", "payload": {"event": first.model_dump(mode="json")}},
+                {"delivery_id": "delivery-2", "mode": "digest", "payload": {"event": second.model_dump(mode="json")}},
+            ]
+        )
+        sink = _FakeSink()
+        publisher = DiscordNewsPublisher(
+            settings=Settings(newswire_news_channel_id="999", newswire_send_min_interval_ms=0),
+            bus=InProcessNewswireBus(),
+            alert_sink=sink,
+            repository=repo,
+        )
+
+        await publisher._dispatch_due_deliveries()
+        return sink.sent, repo.posted, repo.failed
+
+    sent, posted, failed = anyio.run(run)
+    assert len(sent) == 2
+    assert [item[2][0]["title"] for item in sent] == ["Company raises guidance", "ETH protocol upgrade ships"]
+    assert all(item[3] for item in sent)
+    assert posted == [(["delivery-1"], "msg-1"), (["delivery-2"], "msg-2")]
+    assert failed == []
 
 
 def test_discord_publisher_skips_startup_backlog():
@@ -451,7 +542,12 @@ def test_discord_feedback_component_records_human_eval():
 
     async def run():
         repo = Repo()
-        publisher = DiscordNewsPublisher(settings=Settings(newswire_news_channel_id="999"), bus=InProcessNewswireBus(), alert_sink=_FakeSink(), repository=repo)
+        publisher = DiscordNewsPublisher(
+            settings=Settings(newswire_news_channel_id="999"),
+            bus=InProcessNewswireBus(),
+            alert_sink=_FakeSink(),
+            repository=repo,
+        )
         response = await publisher.handle_feedback_component("nwfb:nw_1:quality:noise", "user-1", "msg-1")
         return response, repo.evals
 
@@ -468,7 +564,9 @@ def test_discord_feedback_component_records_human_eval():
 
 
 def test_newswire_gateway_lists_filters_and_404s():
-    settings = Settings(environment="test", newswire_enabled=False, position_tracking_enabled=False, autonomy_enabled=False)
+    settings = Settings(
+        environment="test", newswire_enabled=False, position_tracking_enabled=False, autonomy_enabled=False
+    )
     app = create_app(settings)
     with TestClient(app) as client:
         service: NewswireService = app.state.newswire_service
@@ -602,7 +700,15 @@ def test_repository_newswire_policy_loop_records():
             "created_at_ms": 1_000,
         }
         await repo.record_newswire_decision(decision)
-        await repo.record_newswire_eval({"event_id": "nw_1", "decision_id": "nwd_1", "label_type": "quality", "label_value": True, "created_at_ms": 2_000})
+        await repo.record_newswire_eval(
+            {
+                "event_id": "nw_1",
+                "decision_id": "nwd_1",
+                "label_type": "quality",
+                "label_value": True,
+                "created_at_ms": 2_000,
+            }
+        )
         reward = build_reward(decision, await repo.list_newswire_evals(decision_id="nwd_1"))
         await repo.record_newswire_reward(reward.model_dump(mode="json"))
         await repo.upsert_newswire_policy_version(

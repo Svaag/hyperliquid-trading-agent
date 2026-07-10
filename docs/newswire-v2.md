@@ -56,7 +56,7 @@ NEWSWIRE_MODEL_CLASSIFY_QUEUE_SIZE=32
 
 ## Discord delivery
 
-Each story revision receives a deterministic outbox identity per destination/channel. Breaking/high stories post immediately subject to `NEWSWIRE_DISCORD_MAX_IMMEDIATE_PER_HOUR`; standard stories are digested. Failed sends remain durable and retry with bounded exponential backoff. Publisher status distinguishes a running worker from a ready Discord gateway and reports pending/failed outbox counts.
+Each story revision receives a deterministic outbox identity per destination/channel. Breaking/high stories post immediately subject to `NEWSWIRE_DISCORD_MAX_IMMEDIATE_PER_HOUR`; standard stories are released on the periodic schedule. Every qualifying story is sent as its own rich embed with story-specific feedback controls—scheduled stories are never concatenated into a visible digest. Failed sends remain durable and retry with bounded exponential backoff. Publisher status distinguishes a running worker from a ready Discord gateway and reports pending/failed outbox counts.
 
 ## Engine risk and alpha
 
