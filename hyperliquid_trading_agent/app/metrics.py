@@ -54,6 +54,26 @@ NEWSWIRE_ADAPTER_RECONNECTS = Counter("hyperliquid_trading_agent_newswire_adapte
 NEWSWIRE_DISCORD_POSTS = Counter("hyperliquid_trading_agent_newswire_discord_posts_total", "Newswire Discord posts", ["mode", "result"])
 NEWSWIRE_DISCORD_SKIPS = Counter("hyperliquid_trading_agent_newswire_discord_skips_total", "Newswire Discord skipped posts", ["reason"])
 NEWSWIRE_ENRICH_CALLS = Counter("hyperliquid_trading_agent_newswire_enrich_calls_total", "Newswire LLM enrichment calls", ["result"])
+NEWSWIRE_ASSESSMENTS = Counter(
+    "hyperliquid_trading_agent_newswire_assessments_total",
+    "Canonical Newswire story assessments",
+    ["feed_action", "engine_action", "watch_priority"],
+)
+NEWSWIRE_STORY_REVISIONS = Counter(
+    "hyperliquid_trading_agent_newswire_story_revisions_total",
+    "Canonical Newswire story revisions",
+    ["update_type"],
+)
+NEWSWIRE_MODEL_REVIEWS = Counter(
+    "hyperliquid_trading_agent_newswire_model_reviews_total",
+    "Selective Newswire model reviews",
+    ["result"],
+)
+ENGINE_NEWS_RISK_TRANSITIONS = Counter(
+    "hyperliquid_trading_agent_engine_news_risk_transitions_total",
+    "Engine Newswire risk-state transitions",
+    ["from_mode", "to_mode"],
+)
 ENGINE_NEWS_EVENTS = Counter("hyperliquid_trading_agent_engine_news_events_total", "Newswire events processed by the engine news bridge", ["result"])
 ENGINE_VALIDATION_DIGESTS = Counter("hyperliquid_trading_agent_engine_validation_digests_total", "Engine validation Discord digests", ["result"])
 ENGINE_VALIDATION_ALERTS = Counter("hyperliquid_trading_agent_engine_validation_alerts_total", "Engine validation alert conditions", ["alert_type"])

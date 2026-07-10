@@ -76,11 +76,16 @@ from hyperliquid_trading_agent.app.db.models import (
     NarrativeClusterRecord,
     NewsItem,
     NewswireDecisionRow,
+    NewswireDeliveryRow,
     NewswireEvalRow,
     NewswireEventRow,
     NewswirePolicyVersionRow,
     NewswirePublishLedgerRow,
     NewswireRewardRow,
+    NewswireRiskStateRecord,
+    NewswireRiskTransitionRecord,
+    NewswireStoryRevisionRow,
+    NewswireStoryRow,
     NormalizedEventRecord,
     OperatorFeedbackRecord,
     OperatorOutputLessonRecord,
@@ -1100,6 +1105,28 @@ class Repository:
         if feature_name:
             filters.append(FeatureValueRecord.feature_name == feature_name)
         return await self._list_engine_records(FeatureValueRecord, order_by=FeatureValueRecord.computed_ts_ms, limit=limit, filters=filters)
+
+    async def list_latest_feature_assets(self, *, feature_name: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Return the latest scalar per asset, ranked by value.
+
+        This intentionally performs the small de-duplication in Python so it remains
+        portable across the Postgres production store and SQLite unit-test store.
+        """
+        if self.sessionmaker is None:
+            return []
+        scan_limit = max(100, int(limit) * 20)
+        async with self.sessionmaker() as session:
+            result = await session.execute(
+                select(FeatureValueRecord)
+                .where(FeatureValueRecord.feature_name == str(feature_name), FeatureValueRecord.scalar_value.is_not(None))
+                .order_by(FeatureValueRecord.computed_ts_ms.desc())
+                .limit(scan_limit)
+            )
+            latest: dict[str, FeatureValueRecord] = {}
+            for item in result.scalars().all():
+                latest.setdefault(item.asset, item)
+            ranked = sorted(latest.values(), key=lambda item: float(item.scalar_value or 0.0), reverse=True)[: max(1, int(limit))]
+            return [_engine_record_to_dict(item) for item in ranked]
 
     async def record_feature_rollup(self, rollup: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -2680,6 +2707,113 @@ class Repository:
             item = await session.get(NewswireEventRow, str(event_id))
             return _newswire_event_to_dict(item) if item is not None else None
 
+    async def upsert_newswire_story(self, story: dict[str, Any]) -> str | None:
+        story_id = str(story["story_id"])
+        fields = _newswire_story_kwargs(story)
+        try:
+            return await self._upsert_record_by_pk(
+                NewswireStoryRow,
+                story_id,
+                {"story_id": story_id, **fields},
+                lambda item: _apply_row_fields(item, fields),
+                "story_id",
+            )
+        except Exception as exc:  # pragma: no cover
+            log.warning("newswire_story_upsert_failed", story_id=story_id, error=type(exc).__name__)
+            return None
+
+    async def get_newswire_story(self, story_id: str) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(NewswireStoryRow, str(story_id))
+            return _newswire_story_to_dict(item) if item is not None else None
+
+    async def list_newswire_stories(
+        self,
+        *,
+        status: str | None = None,
+        symbol: str | None = None,
+        feed_action: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(NewswireStoryRow).order_by(NewswireStoryRow.last_updated_at_ms.desc()).limit(max(1, limit))
+            if status:
+                stmt = stmt.where(NewswireStoryRow.status == str(status))
+            result = await session.execute(stmt)
+            rows = [_newswire_story_to_dict(item) for item in result.scalars().all()]
+            if symbol:
+                wanted = symbol.upper()
+                rows = [row for row in rows if wanted in {str(item).upper() for item in row.get("symbols") or []}]
+            if feed_action:
+                rows = [row for row in rows if str((row.get("assessment") or {}).get("feed_action") or "") == feed_action]
+            return rows[:limit]
+
+    async def record_newswire_story_revision(self, revision: dict[str, Any]) -> str | None:
+        revision_id = str(revision["revision_id"])
+        fields = {
+            "story_id": str(revision.get("story_id") or ""),
+            "revision": int(revision.get("revision") or 1),
+            "update_type": str(revision.get("update_type") or "updated"),
+            "emitted_at_ms": int(revision.get("emitted_at_ms") or _runtime_now_ms()),
+            "story_json": redact_secrets(dict(revision.get("story") or {})),
+        }
+        try:
+            return await self._upsert_record_by_pk(
+                NewswireStoryRevisionRow,
+                revision_id,
+                {"revision_id": revision_id, **fields},
+                lambda item: _apply_row_fields(item, fields),
+                "revision_id",
+            )
+        except Exception as exc:  # pragma: no cover
+            log.warning("newswire_story_revision_record_failed", revision_id=revision_id, error=type(exc).__name__)
+            return None
+
+    async def list_newswire_story_revisions(
+        self,
+        *,
+        story_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(NewswireStoryRevisionRow).order_by(NewswireStoryRevisionRow.emitted_at_ms.desc(), NewswireStoryRevisionRow.revision_id.desc()).limit(max(1, limit))
+            if story_id:
+                stmt = stmt.where(NewswireStoryRevisionRow.story_id == str(story_id))
+            result = await session.execute(stmt)
+            return [_newswire_story_revision_to_dict(item) for item in result.scalars().all()]
+
+    async def list_newswire_story_revisions_after(
+        self,
+        *,
+        last_event_ts_ms: int = 0,
+        last_event_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(NewswireStoryRevisionRow).order_by(NewswireStoryRevisionRow.emitted_at_ms.asc(), NewswireStoryRevisionRow.revision_id.asc()).limit(max(1, limit))
+            if last_event_id:
+                stmt = stmt.where(
+                    or_(
+                        NewswireStoryRevisionRow.emitted_at_ms > int(last_event_ts_ms),
+                        and_(
+                            NewswireStoryRevisionRow.emitted_at_ms == int(last_event_ts_ms),
+                            NewswireStoryRevisionRow.revision_id > str(last_event_id),
+                        ),
+                    )
+                )
+            else:
+                stmt = stmt.where(NewswireStoryRevisionRow.emitted_at_ms > int(last_event_ts_ms))
+            result = await session.execute(stmt)
+            return [_newswire_story_revision_to_dict(item) for item in result.scalars().all()]
+
     async def claim_newswire_publish(
         self,
         event_id: str,
@@ -2814,6 +2948,256 @@ class Repository:
         except Exception as exc:  # pragma: no cover
             log.warning("newswire_publish_status_failed", error=type(exc).__name__)
             return {"enabled": True, "error": type(exc).__name__, "counts": {}}
+
+    async def schedule_newswire_delivery(
+        self,
+        *,
+        story_id: str,
+        story_revision: int,
+        channel_id: str,
+        mode: str,
+        scheduled_at_ms: int,
+        payload: dict[str, Any],
+        destination: str = "discord",
+        status: str = "pending",
+        skip_reason: str | None = None,
+    ) -> str | None:
+        if self.sessionmaker is None:
+            return None
+        delivery_id = _newswire_delivery_id(destination, channel_id, story_id, story_revision)
+        now = _runtime_now_ms()
+        try:
+            async with self.sessionmaker() as session:
+                item = await session.get(NewswireDeliveryRow, delivery_id)
+                if item is None:
+                    item = NewswireDeliveryRow(
+                        delivery_id=delivery_id,
+                        destination=destination,
+                        channel_id=str(channel_id),
+                        story_id=str(story_id),
+                        story_revision=int(story_revision),
+                        mode=str(mode),
+                        status=str(status),
+                        scheduled_at_ms=int(scheduled_at_ms),
+                        next_attempt_at_ms=int(scheduled_at_ms),
+                        attempt_count=0,
+                        payload_json=redact_secrets(payload),
+                        skip_reason=skip_reason,
+                        updated_at_ms=now,
+                    )
+                    session.add(item)
+                elif item.status == "pending":
+                    item.mode = str(mode)
+                    item.scheduled_at_ms = int(scheduled_at_ms)
+                    item.next_attempt_at_ms = min(int(item.next_attempt_at_ms or scheduled_at_ms), int(scheduled_at_ms))
+                    item.payload_json = redact_secrets(payload)
+                    item.status = str(status)
+                    item.skip_reason = skip_reason
+                    item.updated_at_ms = now
+                await session.commit()
+                return delivery_id
+        except IntegrityError:
+            return delivery_id
+        except Exception as exc:  # pragma: no cover
+            log.warning("newswire_delivery_schedule_failed", story_id=story_id, error=type(exc).__name__)
+            return None
+
+    async def list_due_newswire_deliveries(
+        self,
+        *,
+        channel_id: str,
+        now_ms: int,
+        mode: str | None = None,
+        destination: str = "discord",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = (
+                select(NewswireDeliveryRow)
+                .where(
+                    NewswireDeliveryRow.destination == destination,
+                    NewswireDeliveryRow.channel_id == str(channel_id),
+                    NewswireDeliveryRow.status.in_(["pending", "failed"]),
+                    NewswireDeliveryRow.next_attempt_at_ms <= int(now_ms),
+                )
+                .order_by(NewswireDeliveryRow.scheduled_at_ms.asc(), NewswireDeliveryRow.delivery_id.asc())
+                .limit(max(1, limit))
+            )
+            if mode:
+                stmt = stmt.where(NewswireDeliveryRow.mode == str(mode))
+            result = await session.execute(stmt)
+            return [_newswire_delivery_to_dict(item) for item in result.scalars().all()]
+
+    async def claim_due_newswire_deliveries(
+        self,
+        *,
+        channel_id: str,
+        now_ms: int,
+        mode: str | None = None,
+        destination: str = "discord",
+        limit: int = 100,
+        stale_after_ms: int = 10 * 60 * 1000,
+    ) -> list[dict[str, Any]]:
+        """Lease due outbox rows so overlapping publishers cannot double-send them."""
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            await session.execute(
+                update(NewswireDeliveryRow)
+                .where(
+                    NewswireDeliveryRow.destination == destination,
+                    NewswireDeliveryRow.channel_id == str(channel_id),
+                    NewswireDeliveryRow.status == "sending",
+                    NewswireDeliveryRow.updated_at_ms <= int(now_ms) - max(1, int(stale_after_ms)),
+                )
+                .values(status="failed", next_attempt_at_ms=int(now_ms), last_error="stale_delivery_lease")
+            )
+            stmt = (
+                select(NewswireDeliveryRow)
+                .where(
+                    NewswireDeliveryRow.destination == destination,
+                    NewswireDeliveryRow.channel_id == str(channel_id),
+                    NewswireDeliveryRow.status.in_(["pending", "failed"]),
+                    NewswireDeliveryRow.next_attempt_at_ms <= int(now_ms),
+                )
+                .order_by(NewswireDeliveryRow.scheduled_at_ms.asc(), NewswireDeliveryRow.delivery_id.asc())
+                .limit(max(1, limit))
+                .with_for_update(skip_locked=True)
+            )
+            if mode:
+                stmt = stmt.where(NewswireDeliveryRow.mode == str(mode))
+            result = await session.execute(stmt)
+            rows = list(result.scalars().all())
+            for item in rows:
+                item.status = "sending"
+                item.updated_at_ms = int(now_ms)
+                item.last_error = None
+            await session.commit()
+            return [_newswire_delivery_to_dict(item) for item in rows]
+
+    async def mark_newswire_deliveries_posted(self, delivery_ids: list[str], *, message_id: str | None, now_ms: int) -> None:
+        if self.sessionmaker is None or not delivery_ids:
+            return
+        async with self.sessionmaker() as session:
+            await session.execute(
+                update(NewswireDeliveryRow)
+                .where(NewswireDeliveryRow.delivery_id.in_(delivery_ids))
+                .values(
+                    status="posted",
+                    discord_message_id=message_id,
+                    posted_at_ms=int(now_ms),
+                    updated_at_ms=int(now_ms),
+                    last_error=None,
+                )
+            )
+            await session.commit()
+
+    async def mark_newswire_deliveries_failed(self, delivery_ids: list[str], *, error: str, now_ms: int) -> None:
+        if self.sessionmaker is None or not delivery_ids:
+            return
+        async with self.sessionmaker() as session:
+            result = await session.execute(select(NewswireDeliveryRow).where(NewswireDeliveryRow.delivery_id.in_(delivery_ids)))
+            for item in result.scalars().all():
+                item.status = "failed"
+                item.attempt_count = int(item.attempt_count or 0) + 1
+                item.last_error = str(error)[:1000]
+                item.updated_at_ms = int(now_ms)
+                item.next_attempt_at_ms = int(now_ms) + min(300_000, 1000 * (2 ** min(item.attempt_count, 8)))
+            await session.commit()
+
+    async def newswire_delivery_status(self, channel_id: str, *, destination: str = "discord") -> dict[str, Any]:
+        if self.sessionmaker is None:
+            return {"enabled": False, "counts": {}}
+        async with self.sessionmaker() as session:
+            result = await session.execute(
+                select(NewswireDeliveryRow.status, func.count())
+                .where(NewswireDeliveryRow.destination == destination, NewswireDeliveryRow.channel_id == str(channel_id))
+                .group_by(NewswireDeliveryRow.status)
+            )
+            counts = {str(status): int(count) for status, count in result.all()}
+            oldest = await session.execute(
+                select(NewswireDeliveryRow)
+                .where(
+                    NewswireDeliveryRow.destination == destination,
+                    NewswireDeliveryRow.channel_id == str(channel_id),
+                    NewswireDeliveryRow.status.in_(["pending", "failed", "sending"]),
+                )
+                .order_by(NewswireDeliveryRow.scheduled_at_ms.asc())
+                .limit(1)
+            )
+            pending = oldest.scalars().first()
+            return {
+                "enabled": True,
+                "counts": counts,
+                "oldest_pending_at_ms": pending.scheduled_at_ms if pending is not None else None,
+                "oldest_pending_error": pending.last_error if pending is not None else None,
+            }
+
+    async def was_newswire_story_delivered(
+        self,
+        story_id: str,
+        channel_id: str,
+        *,
+        destination: str = "discord",
+    ) -> bool:
+        if self.sessionmaker is None:
+            return False
+        async with self.sessionmaker() as session:
+            result = await session.execute(
+                select(func.count())
+                .select_from(NewswireDeliveryRow)
+                .where(
+                    NewswireDeliveryRow.destination == destination,
+                    NewswireDeliveryRow.channel_id == str(channel_id),
+                    NewswireDeliveryRow.story_id == str(story_id),
+                    NewswireDeliveryRow.status == "posted",
+                )
+            )
+            return int(result.scalar_one() or 0) > 0
+
+    async def upsert_newswire_risk_state(self, state: dict[str, Any]) -> str | None:
+        scope = str(state["scope"]).upper()
+        fields = _newswire_risk_state_kwargs(state)
+        return await self._upsert_record_by_pk(
+            NewswireRiskStateRecord,
+            scope,
+            {"scope": scope, **fields},
+            lambda item: _apply_row_fields(item, fields),
+            "scope",
+        )
+
+    async def list_newswire_risk_states(self, *, scope: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(NewswireRiskStateRecord).order_by(NewswireRiskStateRecord.updated_at_ms.desc()).limit(max(1, limit))
+            if scope:
+                stmt = stmt.where(NewswireRiskStateRecord.scope == str(scope).upper())
+            result = await session.execute(stmt)
+            return [_newswire_risk_state_to_dict(item) for item in result.scalars().all()]
+
+    async def record_newswire_risk_transition(self, transition: dict[str, Any]) -> str | None:
+        transition_id = str(transition["transition_id"])
+        fields = _newswire_risk_transition_kwargs(transition)
+        return await self._upsert_record_by_pk(
+            NewswireRiskTransitionRecord,
+            transition_id,
+            {"transition_id": transition_id, **fields},
+            lambda item: _apply_row_fields(item, fields),
+            "transition_id",
+        )
+
+    async def list_newswire_risk_transitions(self, *, scope: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(NewswireRiskTransitionRecord).order_by(NewswireRiskTransitionRecord.created_at_ms.desc()).limit(max(1, limit))
+            if scope:
+                stmt = stmt.where(NewswireRiskTransitionRecord.scope == str(scope).upper())
+            result = await session.execute(stmt)
+            return [_newswire_risk_transition_to_dict(item) for item in result.scalars().all()]
 
     async def record_newswire_decision(self, decision: dict[str, Any]) -> str | None:
         decision_id = str(decision["decision_id"])
@@ -4899,6 +5283,11 @@ def _newswire_publish_id(destination: str, channel_id: str, event_id: str) -> st
     return "nwpub_" + hashlib.sha1(key.encode()).hexdigest()[:32]
 
 
+def _newswire_delivery_id(destination: str, channel_id: str, story_id: str, story_revision: int) -> str:
+    key = f"{destination}:{channel_id}:{story_id}:{story_revision}"
+    return "nwdlv_" + hashlib.sha1(key.encode()).hexdigest()[:32]
+
+
 def _newswire_kwargs(event: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": int(event.get("schema_version") or 1),
@@ -4925,6 +5314,73 @@ def _newswire_kwargs(event: dict[str, Any]) -> dict[str, Any]:
         "tradability_json": dict(event.get("tradability") or {}),
         "enrichment_json": event.get("enrichment"),
         "metadata_json": redact_secrets(dict(event.get("metadata") or {})),
+        "story_id": event.get("story_id"),
+        "story_revision": event.get("story_revision"),
+        "topics_json": [str(item) for item in event.get("topics") or []],
+        "assessment_json": redact_secrets(event.get("assessment")) if event.get("assessment") is not None else None,
+    }
+
+
+def _newswire_story_kwargs(story: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": int(story.get("schema_version") or 2),
+        "revision": int(story.get("revision") or 1),
+        "canonical_event_id": str(story.get("canonical_event_id") or ""),
+        "headline": str(story.get("headline") or ""),
+        "body": str(story.get("body") or ""),
+        "url": story.get("url"),
+        "source": str(story.get("source") or "unknown"),
+        "provider": str(story.get("provider") or "unknown"),
+        "sources_json": [str(item) for item in story.get("sources") or []],
+        "providers_json": [str(item) for item in story.get("providers") or []],
+        "member_event_ids_json": [str(item) for item in story.get("member_event_ids") or []],
+        "symbols_json": [str(item).upper() for item in story.get("symbols") or []],
+        "topics_json": [str(item).lower() for item in story.get("topics") or []],
+        "asset_class": str(story.get("asset_class") or "unknown"),
+        "event_type": str(story.get("event_type") or "headline"),
+        "urgency": str(story.get("urgency") or "normal"),
+        "sentiment": str(story.get("sentiment") or "unknown"),
+        "source_score": float(story.get("source_score") or 0),
+        "confidence": float(story.get("confidence") or 0),
+        "published_at_ms": story.get("published_at_ms"),
+        "first_seen_at_ms": int(story.get("first_seen_at_ms") or 0),
+        "last_updated_at_ms": int(story.get("last_updated_at_ms") or 0),
+        "source_count": int(story.get("source_count") or 1),
+        "independent_source_count": int(story.get("independent_source_count") or 1),
+        "status": str(story.get("status") or "active"),
+        "assessment_json": redact_secrets(story.get("assessment")) if story.get("assessment") is not None else None,
+        "metadata_json": redact_secrets(dict(story.get("metadata") or {})),
+    }
+
+
+def _newswire_risk_state_kwargs(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "mode": str(state.get("mode") or "neutral"),
+        "signed_pressure": float(state.get("signed_pressure") or 0),
+        "risk_pressure": float(state.get("risk_pressure") or 0),
+        "confidence": float(state.get("confidence") or 0),
+        "evidence_story_ids_json": [str(item) for item in state.get("evidence_story_ids") or []],
+        "entered_at_ms": int(state.get("entered_at_ms") or 0),
+        "updated_at_ms": int(state.get("updated_at_ms") or 0),
+        "expires_at_ms": int(state.get("expires_at_ms") or 0),
+        "assessment_version": str(state.get("assessment_version") or "newswire_assessment_v2"),
+        "transition_reason": str(state.get("transition_reason") or "updated"),
+        "metadata_json": redact_secrets(dict(state.get("metadata") or {})),
+    }
+
+
+def _newswire_risk_transition_kwargs(transition: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "scope": str(transition.get("scope") or "GLOBAL").upper(),
+        "from_mode": str(transition.get("from_mode") or "neutral"),
+        "to_mode": str(transition.get("to_mode") or "neutral"),
+        "signed_pressure": float(transition.get("signed_pressure") or 0),
+        "risk_pressure": float(transition.get("risk_pressure") or 0),
+        "confidence": float(transition.get("confidence") or 0),
+        "evidence_story_ids_json": [str(item) for item in transition.get("evidence_story_ids") or []],
+        "reason": str(transition.get("reason") or "updated"),
+        "created_at_ms": int(transition.get("created_at_ms") or _runtime_now_ms()),
+        "metadata_json": redact_secrets(dict(transition.get("metadata") or {})),
     }
 
 
@@ -5136,6 +5592,108 @@ def _newswire_event_to_dict(item: NewswireEventRow) -> dict[str, Any]:
         "tradability": item.tradability_json,
         "enrichment": item.enrichment_json,
         "metadata": item.metadata_json,
+        "story_id": item.story_id,
+        "story_revision": item.story_revision,
+        "topics": item.topics_json or [],
+        "assessment": item.assessment_json,
+    }
+
+
+def _newswire_story_to_dict(item: NewswireStoryRow) -> dict[str, Any]:
+    return {
+        "story_id": item.story_id,
+        "schema_version": item.schema_version,
+        "revision": item.revision,
+        "canonical_event_id": item.canonical_event_id,
+        "headline": item.headline,
+        "body": item.body,
+        "url": item.url,
+        "source": item.source,
+        "provider": item.provider,
+        "sources": item.sources_json or [],
+        "providers": item.providers_json or [],
+        "member_event_ids": item.member_event_ids_json or [],
+        "symbols": item.symbols_json or [],
+        "topics": item.topics_json or [],
+        "asset_class": item.asset_class,
+        "event_type": item.event_type,
+        "urgency": item.urgency,
+        "sentiment": item.sentiment,
+        "source_score": item.source_score,
+        "confidence": item.confidence,
+        "published_at_ms": item.published_at_ms,
+        "first_seen_at_ms": item.first_seen_at_ms,
+        "last_updated_at_ms": item.last_updated_at_ms,
+        "source_count": item.source_count,
+        "independent_source_count": item.independent_source_count,
+        "status": item.status,
+        "assessment": item.assessment_json,
+        "metadata": item.metadata_json or {},
+    }
+
+
+def _newswire_story_revision_to_dict(item: NewswireStoryRevisionRow) -> dict[str, Any]:
+    return {
+        "revision_id": item.revision_id,
+        "story_id": item.story_id,
+        "revision": item.revision,
+        "update_type": item.update_type,
+        "emitted_at_ms": item.emitted_at_ms,
+        "story": item.story_json or {},
+    }
+
+
+def _newswire_delivery_to_dict(item: NewswireDeliveryRow) -> dict[str, Any]:
+    return {
+        "delivery_id": item.delivery_id,
+        "destination": item.destination,
+        "channel_id": item.channel_id,
+        "story_id": item.story_id,
+        "story_revision": item.story_revision,
+        "mode": item.mode,
+        "status": item.status,
+        "scheduled_at_ms": item.scheduled_at_ms,
+        "next_attempt_at_ms": item.next_attempt_at_ms,
+        "attempt_count": item.attempt_count,
+        "payload": item.payload_json or {},
+        "discord_message_id": item.discord_message_id,
+        "posted_at_ms": item.posted_at_ms,
+        "last_error": item.last_error,
+        "skip_reason": item.skip_reason,
+        "updated_at_ms": item.updated_at_ms,
+    }
+
+
+def _newswire_risk_state_to_dict(item: NewswireRiskStateRecord) -> dict[str, Any]:
+    return {
+        "scope": item.scope,
+        "mode": item.mode,
+        "signed_pressure": item.signed_pressure,
+        "risk_pressure": item.risk_pressure,
+        "confidence": item.confidence,
+        "evidence_story_ids": item.evidence_story_ids_json or [],
+        "entered_at_ms": item.entered_at_ms,
+        "updated_at_ms": item.updated_at_ms,
+        "expires_at_ms": item.expires_at_ms,
+        "assessment_version": item.assessment_version,
+        "transition_reason": item.transition_reason,
+        "metadata": item.metadata_json or {},
+    }
+
+
+def _newswire_risk_transition_to_dict(item: NewswireRiskTransitionRecord) -> dict[str, Any]:
+    return {
+        "transition_id": item.transition_id,
+        "scope": item.scope,
+        "from_mode": item.from_mode,
+        "to_mode": item.to_mode,
+        "signed_pressure": item.signed_pressure,
+        "risk_pressure": item.risk_pressure,
+        "confidence": item.confidence,
+        "evidence_story_ids": item.evidence_story_ids_json or [],
+        "reason": item.reason,
+        "created_at_ms": item.created_at_ms,
+        "metadata": item.metadata_json or {},
     }
 
 

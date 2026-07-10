@@ -8,20 +8,26 @@ from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.metrics import (
     NEWSWIRE_ADAPTER_RECONNECTS,
     NEWSWIRE_ADAPTER_UP,
+    NEWSWIRE_ASSESSMENTS,
     NEWSWIRE_BUS_DROPPED,
     NEWSWIRE_EVENTS,
+    NEWSWIRE_MODEL_REVIEWS,
+    NEWSWIRE_STORY_REVISIONS,
 )
 from hyperliquid_trading_agent.app.newswire.adapters.base import NewswireAdapter
 from hyperliquid_trading_agent.app.newswire.adapters.rss import RssAdapter
+from hyperliquid_trading_agent.app.newswire.assessment import (
+    ASSESSMENT_VERSION,
+    NewswireAssessor,
+    SelectiveAssessmentReviewer,
+    assessment_to_decision,
+)
 from hyperliquid_trading_agent.app.newswire.bus import InProcessNewswireBus, NewswireBus
 from hyperliquid_trading_agent.app.newswire.normalize import normalize, now_ms
-from hyperliquid_trading_agent.app.newswire.policy import (
-    BASELINE_POLICY_VERSION,
-    DeterministicNewswirePolicy,
-    decision_summary,
-)
 from hyperliquid_trading_agent.app.newswire.riskgate import HaltStateGate
-from hyperliquid_trading_agent.app.newswire.schemas import NewswireEvent, NewswireFilter, RawNewsItem
+from hyperliquid_trading_agent.app.newswire.schemas import NewswireEvent, NewswireFilter, NewswireStory, RawNewsItem
+from hyperliquid_trading_agent.app.newswire.stories import NewswireStoryClusterer
+from hyperliquid_trading_agent.app.newswire.watchlist import DynamicNewswireWatchSet, EntityMatch, resolve_entities
 
 log = get_logger(__name__)
 
@@ -30,7 +36,14 @@ class NewswireService:
     """Free-standing ingestion gateway: supervises adapters, normalizes + scores + gates
     deterministically, then publishes canonical events to the bus and persists them."""
 
-    def __init__(self, *, settings: Settings, repository: Any | None = None, bus: NewswireBus | None = None):
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        repository: Any | None = None,
+        bus: NewswireBus | None = None,
+        model_gateway: Any | None = None,
+    ):
         self.settings = settings
         self.repository = repository
         self.bus: NewswireBus = bus or InProcessNewswireBus()
@@ -38,6 +51,13 @@ class NewswireService:
         self.adapters: list[NewswireAdapter] = []
         self.running = False
         self._tasks: list[asyncio.Task] = []
+        self._adapter_tasks: list[asyncio.Task] = []
+        self._worker_tasks: list[asyncio.Task] = []
+        self._ingest_queue: asyncio.Queue[RawNewsItem] = asyncio.Queue(maxsize=max(1, settings.newswire_ingest_queue_size))
+        # Story revision assignment, model review, persistence, and fanout form one
+        # ordered transaction. Serializing that section prevents concurrent workers
+        # from publishing revision 2 before revision 1 or overwriting a newer story.
+        self._story_pipeline_lock = asyncio.Lock()
         self._by_id: dict[str, NewswireEvent] = {}
         self._symbols_universe = settings.newswire_symbols_universe
         self.last_event_at_ms: int | None = None
@@ -49,11 +69,20 @@ class NewswireService:
         self.dropped_events_by_reason: dict[str, int] = {}
         self.persisted_event_count = 0
         self.persisted_decision_count = 0
+        self.persisted_story_count = 0
+        self.persisted_story_revision_count = 0
         self.persistence_errors = 0
         self.last_persistence_error: dict[str, Any] | None = None
         self._policy_params: dict[str, Any] = {}
-        self._policy_version = settings.newswire_active_policy_version.strip() or BASELINE_POLICY_VERSION
+        self._policy_version = ASSESSMENT_VERSION
         self._policy_loaded_at_ms = 0
+        self.watch_set = DynamicNewswireWatchSet(settings, repository)
+        self.story_clusterer = NewswireStoryClusterer(max_stories=settings.newswire_story_max_buffer)
+        self.assessor = NewswireAssessor(settings)
+        self.model_reviewer = SelectiveAssessmentReviewer(settings, model_gateway)
+        self.story_revision_count = 0
+        self.model_review_count = 0
+        self._story_hydrated = False
 
     def build_adapters(self) -> list[NewswireAdapter]:
         adapters: list[NewswireAdapter] = []
@@ -85,24 +114,46 @@ class NewswireService:
         if not self.settings.newswire_enabled or self.running:
             return
         self.running = True
+        await self.watch_set.refresh_if_due(force=True)
+        await self._hydrate_stories()
+        worker_count = max(1, int(self.settings.newswire_ingest_worker_count))
+        for index in range(worker_count):
+            task = asyncio.create_task(self._ingest_worker(), name=f"newswire-ingest-{index}")
+            self._worker_tasks.append(task)
+            self._tasks.append(task)
         self.adapters = self.build_adapters()
         for adapter in self.adapters:
-            self._tasks.append(asyncio.create_task(self._supervise(adapter), name=f"newswire-{adapter.name}"))
+            task = asyncio.create_task(self._supervise(adapter), name=f"newswire-{adapter.name}")
+            self._adapter_tasks.append(task)
+            self._tasks.append(task)
         log.info("newswire_started", adapters=[a.name for a in self.adapters])
 
     async def stop(self) -> None:
-        self.running = False
         for adapter in self.adapters:
             try:
                 await adapter.stop()
             except Exception:  # pragma: no cover - adapter cleanup best-effort
                 pass
-        for task in self._tasks:
+        for task in self._adapter_tasks:
             task.cancel()
             try:
                 await task
             except asyncio.CancelledError:
                 pass
+        self._adapter_tasks = []
+        if not self._ingest_queue.empty():
+            try:
+                await asyncio.wait_for(self._ingest_queue.join(), timeout=10)
+            except TimeoutError:
+                pass
+        self.running = False
+        for task in self._worker_tasks:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._worker_tasks = []
         self._tasks = []
 
     async def _supervise(self, adapter: NewswireAdapter) -> None:
@@ -110,7 +161,7 @@ class NewswireService:
         while self.running:
             NEWSWIRE_ADAPTER_UP.labels(adapter=adapter.name).set(1)
             try:
-                await adapter.run(self._ingest)
+                await adapter.run(self._enqueue)
                 break  # clean return = stop requested
             except asyncio.CancelledError:
                 raise
@@ -131,7 +182,32 @@ class NewswireService:
                 backoff = 5
         NEWSWIRE_ADAPTER_UP.labels(adapter=adapter.name).set(0)
 
+    async def _enqueue(self, raw: RawNewsItem) -> None:
+        try:
+            self._ingest_queue.put_nowait(raw)
+        except asyncio.QueueFull:
+            self._record_drop("ingest_queue_full")
+            NEWSWIRE_BUS_DROPPED.labels(reason="ingest_queue_full").inc()
+
+    async def _ingest_worker(self) -> None:
+        while self.running or not self._ingest_queue.empty():
+            try:
+                raw = await self._ingest_queue.get()
+            except asyncio.CancelledError:
+                raise
+            try:
+                await self._ingest(raw)
+            except Exception as exc:  # pragma: no cover - per-item isolation
+                self._record_drop("classification_error")
+                log.warning("newswire_ingest_item_failed", error=type(exc).__name__)
+            finally:
+                self._ingest_queue.task_done()
+
     async def _ingest(self, raw: RawNewsItem) -> NewswireEvent | None:
+        async with self._story_pipeline_lock:
+            return await self._ingest_serial(raw)
+
+    async def _ingest_serial(self, raw: RawNewsItem) -> NewswireEvent | None:
         event = normalize(raw, symbols_universe=self._symbols_universe, received_at_ms=now_ms())
         if event is None:
             return None
@@ -140,22 +216,189 @@ class NewswireService:
             NEWSWIRE_BUS_DROPPED.labels(reason="duplicate").inc()
             return None
         event = self.halt_gate.apply(event)
-        if self.settings.newswire_policy_enabled:
-            policy_version, policy_params = await self._policy_context()
-            decision = DeterministicNewswirePolicy(
-                self.settings,
-                policy_version=policy_version,
-                params=policy_params,
-            ).score(event)
-            event.metadata = {**event.metadata, "newswire_policy_decision": decision_summary(decision)}
+        snapshot = await self.watch_set.refresh_if_due()
+        entity = resolve_entities(event, snapshot)
+        event = event.model_copy(update={"symbols": entity.symbols, "topics": entity.topics})
+        story, update_type = self.story_clusterer.upsert(event)
+        if update_type == "duplicate" and story.assessment is not None:
+            projection = story.to_event(update_type="duplicate")
+            event = event.model_copy(
+                update={
+                    "schema_version": 2,
+                    "story_id": story.story_id,
+                    "story_revision": story.revision,
+                    "topics": list(story.topics),
+                    "assessment": story.assessment,
+                    "importance_score": story.assessment.priority_score,
+                    "metadata": {
+                        **event.metadata,
+                        **projection.metadata,
+                        "legacy_importance_score": event.importance_score,
+                    },
+                }
+            )
+            self._index(event)
+            self._record_drop("story_duplicate")
+            NEWSWIRE_BUS_DROPPED.labels(reason="story_duplicate").inc()
+            NEWSWIRE_EVENTS.labels(provider=event.provider).inc()
             if self.repository is not None and getattr(self.repository, "enabled", False):
-                await self._persist_decision(decision.model_dump(mode="json"))
+                await self._persist_event(event)
+            return event
+        story_entity = EntityMatch(
+            symbols=list(story.symbols),
+            reasons={**entity.reasons, **{symbol: entity.reasons.get(symbol, ["story_member_symbol"]) for symbol in story.symbols}},
+            topics=list(story.topics),
+            watch_priority=snapshot.priority_for(story.symbols),
+        )
+        assessment_event = story.to_event(update_type=update_type)
+        assessment = self.assessor.assess(assessment_event, story, story_entity)
+        if assessment.model_review_state == "pending":
+            review, review_state = await self.model_reviewer.review(assessment_event, assessment)
+            assessment = self.assessor.apply_model_review(
+                assessment_event,
+                story,
+                story_entity,
+                assessment,
+                review,
+                state=review_state,  # type: ignore[arg-type]
+            )
+            if assessment.model_review_state == "applied":
+                self.model_review_count += 1
+            NEWSWIRE_MODEL_REVIEWS.labels(result=assessment.model_review_state).inc()
+        story = story.model_copy(
+            update={
+                "assessment": assessment,
+                "metadata": {
+                    **story.metadata,
+                    "last_update_type": update_type,
+                    "newswire_routing_mode": self.settings.newswire_routing_mode,
+                    "legacy_importance_score": event.importance_score,
+                },
+            }
+        )
+        self.story_clusterer.replace(story)
+        NEWSWIRE_ASSESSMENTS.labels(
+            feed_action=assessment.feed_action,
+            engine_action=assessment.engine_action,
+            watch_priority=assessment.watch_priority,
+        ).inc()
+        NEWSWIRE_STORY_REVISIONS.labels(update_type=update_type).inc()
+        event = event.model_copy(
+            update={
+                "schema_version": 2,
+                "story_id": story.story_id,
+                "story_revision": story.revision,
+                "topics": list(story.topics),
+                "assessment": assessment,
+                "importance_score": assessment.priority_score,
+                "sentiment": assessment.direction,
+                "metadata": {
+                    **event.metadata,
+                    "story_id": story.story_id,
+                    "story_revision": story.revision,
+                    "legacy_importance_score": event.importance_score,
+                    "newswire_assessment": assessment.model_dump(mode="json"),
+                },
+            }
+        )
+        decision = assessment_to_decision(event, story, assessment)
+        event.metadata["newswire_policy_decision"] = {
+            "decision_id": assessment.decision_id,
+            "policy_version": assessment.assessment_version,
+            "policy_type": "static",
+            "shadow_only": self.settings.newswire_routing_mode == "shadow",
+            "newswire_action": assessment.feed_action,
+            "engine_action": assessment.engine_action,
+            "quality_score": decision.quality_score,
+            "market_impact_score": assessment.impact_score,
+            "relevance_score": assessment.relevance_score,
+            "novelty_score": assessment.novelty_score,
+            "urgency_score": assessment.urgency_score,
+            "source_score": assessment.source_quality_score / 100.0,
+            "confidence": event.confidence,
+            "direction_score": decision.direction_score,
+            "direction_confidence": assessment.direction_confidence,
+            "risk_score": assessment.risk_severity,
+            "reasons": assessment.reason_codes,
+            "penalties": assessment.penalty_codes,
+        }
         self._index(event)
         NEWSWIRE_EVENTS.labels(provider=event.provider).inc()
         if self.repository is not None and getattr(self.repository, "enabled", False):
             await self._persist_event(event)
-        await self.bus.publish(event)
+            await self._persist_decision(decision.model_dump(mode="json"))
+            await self._persist_story(story.model_dump(mode="json"))
+            revision = self.story_clusterer.revision(story, update_type)
+            await self._persist_story_revision(revision.model_dump(mode="json"))
+        self.story_revision_count += 1
+        await self.bus.publish(story.to_event(update_type=update_type))
         return event
+
+    async def _hydrate_stories(self) -> None:
+        if self._story_hydrated:
+            return
+        self._story_hydrated = True
+        repository = self.repository
+        if repository is None or not getattr(repository, "enabled", False):
+            return
+        method = getattr(repository, "list_newswire_stories", None)
+        if not callable(method):
+            return
+        try:
+            from hyperliquid_trading_agent.app.newswire.schemas import NewswireStory
+
+            rows = await method(limit=self.settings.newswire_story_max_buffer)
+            self.story_clusterer.hydrate(NewswireStory.model_validate(row) for row in rows)
+        except Exception as exc:  # pragma: no cover
+            log.warning("newswire_story_hydration_failed", error=type(exc).__name__)
+
+    async def _persist_story(self, story: dict[str, Any]) -> None:
+        method = getattr(self.repository, "upsert_newswire_story", None)
+        if not callable(method):
+            return
+        try:
+            result = await method(story)
+        except Exception as exc:  # pragma: no cover
+            self._record_persistence_failure("story", story.get("story_id"), exc)
+            return
+        if result:
+            self.persisted_story_count += 1
+        else:
+            self._record_persistence_failure("story", story.get("story_id"), RuntimeError("record_returned_none"))
+
+    async def _persist_story_revision(self, revision: dict[str, Any]) -> None:
+        method = getattr(self.repository, "record_newswire_story_revision", None)
+        if not callable(method):
+            return
+        try:
+            result = await method(revision)
+        except Exception as exc:  # pragma: no cover
+            self._record_persistence_failure("story_revision", revision.get("revision_id"), exc)
+            return
+        if result:
+            self.persisted_story_revision_count += 1
+        else:
+            self._record_persistence_failure(
+                "story_revision",
+                revision.get("revision_id"),
+                RuntimeError("record_returned_none"),
+            )
+
+    def _record_persistence_failure(self, record_type: str, record_id: Any, exc: Exception) -> None:
+        self.persistence_errors += 1
+        self.last_persistence_error = {
+            "record_type": record_type,
+            "record_id": record_id,
+            "error": type(exc).__name__,
+            "detail": str(exc)[:500],
+            "at_ms": now_ms(),
+        }
+        log.warning(
+            "newswire_record_persist_failed",
+            record_type=record_type,
+            record_id=record_id,
+            error=type(exc).__name__,
+        )
 
     async def _persist_decision(self, decision: dict[str, Any]) -> None:
         repository = self.repository
@@ -173,7 +416,7 @@ class NewswireService:
 
     async def _policy_context(self) -> tuple[str, dict[str, Any]]:
         configured = self.settings.newswire_active_policy_version.strip()
-        fallback = configured or BASELINE_POLICY_VERSION
+        fallback = configured or ASSESSMENT_VERSION
         repository = self.repository
         if repository is None or not getattr(repository, "enabled", False) or not callable(getattr(repository, "list_newswire_policy_versions", None)):
             return fallback, {}
@@ -242,6 +485,12 @@ class NewswireService:
             events = [event for event in events if filter.matches(event)]
         return events[:limit]
 
+    def get_story(self, story_id: str) -> NewswireStory | None:
+        return self.story_clusterer.get(story_id)
+
+    def list_stories(self, *, limit: int = 100) -> list[NewswireStory]:
+        return self.story_clusterer.list(limit=limit)
+
     def status(self) -> dict[str, Any]:
         return {
             "enabled": self.settings.newswire_enabled,
@@ -256,11 +505,14 @@ class NewswireService:
             "repository_enabled": bool(self.repository is not None and getattr(self.repository, "enabled", False)),
             "persisted_event_count": self.persisted_event_count,
             "persisted_decision_count": self.persisted_decision_count,
+            "persisted_story_count": self.persisted_story_count,
+            "persisted_story_revision_count": self.persisted_story_revision_count,
             "persistence_errors": self.persistence_errors,
             "last_persistence_error": self.last_persistence_error,
             "policy": {
                 "enabled": self.settings.newswire_policy_enabled,
-                "shadow_only": self.settings.newswire_policy_shadow_only,
+                "shadow_only": self.settings.newswire_routing_mode == "shadow",
+                "routing_mode": self.settings.newswire_routing_mode,
                 "active_policy_version": self._policy_version,
                 "configured_policy_version": self.settings.newswire_active_policy_version.strip() or None,
                 "loaded_at_ms": self._policy_loaded_at_ms or None,
@@ -268,6 +520,13 @@ class NewswireService:
                 "ready": self._policy_params.get("ready"),
             },
             "buffered_events": len(self._by_id),
+            "ingest_queue_depth": self._ingest_queue.qsize(),
+            "ingest_worker_count": len(self._worker_tasks),
+            "story_revisions": self.story_revision_count,
+            "model_reviews_applied": self.model_review_count,
+            "stories": self.story_clusterer.status(),
+            "watch_set": self.watch_set.status(),
+            "model_reviewer": self.model_reviewer.status(),
             "last_event_at_ms": self.last_event_at_ms,
             "last_event_per_source": self.last_event_per_source,
             "halted_symbols": self.halt_gate.halted_symbols(),

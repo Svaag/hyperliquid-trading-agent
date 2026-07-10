@@ -154,14 +154,15 @@ def _policy_decision(event: NewswireEvent) -> dict[str, Any]:
 
 
 def _feedback_components(event: NewswireEvent) -> list[dict[str, str]]:
+    feedback_id = str(event.story_id or event.metadata.get("story_id") or event.event_id)
     return [
-        {"label": "Useful", "custom_id": f"nwfb:{event.event_id}:quality:useful", "style": "success"},
-        {"label": "Noise", "custom_id": f"nwfb:{event.event_id}:quality:noise", "style": "danger"},
-        {"label": "Duplicate", "custom_id": f"nwfb:{event.event_id}:duplicate:true", "style": "secondary"},
-        {"label": "Stale", "custom_id": f"nwfb:{event.event_id}:stale:true", "style": "secondary"},
-        {"label": "Wrong Symbol", "custom_id": f"nwfb:{event.event_id}:symbol:false", "style": "secondary"},
-        {"label": "Wrong Direction", "custom_id": f"nwfb:{event.event_id}:direction:false", "style": "secondary"},
-        {"label": "Risk Only", "custom_id": f"nwfb:{event.event_id}:engine_action:risk_only", "style": "primary"},
-        {"label": "Should Be High", "custom_id": f"nwfb:{event.event_id}:newswire_action:high", "style": "primary"},
-        {"label": "Should Drop", "custom_id": f"nwfb:{event.event_id}:newswire_action:drop", "style": "danger"},
+        {"label": "Useful", "custom_id": f"nwfb:{feedback_id}:quality:useful", "style": "success"},
+        {"label": "Noise", "custom_id": f"nwfb:{feedback_id}:quality:noise", "style": "danger"},
+        {"label": "Duplicate", "custom_id": f"nwfb:{feedback_id}:duplicate:true", "style": "secondary"},
+        {"label": "Stale", "custom_id": f"nwfb:{feedback_id}:stale:true", "style": "secondary"},
+        {"label": "Wrong Symbol", "custom_id": f"nwfb:{feedback_id}:symbol:false", "style": "secondary"},
+        {"label": "Wrong Direction", "custom_id": f"nwfb:{feedback_id}:direction:false", "style": "secondary"},
+        {"label": "Risk Only", "custom_id": f"nwfb:{feedback_id}:engine_action:risk_only", "style": "primary"},
+        {"label": "Should Be High", "custom_id": f"nwfb:{feedback_id}:newswire_action:high", "style": "primary"},
+        {"label": "Should Drop", "custom_id": f"nwfb:{feedback_id}:newswire_action:drop", "style": "danger"},
     ]

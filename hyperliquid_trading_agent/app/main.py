@@ -62,6 +62,7 @@ from hyperliquid_trading_agent.app.newswire.consumers.agent_feed import AgentNew
 from hyperliquid_trading_agent.app.newswire.consumers.discord_news import DiscordNewsPublisher
 from hyperliquid_trading_agent.app.newswire.enrich import Enricher
 from hyperliquid_trading_agent.app.newswire.gateway import register_newswire_routes
+from hyperliquid_trading_agent.app.newswire.schemas import NewswireStory
 from hyperliquid_trading_agent.app.newswire.service import NewswireService
 from hyperliquid_trading_agent.app.orchestration.routes import register_orchestration_routes
 from hyperliquid_trading_agent.app.orchestration.wave_supervisor import WaveSupervisor
@@ -1128,8 +1129,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/autonomy/news")
     async def autonomy_news(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        events = sorted(app.state.autonomy_service.news_events.values(), key=lambda item: item.observed_at_ms, reverse=True)
-        return {"items": [item.model_dump(mode="json") for item in events[:200]], "count": len(events)}
+        # Compatibility view backed by the authoritative clustered Newswire feed.
+        # The in-memory autonomy map remains a fallback for repository-less tests/dev.
+        try:
+            rows = await app.state.repository.list_newswire_stories(limit=200)
+            events = [
+                NewswireStory.model_validate(row).to_event(update_type="updated").to_news_event()
+                for row in rows
+            ]
+        except Exception:
+            events = sorted(
+                app.state.autonomy_service.news_events.values(),
+                key=lambda item: item.observed_at_ms,
+                reverse=True,
+            )[:200]
+        return {
+            "items": [item.model_dump(mode="json") for item in events],
+            "count": len(events),
+            "view": "newswire_story_compatibility",
+        }
 
     @app.get("/autonomy/evaluations/signals")
     async def autonomy_signal_evaluations(status: str | None = None, symbol: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:

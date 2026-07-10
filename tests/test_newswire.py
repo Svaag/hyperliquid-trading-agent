@@ -309,7 +309,7 @@ def test_service_ingest_persists_policy_decision():
     service, repo, event = anyio.run(run)
     assert event is not None
     assert repo.decisions
-    assert event.metadata["newswire_policy_decision"]["policy_version"] == "newswire_baseline_v1"
+    assert event.metadata["newswire_policy_decision"]["policy_version"] == "newswire_assessment_v2"
     assert service.status()["persisted_decision_count"] == 1
 
 

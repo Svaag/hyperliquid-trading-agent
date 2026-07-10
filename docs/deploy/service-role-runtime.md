@@ -74,13 +74,13 @@ open http://127.0.0.1:${HOST_PORT:-8081}/runtime/dashboard
 
 ## Newswire consumers
 
-Persisted Newswire rows fan out through independent `consumer_offsets` entries:
+Persisted canonical story revisions fan out through independent `consumer_offsets` entries:
 
 - `world_model:newswire` updates world-model events, beliefs, narratives, and memories.
-- `discord_publisher:newswire` publishes curated Discord news using `NEWSWIRE_NEWS_MIN_IMPORTANCE` and digest settings.
-- `trader:engine_newswire` feeds the Institutional Engine evidence spine using `ENGINE_NEWS_MIN_IMPORTANCE` without enabling news provider connections in the trader process.
+- `discord_publisher:newswire` routes V2 `standard|high|breaking` assessments through a durable immediate/digest outbox.
+- `trader:engine_newswire` feeds the Institutional Engine ledger, features, and news-risk state from explicit engine actions without enabling news provider connections in the trader process.
 
-`SERVICE_ROLE=trader` must keep `NEWSWIRE_ENABLED=false`; the trader consumes stored rows only. On first start, `trader:engine_newswire` bootstraps its offset to the latest Newswire row so historical articles do not pollute current regime features. Use a dedicated replay/backfill tool if historical engine news features are desired.
+`SERVICE_ROLE=trader` must keep `NEWSWIRE_ENABLED=false`; the trader consumes stored revisions only. Consumer offsets now identify `source_table=newswire_story_revisions`. Use a dedicated replay/backfill tool if historical engine news features are desired.
 
 Paper-signoff preflight remains read-only and never allows live execution:
 

@@ -39,7 +39,9 @@ class AgentNewsConsumer:
     async def start(self) -> None:
         if not self.settings.newswire_enabled or (self.autonomy_service is None and self.world_model_service is None):
             return
-        flt = NewswireFilter(min_importance=self.settings.newswire_agent_min_importance)
+        # Story actions are routed inside the consumer; receiving every revision is
+        # required so corrections/retractions can supersede world-model evidence.
+        flt = NewswireFilter(min_importance=0.0)
         self._subscription_id = await self.bus.subscribe(self._on_event, filter=flt)
         log.info("newswire_agent_consumer_started")
 
@@ -50,13 +52,29 @@ class AgentNewsConsumer:
 
     async def _on_event(self, event: NewswireEvent) -> None:
         news_event = event.to_news_event()
-        if self.autonomy_service is not None:
+        policy = event.metadata.get("newswire_policy_decision") if isinstance(event.metadata, dict) else None
+        active_policy = policy if isinstance(policy, dict) and not bool(policy.get("shadow_only")) else None
+        publish_to_autonomy = (
+            str(active_policy.get("newswire_action") or "drop") in {"standard", "high", "breaking"}
+            if active_policy is not None
+            else _legacy_importance(event) >= self.settings.newswire_agent_min_importance
+        )
+        if active_policy is None:
+            news_event.importance_score = _legacy_importance(event)
+        if self.autonomy_service is not None and publish_to_autonomy:
             self.autonomy_service.reducer.apply_news([news_event], timestamp_ms=event.received_at_ms)
             self.autonomy_service.news_events[news_event.id] = news_event
             if self.repository is not None and getattr(self.repository, "enabled", False):
                 await self.repository.record_news_event(news_event.model_dump(mode="json"))
         if self.world_model_service is not None and callable(getattr(self.world_model_service, "observe_newswire_event", None)):
             await self.world_model_service.observe_newswire_event(event)
-        if self.event_evaluation_service is not None and self.autonomy_service is not None:
+        if self.event_evaluation_service is not None and self.autonomy_service is not None and publish_to_autonomy:
             market_regime = self.autonomy_service.reducer.snapshot().risk_regime if self.autonomy_service is not None else "unknown"
             await self.event_evaluation_service.create_for_newswire_event(event, market_regime=market_regime)
+
+
+def _legacy_importance(event: NewswireEvent) -> float:
+    try:
+        return float(event.metadata.get("legacy_importance_score", event.importance_score))
+    except (TypeError, ValueError):
+        return float(event.importance_score)

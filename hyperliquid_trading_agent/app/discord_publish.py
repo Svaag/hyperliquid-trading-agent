@@ -42,10 +42,10 @@ class SendOnlyDiscordClient:
         self._started = False
         self._ready_event = asyncio.Event()
         self._last_error: str | None = None
+        self._stop_event = asyncio.Event()
+        self._reconnect_count = 0
         if discord is not None:
-            intents = discord.Intents.default()
-            self.client = discord.Client(intents=intents)
-            self._register_handlers()
+            self._create_client()
 
     @property
     def available(self) -> bool:
@@ -71,9 +71,46 @@ class SendOnlyDiscordClient:
             log.warning("discord_send_only_client_failed", error=type(exc).__name__)
             raise
         finally:
+            self._ready_event.clear()
             self._started = False
 
+    async def run_forever(self) -> None:
+        """Supervise the Discord client across DNS/network failures.
+
+        ``discord.Client.start`` reconnects established gateway sessions itself, but an
+        initial DNS/login failure exits the coroutine. Rebuilding the client here avoids
+        a permanently green worker with a dead send task.
+        """
+        backoff = 1.0
+        self._stop_event.clear()
+        while not self._stop_event.is_set():
+            if self.client is None or self.client.is_closed():
+                self._create_client()
+            try:
+                await self.start()
+                if self._stop_event.is_set():
+                    break
+                self._last_error = "client_stopped"
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._reconnect_count += 1
+            if self._stop_event.is_set():
+                break
+            if self.client is not None and not self.client.is_closed():
+                try:
+                    await self.client.close()
+                except Exception:
+                    pass
+            self._create_client()
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=backoff)
+            except TimeoutError:
+                pass
+            backoff = min(60.0, backoff * 2.0)
+
     async def stop(self) -> None:
+        self._stop_event.set()
         if self.client is not None and not self.client.is_closed():
             await self.client.close()
         self._ready_event.clear()
@@ -91,6 +128,9 @@ class SendOnlyDiscordClient:
 
     async def send(self, channel_id: str, content: str, embeds: list[dict[str, Any]] | None = None, components: list[dict[str, Any]] | None = None) -> str | None:
         if self.client is None or not channel_id:
+            return None
+        if not self.ready:
+            self._last_error = "not_ready"
             return None
         channel = self.client.get_channel(int(channel_id)) if str(channel_id).isdigit() else None
         if channel is None and callable(getattr(self.client, "fetch_channel", None)):
@@ -117,7 +157,17 @@ class SendOnlyDiscordClient:
             "started": self._started,
             "ready": self.ready,
             "last_error": self._last_error,
+            "reconnect_count": self._reconnect_count,
         }
+
+    def _create_client(self) -> None:
+        if discord is None:
+            self.client = None
+            return
+        intents = discord.Intents.default()
+        self.client = discord.Client(intents=intents)
+        self._ready_event.clear()
+        self._register_handlers()
 
     def _register_handlers(self) -> None:
         assert self.client is not None
@@ -125,6 +175,7 @@ class SendOnlyDiscordClient:
         @self.client.event
         async def on_ready():
             self._ready_event.set()
+            self._last_error = None
             log.info("discord_send_only_ready", user=str(self.client.user), guild_count=len(self.client.guilds))
 
 

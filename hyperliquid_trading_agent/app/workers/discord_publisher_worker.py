@@ -10,7 +10,7 @@ from hyperliquid_trading_agent.app.newswire.bus import InProcessNewswireBus
 from hyperliquid_trading_agent.app.newswire.consumers.discord_news import DiscordNewsPublisher
 from hyperliquid_trading_agent.app.newswire.enrich import Enricher
 from hyperliquid_trading_agent.app.workers.base import BaseWorker
-from hyperliquid_trading_agent.app.workers.stored_newswire_pump import StoredNewswirePump
+from hyperliquid_trading_agent.app.workers.stored_newswire_story_pump import StoredNewswireStoryPump
 
 
 class DiscordPublisherWorker(BaseWorker):
@@ -21,7 +21,7 @@ class DiscordPublisherWorker(BaseWorker):
         super().__init__(settings)
         self.client: SendOnlyDiscordClient | None = None
         self.publisher: DiscordNewsPublisher | None = None
-        self.pump: StoredNewswirePump | None = None
+        self.pump: StoredNewswireStoryPump | None = None
         self.bus = InProcessNewswireBus()
 
     async def run(self) -> None:
@@ -35,14 +35,14 @@ class DiscordPublisherWorker(BaseWorker):
             repository=self.repository,
         )
         self.client.component_handler = self.publisher.handle_feedback_component
-        self.pump = StoredNewswirePump(
+        self.pump = StoredNewswireStoryPump(
             consumer_name="discord_publisher:newswire",
             repository=self.repository,
             callbacks=[self.bus.publish],
             poll_seconds=self.settings.consumer_poll_seconds,
             batch_size=self.settings.consumer_batch_size,
         )
-        client_task = asyncio.create_task(self.client.start(), name="discord-news-send-only")
+        client_task = asyncio.create_task(self.client.run_forever(), name="discord-news-send-only")
         await self.client.wait_until_ready(timeout=30)
         await self.publisher.start()
         tasks = [

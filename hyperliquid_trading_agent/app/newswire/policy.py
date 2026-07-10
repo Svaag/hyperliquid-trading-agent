@@ -199,7 +199,8 @@ def decision_summary(decision: NewsDecision | dict[str, Any] | None) -> dict[str
     if decision is None:
         return None
     data = decision.model_dump(mode="json") if isinstance(decision, NewsDecision) else dict(decision)
-    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    raw_metadata = data.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
     return {
         "decision_id": data.get("decision_id"),
         "policy_version": data.get("policy_version"),

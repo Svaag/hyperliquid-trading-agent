@@ -424,6 +424,12 @@ def _news_policy_features(event: NormalizedEvent, decision: dict[str, Any]) -> l
         "direction_score": direction_score,
         "direction_confidence": direction_confidence,
         "risk_score": risk_score,
+        "story_id": payload.get("story_id") or event.metadata.get("story_id") or event.metadata.get("source_newswire_metadata", {}).get("story_id"),
+        "story_revision": payload.get("story_revision") or event.metadata.get("story_revision") or event.metadata.get("source_newswire_metadata", {}).get("story_revision"),
+        "story_sources": payload.get("story_sources") or event.metadata.get("source_newswire_metadata", {}).get("story_sources") or [],
+        "story_member_event_ids": payload.get("story_member_event_ids") or event.metadata.get("source_newswire_metadata", {}).get("story_member_event_ids") or [],
+        "published_at_ms": payload.get("published_at_ms") or event.event_ts_ms,
+        "received_at_ms": event.received_ts_ms,
     }
     out: list[FeatureValue] = []
     for symbol in event.symbols:
@@ -462,6 +468,60 @@ def _news_policy_features(event: NormalizedEvent, decision: dict[str, Any]) -> l
                 quality=quality01,
                 metadata=news_metadata,
             )
+        )
+        out.extend(
+            [
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="news",
+                    name="news_story_impact",
+                    value={**news_metadata, "impact": impact01},
+                    scalar=impact01,
+                    quality=quality01,
+                    metadata=news_metadata,
+                ),
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="news",
+                    name="news_direction_confidence",
+                    value={**news_metadata, "direction_confidence": direction_confidence},
+                    scalar=direction_confidence,
+                    quality=quality01,
+                    metadata=news_metadata,
+                ),
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="news",
+                    name="news_source_quality",
+                    value={**news_metadata, "source_quality": source_score},
+                    scalar=source_score,
+                    quality=quality01,
+                    metadata=news_metadata,
+                ),
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="news",
+                    name="news_independent_source_count",
+                    value={**news_metadata, "count": len(set(news_metadata["story_sources"])) or 1},
+                    scalar=float(len(set(news_metadata["story_sources"])) or 1),
+                    quality=quality01,
+                    metadata=news_metadata,
+                ),
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="news",
+                    name="news_story_context",
+                    value=news_metadata,
+                    scalar=None,
+                    quality=quality01,
+                    metadata=news_metadata,
+                ),
+            ]
         )
     return out
 

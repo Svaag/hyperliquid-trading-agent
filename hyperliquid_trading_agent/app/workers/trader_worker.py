@@ -29,7 +29,7 @@ from hyperliquid_trading_agent.app.prediction_markets.schemas import (
     PredictionMarketSettlementRequest,
 )
 from hyperliquid_trading_agent.app.workers.base import BaseWorker
-from hyperliquid_trading_agent.app.workers.stored_newswire_pump import StoredNewswirePump
+from hyperliquid_trading_agent.app.workers.stored_newswire_story_pump import StoredNewswireStoryPump
 
 log = get_logger(__name__)
 
@@ -55,7 +55,7 @@ class TraderWorker(BaseWorker):
         self._engine_loop_last_error: str | None = None
         self._engine_news_bus: InProcessNewswireBus | None = None
         self._engine_news_consumer: EngineNewsConsumer | None = None
-        self._engine_news_pump: StoredNewswirePump | None = None
+        self._engine_news_pump: StoredNewswireStoryPump | None = None
 
     async def run(self) -> None:
         await self._start_engine_loop()
@@ -123,7 +123,7 @@ class TraderWorker(BaseWorker):
         self._engine_news_bus = InProcessNewswireBus()
         self._engine_news_consumer = EngineNewsConsumer(settings=self.settings, bus=self._engine_news_bus, engine_service=engine_service)
         await self._engine_news_consumer.start()
-        self._engine_news_pump = StoredNewswirePump(
+        self._engine_news_pump = StoredNewswireStoryPump(
             consumer_name="trader:engine_newswire",
             repository=self.repository,
             callbacks=[self._engine_news_bus.publish],

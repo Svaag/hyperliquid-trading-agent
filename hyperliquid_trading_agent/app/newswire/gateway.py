@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import Counter
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -13,7 +14,12 @@ from hyperliquid_trading_agent.app.newswire.classify import SOURCE_SCORES
 from hyperliquid_trading_agent.app.newswire.learning import train_contextual_bandit_policy
 from hyperliquid_trading_agent.app.newswire.policy import NewsEval
 from hyperliquid_trading_agent.app.newswire.reward import build_reward
-from hyperliquid_trading_agent.app.newswire.schemas import NewswireEvent, NewswireFilter
+from hyperliquid_trading_agent.app.newswire.schemas import (
+    NewswireEvent,
+    NewswireFilter,
+    NewswireStory,
+    NewswireStoryRevision,
+)
 
 log = get_logger(__name__)
 
@@ -119,12 +125,139 @@ async def get_newswire_event(request: Request, event_id: str, authorization: str
     return event.model_dump(mode="json")
 
 
+@router.get("/newswire/feed")
+async def list_newswire_feed(
+    request: Request,
+    symbol: str | None = None,
+    topic: str | None = None,
+    status: str | None = None,
+    feed_action: str | None = None,
+    min_priority: float = 0.0,
+    include_dropped: bool = False,
+    limit: int = 100,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Canonical product feed: one current row per clustered story."""
+    _auth(request.app.state.settings, authorization)
+    bounded_limit = max(1, min(limit, 500))
+    fetch_limit = min(2000, max(bounded_limit, bounded_limit * 4))
+    try:
+        rows = await request.app.state.repository.list_newswire_stories(
+            status=status,
+            symbol=symbol,
+            feed_action=feed_action,
+            limit=fetch_limit,
+        )
+    except Exception:
+        service = getattr(request.app.state, "newswire_service", None)
+        rows = (
+            [story.model_dump(mode="json") for story in service.list_stories(limit=fetch_limit)]
+            if service is not None and callable(getattr(service, "list_stories", None))
+            else []
+        )
+    if not rows:
+        service = getattr(request.app.state, "newswire_service", None)
+        if service is not None and callable(getattr(service, "list_stories", None)):
+            rows = [story.model_dump(mode="json") for story in service.list_stories(limit=fetch_limit)]
+    stories: list[NewswireStory] = []
+    for row in rows:
+        try:
+            story = NewswireStory.model_validate(row)
+        except ValidationError:
+            continue
+        assessment = story.assessment
+        if not include_dropped and feed_action != "drop" and (assessment is None or assessment.feed_action == "drop"):
+            continue
+        if assessment is not None and assessment.priority_score < min_priority:
+            continue
+        if topic and topic.lower() not in {item.lower() for item in story.topics}:
+            continue
+        stories.append(story)
+        if len(stories) >= bounded_limit:
+            break
+    return {
+        "items": [story.model_dump(mode="json") for story in stories],
+        "count": len(stories),
+        "view": "canonical_stories",
+        "assessment_version": "newswire_assessment_v2",
+    }
+
+
+@router.get("/newswire/stories/{story_id}")
+async def get_newswire_story(
+    request: Request,
+    story_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _auth(request.app.state.settings, authorization)
+    try:
+        row = await request.app.state.repository.get_newswire_story(story_id)
+    except Exception:
+        service = getattr(request.app.state, "newswire_service", None)
+        local = service.get_story(story_id) if service is not None and callable(getattr(service, "get_story", None)) else None
+        row = local.model_dump(mode="json") if local is not None else None
+    if row is None:
+        service = getattr(request.app.state, "newswire_service", None)
+        local = service.get_story(story_id) if service is not None and callable(getattr(service, "get_story", None)) else None
+        row = local.model_dump(mode="json") if local is not None else None
+    if row is None:
+        raise HTTPException(status_code=404, detail="newswire story not found")
+    try:
+        story = NewswireStory.model_validate(row)
+    except ValidationError as exc:
+        raise HTTPException(status_code=500, detail=f"invalid persisted newswire story: {exc}") from None
+    try:
+        revisions = await request.app.state.repository.list_newswire_story_revisions(story_id=story_id, limit=100)
+    except Exception:
+        revisions = []
+    return {
+        **story.model_dump(mode="json"),
+        "revisions": revisions,
+        "revision_count": len(revisions),
+    }
+
+
+@router.get("/newswire/risk-state")
+async def get_newswire_risk_state(
+    request: Request,
+    scope: str | None = None,
+    include_transitions: bool = True,
+    limit: int = 100,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _auth(request.app.state.settings, authorization)
+    bounded_limit = max(1, min(limit, 500))
+    try:
+        states = await request.app.state.repository.list_newswire_risk_states(scope=scope, limit=bounded_limit)
+        transitions = (
+            await request.app.state.repository.list_newswire_risk_transitions(scope=scope, limit=bounded_limit)
+            if include_transitions
+            else []
+        )
+    except Exception:
+        consumer = getattr(request.app.state, "engine_news_consumer", None)
+        state_machine = getattr(consumer, "risk_state", None)
+        local_states = list(getattr(state_machine, "states", {}).values()) if state_machine is not None else []
+        if scope:
+            local_states = [item for item in local_states if item.scope == scope.upper()]
+        states = [item.model_dump(mode="json") for item in local_states[:bounded_limit]]
+        transitions = []
+    return {
+        "items": states,
+        "count": len(states),
+        "transitions": transitions,
+        "transition_count": len(transitions),
+    }
+
+
 @router.get("/newswire/status")
 async def newswire_status(request: Request, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _auth(request.app.state.settings, authorization)
     repo = request.app.state.repository
     try:
         latest = await repo.list_newswire_events(limit=1)
+        latest_stories = await repo.list_newswire_stories(limit=500)
+        risk_states = await repo.list_newswire_risk_states(limit=100)
         newswire_workers = await repo.list_service_heartbeats(service_role="newswire", limit=10)
         publisher_workers = await repo.list_service_heartbeats(service_role="discord_publisher", limit=10)
     except Exception:
@@ -134,13 +267,28 @@ async def newswire_status(request: Request, authorization: str | None = Header(d
         if publisher is not None and callable(getattr(publisher, "status_async", None)):
             status["discord_publisher"] = await publisher.status_async()
         return status
-    return {
+    action_counts = Counter(
+        str((story.get("assessment") or {}).get("feed_action") or "unassessed") for story in latest_stories
+    )
+    engine_action_counts = Counter(
+        str((story.get("assessment") or {}).get("engine_action") or "unassessed") for story in latest_stories
+    )
+    result = {
         "enabled": request.app.state.settings.newswire_enabled,
         "running": any(item.get("status") == "running" for item in newswire_workers),
         "latest_event": latest[0] if latest else None,
+        "latest_story": latest_stories[0] if latest_stories else None,
+        "story_sample_count": len(latest_stories),
+        "feed_action_counts": dict(action_counts),
+        "engine_action_counts": dict(engine_action_counts),
+        "risk_states": risk_states,
         "workers": newswire_workers,
         "discord_publisher_workers": publisher_workers,
     }
+    channel_id = request.app.state.settings.newswire_news_channel_id
+    if channel_id and callable(getattr(repo, "newswire_delivery_status", None)):
+        result["discord_delivery"] = await repo.newswire_delivery_status(channel_id)
+    return result
 
 
 @router.post("/newswire/discord/test")
@@ -323,11 +471,16 @@ async def newswire_stream(websocket: WebSocket) -> None:
     last_id: str | None = None
     try:
         while True:
-            rows = await websocket.app.state.repository.list_newswire_events_after(last_event_ts_ms=last_ts, last_event_id=last_id, limit=100)
+            rows = await websocket.app.state.repository.list_newswire_story_revisions_after(
+                last_event_ts_ms=last_ts,
+                last_event_id=last_id,
+                limit=100,
+            )
             for row in rows:
-                event = NewswireEvent.model_validate(row)
-                last_ts = int(event.received_at_ms)
-                last_id = event.event_id
+                revision = NewswireStoryRevision.model_validate(row)
+                event = revision.story.to_event(update_type=revision.update_type)
+                last_ts = int(revision.emitted_at_ms)
+                last_id = revision.revision_id
                 if flt is None or flt.matches(event):
                     await websocket.send_json(event.model_dump(mode="json"))
             await asyncio.sleep(1.0)

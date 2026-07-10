@@ -815,6 +815,128 @@ class NewswireEventRow(TimestampMixin, Base):
     tradability_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     enrichment_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    story_id: Mapped[str | None] = mapped_column(String(64))
+    story_revision: Mapped[int | None] = mapped_column(Integer)
+    topics_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    assessment_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+
+class NewswireStoryRow(TimestampMixin, Base):
+    __tablename__ = "newswire_stories"
+    __table_args__ = (
+        Index("ix_newswire_stories_updated", "last_updated_at_ms"),
+        Index("ix_newswire_stories_status_updated", "status", "last_updated_at_ms"),
+        Index("ix_newswire_stories_canonical_event", "canonical_event_id"),
+    )
+
+    story_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    canonical_event_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    headline: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    url: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    sources_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    providers_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    member_event_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    symbols_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    topics_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    asset_class: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False, default="headline")
+    urgency: Mapped[str] = mapped_column(String(16), nullable=False, default="normal")
+    sentiment: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")
+    source_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    published_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    first_seen_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    independent_source_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    assessment_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class NewswireStoryRevisionRow(TimestampMixin, Base):
+    __tablename__ = "newswire_story_revisions"
+    __table_args__ = (
+        UniqueConstraint("story_id", "revision", name="uq_newswire_story_revision"),
+        Index("ix_newswire_story_revisions_emitted", "emitted_at_ms", "revision_id"),
+        Index("ix_newswire_story_revisions_story", "story_id", "revision"),
+    )
+
+    revision_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    story_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    update_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    emitted_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    story_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
+class NewswireDeliveryRow(TimestampMixin, Base):
+    __tablename__ = "newswire_deliveries"
+    __table_args__ = (
+        UniqueConstraint("destination", "channel_id", "story_id", "story_revision", name="uq_newswire_delivery_story_revision"),
+        Index("ix_newswire_deliveries_due", "destination", "status", "next_attempt_at_ms"),
+        Index("ix_newswire_deliveries_story", "story_id", "story_revision"),
+    )
+
+    delivery_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    destination: Mapped[str] = mapped_column(String(32), nullable=False, default="discord")
+    channel_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    story_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    story_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    scheduled_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    next_attempt_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    discord_message_id: Mapped[str | None] = mapped_column(String(64))
+    posted_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    skip_reason: Mapped[str | None] = mapped_column(String(64))
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class NewswireRiskStateRecord(TimestampMixin, Base):
+    __tablename__ = "newswire_risk_states"
+    __table_args__ = (Index("ix_newswire_risk_states_mode_updated", "mode", "updated_at_ms"),)
+
+    scope: Mapped[str] = mapped_column(String(64), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(24), nullable=False, default="neutral")
+    signed_pressure: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    risk_pressure: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    evidence_story_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    entered_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expires_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    assessment_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    transition_reason: Mapped[str] = mapped_column(String(128), nullable=False, default="initialized")
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class NewswireRiskTransitionRecord(TimestampMixin, Base):
+    __tablename__ = "newswire_risk_transitions"
+    __table_args__ = (
+        Index("ix_newswire_risk_transitions_scope_created", "scope", "created_at_ms"),
+        Index("ix_newswire_risk_transitions_mode_created", "to_mode", "created_at_ms"),
+    )
+
+    transition_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(64), nullable=False)
+    from_mode: Mapped[str] = mapped_column(String(24), nullable=False)
+    to_mode: Mapped[str] = mapped_column(String(24), nullable=False)
+    signed_pressure: Mapped[float] = mapped_column(Float, nullable=False)
+    risk_pressure: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence_story_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    reason: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class NewswirePublishLedgerRow(TimestampMixin, Base):

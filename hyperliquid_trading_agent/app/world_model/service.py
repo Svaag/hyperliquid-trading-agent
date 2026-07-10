@@ -60,6 +60,15 @@ class WorldModelService:
         }
 
     async def observe_newswire_event(self, event: NewswireEvent) -> list[MarketBelief]:
+        policy = event.metadata.get("newswire_policy_decision") if isinstance(event.metadata, dict) else None
+        assessment = None if isinstance(policy, dict) and bool(policy.get("shadow_only")) else event.assessment
+        if (
+            event.action != "removed"
+            and assessment is not None
+            and assessment.feed_action in {"drop", "watch"}
+            and assessment.engine_action == "ignore"
+        ):
+            return []
         world_event = _world_event_from_newswire(event)
         return await self.observe_event(world_event)
 
@@ -177,9 +186,10 @@ class WorldModelService:
         return self.reducer.wiki_block(symbols=symbols, topics=topics, max_chars=max_chars)
 
     async def list_events(self, *, limit: int = 100, source_type: str | None = None, symbol: str | None = None) -> list[dict[str, Any]]:
-        if self._repo_available() and callable(getattr(self.repository, "list_world_events", None)):
+        repo = self.repository
+        if self._repo_available() and repo is not None and callable(getattr(repo, "list_world_events", None)):
             try:
-                return await self.repository.list_world_events(limit=limit, source_type=source_type, symbol=symbol)
+                return await repo.list_world_events(limit=limit, source_type=source_type, symbol=symbol)
             except Exception as exc:  # pragma: no cover - fallback keeps operator UI available
                 self._record_repository_error(exc, operation="list_world_events")
         events = list(self.reducer.events.values())
@@ -190,9 +200,10 @@ class WorldModelService:
         return [item.model_dump(mode="json") for item in sorted(events, key=lambda item: item.computed_ts_ms, reverse=True)[:limit]]
 
     async def list_beliefs(self, *, limit: int = 100, symbol: str | None = None, kind: str | None = None) -> list[dict[str, Any]]:
-        if self._repo_available() and callable(getattr(self.repository, "list_market_beliefs", None)):
+        repo = self.repository
+        if self._repo_available() and repo is not None and callable(getattr(repo, "list_market_beliefs", None)):
             try:
-                return await self.repository.list_market_beliefs(limit=limit, symbol=symbol, kind=kind)
+                return await repo.list_market_beliefs(limit=limit, symbol=symbol, kind=kind)
             except Exception as exc:  # pragma: no cover
                 self._record_repository_error(exc, operation="list_market_beliefs")
         beliefs = list(self.reducer.beliefs.values())
@@ -203,9 +214,10 @@ class WorldModelService:
         return [item.model_dump(mode="json") for item in sorted(beliefs, key=lambda item: item.updated_at_ms, reverse=True)[:limit]]
 
     async def list_prediction_signals(self, *, limit: int = 100, venue: str | None = None, symbol: str | None = None) -> list[dict[str, Any]]:
-        if self._repo_available() and callable(getattr(self.repository, "list_prediction_market_signals", None)):
+        repo = self.repository
+        if self._repo_available() and repo is not None and callable(getattr(repo, "list_prediction_market_signals", None)):
             try:
-                return await self.repository.list_prediction_market_signals(limit=limit, venue=venue, symbol=symbol)
+                return await repo.list_prediction_market_signals(limit=limit, venue=venue, symbol=symbol)
             except Exception as exc:  # pragma: no cover
                 self._record_repository_error(exc, operation="list_prediction_market_signals")
         signals = list(self.reducer.prediction_signals.values())
@@ -216,9 +228,10 @@ class WorldModelService:
         return [item.model_dump(mode="json") for item in sorted(signals, key=lambda item: item.as_of_ms, reverse=True)[:limit]]
 
     async def list_memory(self, *, limit: int = 100, symbol: str | None = None, memory_type: str | None = None) -> list[dict[str, Any]]:
-        if self._repo_available() and callable(getattr(self.repository, "list_world_memory_atoms", None)):
+        repo = self.repository
+        if self._repo_available() and repo is not None and callable(getattr(repo, "list_world_memory_atoms", None)):
             try:
-                return await self.repository.list_world_memory_atoms(limit=limit, symbol=symbol, memory_type=memory_type)
+                return await repo.list_world_memory_atoms(limit=limit, symbol=symbol, memory_type=memory_type)
             except Exception as exc:  # pragma: no cover
                 self._record_repository_error(exc, operation="list_world_memory_atoms")
         memories = list(self.reducer.memories.values())
@@ -429,19 +442,21 @@ class WorldModelService:
         return {**self.status(), "enabled": self._repo_enabled(), "available": repository_available, "repository_available": repository_available, "ping": ping}
 
     async def _persist_event(self, event: WorldEvent) -> None:
-        if not self._repo_available() or not callable(getattr(self.repository, "upsert_world_event", None)):
+        repo = self.repository
+        if not self._repo_available() or repo is None or not callable(getattr(repo, "upsert_world_event", None)):
             return
         try:
-            await self.repository.upsert_world_event(event.model_dump(mode="json"))
+            await repo.upsert_world_event(event.model_dump(mode="json"))
             self._record_repository_success(operation="upsert_world_event")
         except Exception as exc:  # pragma: no cover - persistence must not break the reducer
             self._record_repository_error(exc, operation="upsert_world_event")
 
     async def _persist_prediction_signal(self, signal: PredictionMarketSignal) -> None:
-        if not self._repo_available() or not callable(getattr(self.repository, "upsert_prediction_market_signal", None)):
+        repo = self.repository
+        if not self._repo_available() or repo is None or not callable(getattr(repo, "upsert_prediction_market_signal", None)):
             return
         try:
-            await self.repository.upsert_prediction_market_signal(signal.model_dump(mode="json"))
+            await repo.upsert_prediction_market_signal(signal.model_dump(mode="json"))
             self._record_repository_success(operation="upsert_prediction_market_signal")
         except Exception as exc:  # pragma: no cover
             self._record_repository_error(exc, operation="upsert_prediction_market_signal")
@@ -595,6 +610,14 @@ def prediction_signal_from_hip4_book(
 def _world_event_from_newswire(event: NewswireEvent) -> WorldEvent:
     computed = max(now_ms(), event.received_at_ms)
     staleness = None if event.published_at_ms is None else max(0, event.received_at_ms - event.published_at_ms)
+    policy = event.metadata.get("newswire_policy_decision") if isinstance(event.metadata, dict) else None
+    assessment_active = not (isinstance(policy, dict) and bool(policy.get("shadow_only")))
+    importance_score = event.importance_score
+    if not assessment_active:
+        try:
+            importance_score = float(event.metadata.get("legacy_importance_score", event.importance_score))
+        except (TypeError, ValueError):
+            pass
     return WorldEvent(
         event_id=f"wevt_{event.event_id}",
         source_type="social" if event.event_type == "social" or event.source.startswith("x_") else "newswire",
@@ -603,21 +626,29 @@ def _world_event_from_newswire(event: NewswireEvent) -> WorldEvent:
         event_type=event.event_type,
         asset_class=event.asset_class,
         symbols=event.symbols,
-        topics=[event.event_type, event.asset_class, event.urgency],
+        topics=list(dict.fromkeys([*event.topics, event.event_type, event.asset_class, event.urgency])),
         title=event.headline,
         body=event.body,
         url=event.url,
         event_ts_ms=event.published_at_ms,
         received_ts_ms=event.received_at_ms,
         computed_ts_ms=computed,
-        importance_score=event.importance_score,
+        importance_score=importance_score,
         sentiment=_direction(event.sentiment),
         confidence=event.confidence,
         source_score=event.source_score,
         quality_score=max(event.confidence, event.source_score),
         staleness_ms=staleness,
         payload=event.model_dump(mode="json"),
-        metadata={"paper_only": True, "execution_authority": "none"},
+        metadata={
+            "paper_only": True,
+            "execution_authority": "none",
+            "story_id": event.story_id or event.metadata.get("story_id"),
+            "story_revision": event.story_revision or event.metadata.get("story_revision"),
+            "story_update_type": event.metadata.get("story_update_type"),
+            "retracted": event.action == "removed",
+            "assessment_version": event.assessment.assessment_version if event.assessment is not None else None,
+        },
     )
 
 

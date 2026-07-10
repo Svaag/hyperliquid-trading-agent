@@ -230,6 +230,9 @@ class RegimeVector(BaseModel):
     stablecoin_liquidity_z: float | None = None
     correlation_breakdown_prob: float = Field(default=0.0, ge=0.0, le=1.0)
     news_catalyst_pressure: float = Field(default=0.0, ge=0.0, le=1.0)
+    news_directional_pressure: float = Field(default=0.0, ge=-1.0, le=1.0)
+    news_risk_pressure: float = Field(default=0.0, ge=0.0, le=1.0)
+    news_risk_mode: Literal["neutral", "risk_on", "risk_off", "shock"] = "neutral"
     regime_stability_score: float = Field(default=0.0, ge=0.0, le=1.0)
     permissions: StrategyPermissions = Field(default_factory=StrategyPermissions)
     feature_refs: list[str] = Field(default_factory=list)

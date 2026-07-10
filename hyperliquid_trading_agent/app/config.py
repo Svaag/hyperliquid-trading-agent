@@ -367,6 +367,19 @@ class Settings(BaseSettings):
     engine_news_catalyst_ttl_seconds: int = 3600
     engine_news_macro_min_importance: float = 60.0
     engine_news_macro_proxy_symbols: str = ""
+    engine_news_risk_overlay_mode: Literal["shadow", "active"] = "shadow"
+    engine_news_alpha_mode: Literal["off", "shadow", "paper"] = "shadow"
+    engine_news_risk_on_threshold: float = 0.55
+    engine_news_risk_off_threshold: float = 0.55
+    engine_news_risk_exit_threshold: float = 0.25
+    engine_news_risk_half_life_seconds: int = 1800
+    engine_news_risk_default_ttl_seconds: int = 1800
+    engine_news_risk_protocol_ttl_seconds: int = 3600
+    engine_news_risk_macro_ttl_seconds: int = 7200
+    engine_news_risk_min_hold_seconds: int = 900
+    engine_news_alpha_min_impact: float = 65.0
+    engine_news_alpha_min_direction_confidence: float = 0.75
+    engine_news_alpha_max_age_seconds: int = 1800
     engine_validation_digest_enabled: bool = True
     engine_validation_digest_interval_seconds: int = 3600
     engine_validation_alert_stale_loop_seconds: int = 180
@@ -508,6 +521,13 @@ class Settings(BaseSettings):
     news_signal_generation_enabled: bool = True
     news_event_risk_blocks_enabled: bool = True
     newswire_queries: str = "BTC,ETH,HYPE,Hyperliquid,Fed,CPI,FOMC,crypto liquidation"
+    newswire_watchlist: str = ""
+    newswire_watch_refresh_seconds: int = 30
+    newswire_top_volume_watch_count: int = 20
+    newswire_routing_mode: Literal["shadow", "active"] = "active"
+    newswire_story_max_buffer: int = 2000
+    newswire_ingest_queue_size: int = 1000
+    newswire_ingest_worker_count: int = 1
     x_watchlist_user_ids: str = ""
     x_min_public_metric_score: int = 0
 
@@ -522,11 +542,15 @@ class Settings(BaseSettings):
     newswire_send_min_interval_ms: int = 1200
     newswire_discord_digest_max_items: int = 10
     newswire_discord_startup_grace_seconds: int = 300
+    newswire_discord_max_immediate_per_hour: int = 6
     newswire_rss_feeds: str = DEFAULT_NEWSWIRE_RSS_FEEDS
     newswire_rss_poll_seconds: int = 60
     newswire_llm_enrich_enabled: bool = True
     newswire_llm_enrich_min_importance: float = 70.0
     newswire_llm_enrich_max_calls_per_hour: int = 30
+    newswire_model_classify_enabled: bool = True
+    newswire_model_classify_max_calls_per_hour: int = 30
+    newswire_model_classify_timeout_seconds: float = 5.0
     newswire_policy_enabled: bool = True
     newswire_policy_shadow_only: bool = True
     newswire_active_policy_version: str = ""
@@ -997,6 +1021,10 @@ class Settings(BaseSettings):
         return _csv(self.newswire_queries)
 
     @property
+    def newswire_explicit_watch_symbols(self) -> list[str]:
+        return [symbol.upper().lstrip("$") for symbol in _csv(self.newswire_watchlist)]
+
+    @property
     def x_watchlist_users(self) -> list[str]:
         return _csv(self.x_watchlist_user_ids)
 
@@ -1019,7 +1047,7 @@ class Settings(BaseSettings):
     @property
     def newswire_symbols_universe(self) -> list[str]:
         """Symbols the normalizer scans for in free-text (core + cashtags + short queries)."""
-        universe = set(self.autonomy_core_symbols) | set(self.newswire_cashtag_list)
+        universe = set(self.autonomy_core_symbols) | set(self.newswire_cashtag_list) | set(self.newswire_explicit_watch_symbols)
         for term in self.newswire_query_terms:
             token = term.strip().upper()
             if token.isalpha() and 2 <= len(token) <= 6:
@@ -1093,6 +1121,19 @@ class Settings(BaseSettings):
             warnings.append("ENGINE_NEWS_CATALYST_TTL_SECONDS must be positive")
         if self.engine_news_macro_min_importance < 0 or self.engine_news_macro_min_importance > 100:
             warnings.append("ENGINE_NEWS_MACRO_MIN_IMPORTANCE must be between 0 and 100")
+        if self.newswire_top_volume_watch_count < 0:
+            warnings.append("NEWSWIRE_TOP_VOLUME_WATCH_COUNT must be non-negative")
+        if self.newswire_ingest_worker_count <= 0 or self.newswire_ingest_queue_size <= 0:
+            warnings.append("NEWSWIRE_INGEST_WORKER_COUNT and NEWSWIRE_INGEST_QUEUE_SIZE must be positive")
+        if self.engine_news_alpha_mode == "paper" and not self.engine_paper_enabled:
+            warnings.append("ENGINE_NEWS_ALPHA_MODE=paper requires ENGINE_PAPER_ENABLED=true; Newswire intents will remain shadow")
+        for name, value in {
+            "ENGINE_NEWS_RISK_ON_THRESHOLD": self.engine_news_risk_on_threshold,
+            "ENGINE_NEWS_RISK_OFF_THRESHOLD": self.engine_news_risk_off_threshold,
+            "ENGINE_NEWS_RISK_EXIT_THRESHOLD": self.engine_news_risk_exit_threshold,
+        }.items():
+            if value < 0 or value > 1:
+                warnings.append(f"{name} must be between 0 and 1")
         return warnings
 
     def autonomy_config_warnings(self) -> list[str]:

@@ -15,6 +15,11 @@ from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.metrics import MODEL_CALLS, MODEL_LATENCY
 from hyperliquid_trading_agent.app.security import redact_secrets
 
+# Settings/Vault own configuration loading.  LiteLLM's development import path calls
+# python-dotenv itself and mutates the entire process environment, bypassing both that
+# boundary and test isolation.  Production mode disables the library-side dotenv load.
+os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
+
 log = get_logger(__name__)
 
 

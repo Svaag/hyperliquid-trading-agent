@@ -51,7 +51,7 @@ PRE_WAVE1A_COMPARISON_IDS = {
     "directional_momentum_v2",
     "support_resistance_reversion_v2",
     "microstructure_ofi_v1",
-    "news_event_alpha_v1",
+    "news_event_alpha_v2",
     "equity_options_flow_v1",
 }
 
@@ -267,10 +267,16 @@ def create_default_strategy_registry(
     include_planned_wave_2_specs: bool = True,
     enable_wave_1c: bool = False,
     catalog_mode: CatalogMode | str = "wave1a_locked",
+    news_event_alpha_mode: Literal["off", "shadow", "paper"] | None = None,
 ) -> StrategyRegistry:
     mode = _resolve_catalog_mode(catalog_mode, enable_wave_1c=enable_wave_1c)
     registry = StrategyRegistry(catalog_mode=mode)
-    registry.register_many(runtime_strategy_instances(catalog_mode=mode))
+    registry.register_many(
+        runtime_strategy_instances(
+            catalog_mode=mode,
+            news_event_alpha_mode=news_event_alpha_mode,
+        )
+    )
     wave_1c_enabled = mode == "wave1c"
     if include_planned_wave_1a_specs:
         for spec in planned_wave_1a_specs():
@@ -291,22 +297,57 @@ def create_default_strategy_registry(
     return registry
 
 
-def runtime_strategy_instances(*, catalog_mode: CatalogMode | str = "wave1a_locked") -> list[AlphaStrategy]:
+def runtime_strategy_instances(
+    *,
+    catalog_mode: CatalogMode | str = "wave1a_locked",
+    news_event_alpha_mode: Literal["off", "shadow", "paper"] | None = None,
+) -> list[AlphaStrategy]:
     """Return runtime-enabled strategy instances for a catalog mode."""
 
     mode = _resolve_catalog_mode(catalog_mode, enable_wave_1c=False)
+    effective_news_mode = news_event_alpha_mode
+    if effective_news_mode is None:
+        # Preserve the historical direct-factory catalog shape. EngineService always
+        # supplies the explicit operator setting, including "off".
+        effective_news_mode = "shadow" if mode == "shadow_full_catalog" else "off"
+    news = _news_event_instances(effective_news_mode, shadow_only=mode == "shadow_full_catalog")
     if mode in {"wave1a_locked", "specs_only"}:
-        return default_strategy_instances()
+        return [*default_strategy_instances(), *news]
     if mode == "wave1c":
-        return [*default_strategy_instances(), *[_active_instance(strategy, reason="wave1c_enabled") for strategy in wave_1c_strategy_instances()]]
+        return [
+            *default_strategy_instances(),
+            *news,
+            *[_active_instance(strategy, reason="wave1c_enabled") for strategy in wave_1c_strategy_instances()],
+        ]
     if mode == "shadow_full_catalog":
         strategies: list[AlphaStrategy] = []
         strategies.extend(_shadow_only_instances(default_strategy_instances(), reason="shadow_full_catalog_wave1a"))
-        strategies.extend(_shadow_only_instances(pre_wave1a_runtime_instances(), reason="shadow_full_catalog_pre_wave1a"))
+        pre_wave = [strategy for strategy in pre_wave1a_runtime_instances() if strategy.strategy_id != "news_event_alpha_v2"]
+        strategies.extend(_shadow_only_instances(pre_wave, reason="shadow_full_catalog_pre_wave1a"))
+        strategies.extend(news)
         strategies.extend(_shadow_only_instances(wave_1c_full_strategy_instances(), reason="shadow_full_catalog_wave1c"))
         strategies.extend(_shadow_only_instances(wave_2_strategy_instances(), reason="shadow_full_catalog_wave2", force_breadth=True))
         return strategies
     raise ValueError(f"unsupported catalog mode: {catalog_mode}")
+
+
+def _news_event_instances(
+    mode: Literal["off", "shadow", "paper"],
+    *,
+    shadow_only: bool,
+) -> list[AlphaStrategy]:
+    """Activate Newswire alpha independently of the historical wave catalog.
+
+    News risk-state consumption is always independent of this switch.  The strategy is
+    opt-in at runtime (shadow by default in Settings), and the full-shadow catalog can
+    never make it paper eligible even when a conflicting operator setting is supplied.
+    """
+    if mode == "off":
+        return []
+    strategy: AlphaStrategy = NewsEventAlphaStrategy()
+    if mode == "shadow" or shadow_only:
+        return _shadow_only_instances([strategy], reason="newswire_alpha_shadow")
+    return [_active_instance(strategy, reason="newswire_alpha_paper")]
 
 
 def _spec_activation_scope(spec: StrategySpec) -> str:

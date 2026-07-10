@@ -13,9 +13,16 @@ from hyperliquid_trading_agent.app.engine.schemas import FeatureValue, RegimeVec
 class RegimeEngine:
     """Computes a first-version RegimeVector from point-in-time features."""
 
-    def __init__(self, *, news_catalyst_threshold: float = 0.35, news_catalyst_ttl_ms: int = 60 * 60_000):
+    def __init__(
+        self,
+        *,
+        news_catalyst_threshold: float = 0.35,
+        news_catalyst_ttl_ms: int = 60 * 60_000,
+        news_risk_overlay_mode: str = "active",
+    ):
         self.news_catalyst_threshold = max(0.0, min(1.0, float(news_catalyst_threshold)))
         self.news_catalyst_ttl_ms = max(1, int(news_catalyst_ttl_ms))
+        self.news_risk_overlay_mode = "active" if str(news_risk_overlay_mode) == "active" else "shadow"
 
     def compute(self, features: Iterable[FeatureValue], *, primary_asset: str = "GLOBAL", as_of_ms: int | None = None) -> RegimeVector:
         items = sorted(list(features), key=lambda item: (item.computed_ts_ms, item.received_ts_ms, item.feature_id))
@@ -55,7 +62,11 @@ class RegimeEngine:
         oi_velocity_z = _latest_scalar(by_name, "oi_velocity_z")
         if oi_velocity_z is None:
             oi_velocity_z = _velocity_z(oi)
-        news_pressure = news_summary["pressure"]
+        overlay_active = self.news_risk_overlay_mode == "active"
+        news_pressure = news_summary["pressure"] if overlay_active else news_summary["legacy_pressure"]
+        observed_news_risk_mode = str(news_summary["risk_mode"])
+        news_risk_mode = observed_news_risk_mode if overlay_active else "neutral"
+        news_risk_tier = str(news_summary["risk_tier"] if overlay_active else news_summary["legacy_risk_tier"])
         stability = _stability_score(trend_confidence, realized_vol, spread_state, liquidity_state, news_pressure, quality_flags)
         volatility_state = _volatility_state(realized_vol)
         funding_state = _funding_state(funding_stress_z)
@@ -78,9 +89,9 @@ class RegimeEngine:
             session_state=session_state,
         )
         permissions = StrategyPermissions(
-            momentum_allowed=trend_state in {"bull", "bear"} and stability >= 0.35 and (funding_stress_z is None or abs(funding_stress_z) < 2.5),
-            mean_reversion_allowed=trend_state == "range" and news_pressure < 0.5,
-            market_making_allowed=spread_state in {"tight", "normal"} and liquidity_state in {"deep", "normal"} and news_pressure < 0.4,
+            momentum_allowed=news_risk_mode != "shock" and trend_state in {"bull", "bear"} and stability >= 0.35 and (funding_stress_z is None or abs(funding_stress_z) < 2.5),
+            mean_reversion_allowed=trend_state == "range" and news_pressure < 0.5 and news_risk_mode not in {"risk_off", "shock"},
+            market_making_allowed=spread_state in {"tight", "normal"} and liquidity_state in {"deep", "normal"} and news_pressure < 0.4 and news_risk_mode != "shock",
             news_event_allowed=news_pressure >= 0.35,
             carry_allowed=funding_stress_z is not None and abs(funding_stress_z) >= 1.0,
             relative_value_allowed=stability >= 0.45,
@@ -97,7 +108,10 @@ class RegimeEngine:
             "liquidation": liquidation_state,
             "orderflow": orderflow_state,
             "news": news_state,
-            "news_risk_tier": str(news_summary["risk_tier"]),
+            "news_risk_tier": news_risk_tier,
+            "news_risk_mode": news_risk_mode,
+            "news_risk_mode_observed": observed_news_risk_mode,
+            "news_risk_overlay_mode": self.news_risk_overlay_mode,
             "news_direction": str(news_summary["direction"]),
             "news_event_count_recent": str(news_summary["event_count"]),
             "news_source_event_ids": ",".join(news_summary["source_event_ids"]),
@@ -134,24 +148,42 @@ class RegimeEngine:
             stablecoin_liquidity_z=None,
             correlation_breakdown_prob=correlation_breakdown_prob,
             news_catalyst_pressure=news_pressure,
+            news_directional_pressure=float(news_summary["directional_pressure"]),
+            news_risk_pressure=float(news_summary["event_risk_pressure"]),
+            news_risk_mode=news_risk_mode,  # type: ignore[arg-type]
             regime_stability_score=stability,
             permissions=permissions,
             feature_refs=[item.feature_id for item in items],
             raw_feature_refs={item.feature_name: item.feature_id for item in items[-100:]},
             derived_labels=derived_labels,
             quality_flags=quality_flags,
-            metadata={"news": news_summary, "news_catalyst_ttl_ms": self.news_catalyst_ttl_ms, "news_catalyst_threshold": self.news_catalyst_threshold},
+            metadata={
+                "news": news_summary,
+                "news_catalyst_ttl_ms": self.news_catalyst_ttl_ms,
+                "news_catalyst_threshold": self.news_catalyst_threshold,
+                "news_risk_overlay_mode": self.news_risk_overlay_mode,
+                "observed_news_risk_mode": observed_news_risk_mode,
+            },
         )
 
 
 def _news_summary(by_name: dict[str, list[FeatureValue]], *, as_of_ms: int, ttl_ms: int) -> dict[str, object]:
     cutoff = as_of_ms - ttl_ms
-    catalyst_items = _recent_feature_items(by_name, "catalyst_pressure", cutoff)
-    risk_items = _recent_feature_items(by_name, "event_risk_pressure", cutoff)
+    catalyst_items = _latest_news_story_items(_recent_feature_items(by_name, "catalyst_pressure", cutoff))
+    risk_items = _latest_news_story_items(_recent_feature_items(by_name, "event_risk_pressure", cutoff))
     catalyst_values = [float(item.scalar_value or 0.0) for item in catalyst_items]
     risk_values = [abs(float(item.scalar_value or 0.0)) for item in risk_items]
     directional_pressure = max([abs(value) for value in catalyst_values], default=0.0)
     event_risk_pressure = max(risk_values, default=0.0)
+    legacy_pressure = max(0.0, min(1.0, max(directional_pressure, event_risk_pressure)))
+    overlay_signed = _latest_recent_scalar(by_name, "news_signed_pressure", cutoff)
+    overlay_risk = _latest_recent_scalar(by_name, "news_risk_pressure", cutoff)
+    overlay_mode_code = _latest_recent_scalar(by_name, "news_risk_mode_code", cutoff)
+    if overlay_signed is not None:
+        catalyst_values.append(overlay_signed)
+        directional_pressure = max(directional_pressure, abs(overlay_signed))
+    if overlay_risk is not None:
+        event_risk_pressure = max(event_risk_pressure, abs(overlay_risk))
     pressure = max(0.0, min(1.0, max(directional_pressure, event_risk_pressure)))
     positive = sum(max(value, 0.0) for value in catalyst_values)
     negative = sum(abs(min(value, 0.0)) for value in catalyst_values)
@@ -164,15 +196,50 @@ def _news_summary(by_name: dict[str, list[FeatureValue]], *, as_of_ms: int, ttl_
     else:
         direction = "unknown"
     source_event_ids = sorted({_news_source_id(item) for item in [*catalyst_items, *risk_items] if _news_source_id(item)})
+    risk_mode = _risk_mode_from_code(overlay_mode_code)
+    risk_tier = "event_shock" if risk_mode == "shock" else "event_risk" if risk_mode == "risk_off" else _news_risk_tier(pressure)
     return {
         "pressure": pressure,
+        "legacy_pressure": legacy_pressure,
         "directional_pressure": max(-1.0, min(1.0, sum(catalyst_values))),
         "event_risk_pressure": event_risk_pressure,
-        "risk_tier": _news_risk_tier(pressure),
+        "risk_tier": risk_tier,
+        "legacy_risk_tier": _news_risk_tier(legacy_pressure),
+        "risk_mode": risk_mode,
         "direction": direction,
         "event_count": len(source_event_ids) or len(catalyst_items) + len(risk_items),
         "source_event_ids": source_event_ids,
     }
+
+
+def _latest_recent_scalar(by_name: dict[str, list[FeatureValue]], name: str, cutoff: int) -> float | None:
+    items = _recent_feature_items(by_name, name, cutoff)
+    if not items:
+        return None
+    return items[-1].scalar_value
+
+
+def _latest_news_story_items(items: list[FeatureValue]) -> list[FeatureValue]:
+    latest: dict[str, FeatureValue] = {}
+    for item in items:
+        metadata = item.metadata if isinstance(item.metadata, dict) else {}
+        key = str(metadata.get("story_id") or metadata.get("newswire_event_id") or item.source_event_id or item.feature_id)
+        current = latest.get(key)
+        if current is None or (item.computed_ts_ms, item.feature_id) > (current.computed_ts_ms, current.feature_id):
+            latest[key] = item
+    return sorted(latest.values(), key=lambda item: (item.computed_ts_ms, item.feature_id))
+
+
+def _risk_mode_from_code(value: float | None) -> str:
+    if value is None:
+        return "neutral"
+    if value <= -1.5:
+        return "shock"
+    if value < -0.5:
+        return "risk_off"
+    if value > 0.5:
+        return "risk_on"
+    return "neutral"
 
 
 def _recent_feature_items(by_name: dict[str, list[FeatureValue]], feature_name: str, cutoff_ms: int) -> list[FeatureValue]:

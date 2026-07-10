@@ -15,12 +15,14 @@ class PortfolioAllocator:
         min_risk_adjusted_utility: float = 0.25,
         max_single_name_exposure_pct: float = 20.0,
         risk_pct_per_trade: float = 0.25,
+        news_risk_overlay_mode: str = "shadow",
         repository: Any | None = None,
     ):
         self.min_net_ev_bps = min_net_ev_bps
         self.min_risk_adjusted_utility = min_risk_adjusted_utility
         self.max_single_name_exposure_pct = max_single_name_exposure_pct
         self.risk_pct_per_trade = risk_pct_per_trade
+        self.news_risk_overlay_mode = str(news_risk_overlay_mode)
         self.repository = repository
 
     async def allocate(
@@ -53,6 +55,31 @@ class PortfolioAllocator:
         risk_sized_notional = risk_budget / (stop_loss_bps / 10_000.0)
         single_name_cap = equity * self.max_single_name_exposure_pct / 100.0
         allocated_notional = min(risk_sized_notional, single_name_cap)
+        max_size_multiplier = 1.0
+        news_mode = regime.news_risk_mode if regime is not None else "neutral"
+        observed_news_mode = (
+            str(regime.metadata.get("observed_news_risk_mode") or news_mode)
+            if regime is not None
+            else "neutral"
+        )
+        shadow_adjustment: dict[str, Any] = {
+            "mode": observed_news_mode,
+            "effective_mode": news_mode,
+            "would_block": False,
+            "would_size_multiplier": 1.0,
+        }
+        if observed_news_mode == "shock":
+            shadow_adjustment["would_block"] = True
+            if self.news_risk_overlay_mode == "active":
+                reason_codes.append("news_shock_blocks_new_risk")
+                status = "skip"
+        elif observed_news_mode == "risk_off" and candidate.side == "long":
+            shadow_adjustment["would_size_multiplier"] = 0.5
+            if self.news_risk_overlay_mode == "active":
+                max_size_multiplier = 0.5
+                allocated_notional *= 0.5
+                risk_budget *= 0.5
+                reason_codes.append("news_risk_off_long_size_reduction")
         if status == "skip":
             allocated_notional = 0.0
             risk_budget = 0.0
@@ -66,16 +93,20 @@ class PortfolioAllocator:
             allocated_size=size,
             allocated_notional_usd=allocated_notional,
             risk_usd=risk_budget,
-            max_size_multiplier=1.0,
+            max_size_multiplier=max_size_multiplier,
             constraints={
                 "equity_usd": equity,
                 "risk_pct_per_trade": self.risk_pct_per_trade,
                 "stop_loss_bps": stop_loss_bps,
                 "max_single_name_exposure_pct": self.max_single_name_exposure_pct,
                 "single_name_cap_usd": single_name_cap,
+                "news_risk_mode": news_mode,
+                "observed_news_risk_mode": observed_news_mode,
+                "news_risk_overlay_mode": self.news_risk_overlay_mode,
             },
             reason_codes=reason_codes,
             created_at_ms=now_ms(),
+            metadata={"news_risk_overlay": shadow_adjustment},
         )
         return allocation
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -12,6 +13,7 @@ from hyperliquid_trading_agent.app.newswire.keyword_matcher import score_importa
 
 BULLISH_WORDS = {"approval", "approved", "partnership", "surge", "rally", "inflow", "record", "breakout", "buyback", "listing"}
 BEARISH_WORDS = {"hack", "exploit", "lawsuit", "selloff", "outflow", "liquidation", "ban", "downgrade", "default", "rejection"}
+_SAFE_CASE_INSENSITIVE_TICKERS = {"BTC", "ETH", "SOL", "XRP", "BNB"}
 
 
 class AutonomyNewswire:
@@ -90,10 +92,19 @@ class AutonomyNewswire:
 
 def tag_assets(text: str, symbols: list[str]) -> list[str]:
     upper = text.upper()
-    tagged = []
+    tagged: list[str] = []
     for symbol in symbols:
         token = symbol.upper()
-        if token and (f" {token} " in f" {upper} " or f"${token}" in upper):
+        if not token:
+            continue
+        cashtag = re.search(rf"(?<![A-Za-z0-9])\${re.escape(token)}(?![A-Za-z0-9])", text, re.I)
+        case_insensitive = len(token) >= 4 or token in _SAFE_CASE_INSENSITIVE_TICKERS
+        plain = re.search(
+            rf"(?<![A-Za-z0-9]){re.escape(token)}(?![A-Za-z0-9])",
+            text,
+            re.I if case_insensitive else 0,
+        )
+        if cashtag or plain:
             tagged.append(token)
     if "HYPERLIQUID" in upper and "HYPE" in {symbol.upper() for symbol in symbols}:
         tagged.append("HYPE")
@@ -106,8 +117,8 @@ def score_importance(title: str, text: str, query: str = "", public_metrics: Any
 
 def score_sentiment(text: str) -> Literal["bullish", "bearish", "mixed", "unknown"]:
     lowered = text.lower()
-    bullish = sum(1 for word in BULLISH_WORDS if word in lowered)
-    bearish = sum(1 for word in BEARISH_WORDS if word in lowered)
+    bullish = sum(1 for word in BULLISH_WORDS if _term_present(lowered, word))
+    bearish = sum(1 for word in BEARISH_WORDS if _term_present(lowered, word))
     if bullish > bearish:
         return "bullish"
     if bearish > bullish:
@@ -115,6 +126,10 @@ def score_sentiment(text: str) -> Literal["bullish", "bearish", "mixed", "unknow
     if bullish or bearish:
         return "mixed"
     return "unknown"
+
+
+def _term_present(text: str, term: str) -> bool:
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text))
 
 
 def _public_metric_score(metrics: Any) -> float:

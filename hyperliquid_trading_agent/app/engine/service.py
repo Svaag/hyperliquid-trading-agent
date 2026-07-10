@@ -71,6 +71,7 @@ class InstitutionalEngineService:
         self.regime_engine = RegimeEngine(
             news_catalyst_threshold=getattr(settings, "engine_news_catalyst_threshold", 0.35),
             news_catalyst_ttl_ms=int(getattr(settings, "engine_news_catalyst_ttl_seconds", 3600)) * 1000,
+            news_risk_overlay_mode=getattr(settings, "engine_news_risk_overlay_mode", "shadow"),
         )
         self.candidate_book = CandidateBook(repository)
         self.scorer = EVScorerService(repository)
@@ -79,6 +80,7 @@ class InstitutionalEngineService:
             min_risk_adjusted_utility=settings.engine_min_risk_adjusted_utility,
             max_single_name_exposure_pct=settings.autonomy_paper_max_single_name_exposure_pct,
             risk_pct_per_trade=settings.autonomy_paper_risk_pct_per_trade,
+            news_risk_overlay_mode=getattr(settings, "engine_news_risk_overlay_mode", "shadow"),
             repository=repository,
         )
         self.pack_builder = EvidencePackBuilder()
@@ -93,8 +95,13 @@ class InstitutionalEngineService:
         self.strategy_registry = create_default_strategy_registry(
             catalog_mode=getattr(settings, "engine_alpha_catalog_mode", "wave1a_locked"),
             enable_wave_1c=bool(getattr(settings, "engine_wave1c_enabled", False)),
+            news_event_alpha_mode=getattr(settings, "engine_news_alpha_mode", "off"),
         )
         self.strategies = self.strategy_registry.strategies(enabled_only=True)
+        for strategy in self.strategies:
+            configure = getattr(strategy, "configure", None)
+            if callable(configure):
+                configure(settings)
         self.last_run_at_ms: int | None = None
         self.last_error: str | None = None
         self.last_run_duration_ms: float | None = None
@@ -632,6 +639,12 @@ class InstitutionalEngineService:
     def _order_intent(self, candidate: AlphaCandidate, model_version_id: str, allocation_id: str, size: float, notional: float, ts: int) -> OrderIntent:
         side = "buy" if candidate.side == "long" else "sell"
         mode = "shadow" if self.settings.engine_shadow_enabled and not self.settings.engine_paper_enabled else "paper"
+        if candidate.strategy_id == "news_event_alpha_v2":
+            # A Newswire strategy configured for shadow evaluation must stay shadow even
+            # when the wider engine is paper-enabled.  "paper" remains subject to the
+            # engine's global paper switch; no Newswire path has live authority.
+            news_mode = str(candidate.metadata.get("news_alpha_mode") or "shadow")
+            mode = "paper" if news_mode == "paper" and self.settings.engine_paper_enabled else "shadow"
         return OrderIntent(
             intent_id="intent_" + candidate.candidate_id.removeprefix("cand_"),
             parent_candidate_id=candidate.candidate_id,

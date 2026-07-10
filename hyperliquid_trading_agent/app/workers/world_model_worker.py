@@ -5,7 +5,7 @@ from typing import Any
 
 from hyperliquid_trading_agent.app.config import ServiceRole, Settings
 from hyperliquid_trading_agent.app.workers.base import BaseWorker
-from hyperliquid_trading_agent.app.workers.stored_newswire_pump import StoredNewswirePump
+from hyperliquid_trading_agent.app.workers.stored_newswire_story_pump import StoredNewswireStoryPump
 from hyperliquid_trading_agent.app.world_model.adapters import WorldModelAdapterService
 from hyperliquid_trading_agent.app.world_model.reducer import now_ms
 from hyperliquid_trading_agent.app.world_model.schemas import WorldEvent
@@ -22,13 +22,13 @@ class WorldModelWorker(BaseWorker):
         self.service: WorldModelService | None = None
         self.adapter_service: WorldModelAdapterService | None = None
         self.stream_service: WorldModelStreamService | None = None
-        self.pump: StoredNewswirePump | None = None
+        self.pump: StoredNewswireStoryPump | None = None
 
     async def run(self) -> None:
         self.service = WorldModelService(settings=self.settings, repository=self.repository)
         self.adapter_service = WorldModelAdapterService(settings=self.settings, world_model_service=self.service)
         self.stream_service = WorldModelStreamService(settings=self.settings, world_model_service=self.service)
-        self.pump = StoredNewswirePump(
+        self.pump = StoredNewswireStoryPump(
             consumer_name="world_model:newswire",
             repository=self.repository,
             callbacks=[self.service.observe_newswire_event],

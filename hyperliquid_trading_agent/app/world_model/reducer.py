@@ -7,6 +7,7 @@ from typing import Any
 
 from hyperliquid_trading_agent.app.world_model.schemas import (
     BeliefDirection,
+    BeliefKind,
     MarketBelief,
     NarrativeCluster,
     PredictionMarketSignal,
@@ -42,6 +43,12 @@ class WorldModelReducer:
     def observe_event(self, event: WorldEvent) -> list[MarketBelief]:
         self.events[event.event_id] = event
         self._trim_events()
+        story_id = str(event.metadata.get("story_id") or "")
+        if story_id and bool(event.metadata.get("retracted")):
+            affected = self._supersede_story_beliefs(story_id, event.computed_ts_ms)
+            self._refresh_narratives()
+            self.last_update_at_ms = event.computed_ts_ms
+            return affected
         self._update_source_credibility(event)
         beliefs = self._beliefs_from_event(event)
         for belief in beliefs:
@@ -183,14 +190,19 @@ class WorldModelReducer:
         if event.importance_score < 10 and event.source_type in {"newswire", "social"}:
             return []
         direction = _direction(event.sentiment)
-        kind = "catalyst" if event.source_type in {"newswire", "social"} else "memory"
+        kind: BeliefKind = "catalyst" if event.source_type in {"newswire", "social"} else "memory"
         subject = _subject(event)
         statement = _event_statement(event)
         confidence = _clamp(0.15 + event.source_score * 0.35 + event.confidence * 0.25 + (event.importance_score / 100.0) * 0.25)
         salience = _clamp((event.importance_score / 100.0) * 0.65 + confidence * 0.35)
         ttl_ms = 7 * 86_400_000 if kind == "catalyst" else 30 * 86_400_000
+        story_id = str(event.metadata.get("story_id") or "")
         belief = MarketBelief(
-            belief_id=_stable_id("bel", event.event_id, kind, subject),
+            belief_id=(
+                _stable_id("bel", story_id, kind)
+                if story_id
+                else _stable_id("bel", event.event_id, kind, subject)
+            ),
             kind=kind,
             subject=subject,
             statement=statement,
@@ -203,20 +215,49 @@ class WorldModelReducer:
             created_at_ms=event.computed_ts_ms,
             updated_at_ms=event.computed_ts_ms,
             expires_at_ms=event.computed_ts_ms + ttl_ms,
-            metadata={"source_type": event.source_type, "event_type": event.event_type, "paper_only": True},
+            metadata={
+                "source_type": event.source_type,
+                "event_type": event.event_type,
+                "story_id": story_id or None,
+                "story_revision": event.metadata.get("story_revision"),
+                "paper_only": True,
+            },
         )
         return [belief]
+
+    def _supersede_story_beliefs(self, story_id: str, timestamp_ms: int) -> list[MarketBelief]:
+        affected: list[MarketBelief] = []
+        for belief_id, belief in list(self.beliefs.items()):
+            if str(belief.metadata.get("story_id") or "") != story_id or belief.status != "active":
+                continue
+            updated = belief.model_copy(
+                update={
+                    "status": "superseded",
+                    "updated_at_ms": timestamp_ms,
+                    "metadata": {**belief.metadata, "superseded_reason": "source_story_retracted"},
+                }
+            )
+            self.beliefs[belief_id] = updated
+            affected.append(updated)
+        return affected
 
     def _upsert_belief(self, belief: MarketBelief) -> None:
         existing = self.beliefs.get(belief.belief_id)
         if existing is not None:
             belief = existing.model_copy(
                 update={
+                    "subject": belief.subject,
+                    "statement": belief.statement,
+                    "symbols": belief.symbols,
+                    "topics": belief.topics,
+                    "direction": belief.direction,
                     "confidence": max(existing.confidence, belief.confidence),
                     "salience": max(existing.salience, belief.salience),
                     "evidence_event_ids": _dedupe([*existing.evidence_event_ids, *belief.evidence_event_ids])[-20:],
+                    "status": "active",
                     "updated_at_ms": max(existing.updated_at_ms, belief.updated_at_ms),
                     "expires_at_ms": max(existing.expires_at_ms or 0, belief.expires_at_ms or 0) or None,
+                    "metadata": {**existing.metadata, **belief.metadata},
                 }
             )
         contradictions = self._contradicting_beliefs(belief)

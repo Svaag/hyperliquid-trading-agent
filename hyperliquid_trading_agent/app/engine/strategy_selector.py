@@ -93,6 +93,10 @@ def _special_regime_match(valid_regimes: set[str], labels: set[str]) -> bool:
 
 
 def _news_risk_tier(regime: RegimeVector) -> str:
+    if regime.news_risk_mode == "shock":
+        return "event_shock"
+    if regime.news_risk_mode == "risk_off":
+        return "event_risk"
     tier = str(regime.derived_labels.get("news_risk_tier") or "").strip()
     if tier in {"no_event", "catalyst", "event_risk", "event_shock"}:
         return tier

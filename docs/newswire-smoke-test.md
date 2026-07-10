@@ -11,8 +11,9 @@ Run after enabling `ALPACA_NEWS_ENABLED=true` with valid API keys.
 - [ ] `DISCORD_BOT_TOKEN` is set for the send-only publisher
 - [ ] `NEWSWIRE_NEWS_CHANNEL_ID` is set to a Discord channel ID (for the curated news feed)
 - [ ] `ALPACA_NEWS_SYMBOLS=*` (or your watchlist like `AAPL,NVDA,MSFT,TSLA`)
-- [ ] `ENGINE_NEWS_MIN_IMPORTANCE` is set to the desired Institutional Engine gate (default `35`)
-- [ ] `NEWSWIRE_NEWS_MIN_IMPORTANCE` is set to the desired Discord #news gate (default `60`; lower values can make the feed noisy)
+- [ ] `NEWSWIRE_ROUTING_MODE=active` (`shadow` computes V2 decisions but keeps legacy consumer routing)
+- [ ] `ENGINE_NEWS_RISK_OVERLAY_MODE=shadow` for the initial observation window
+- [ ] `ENGINE_NEWS_ALPHA_MODE=shadow` (or `off`) for the initial observation window
 
 ## Start-up Checks
 
@@ -30,6 +31,7 @@ docker compose --profile discord-publisher up -d discord-publisher
 ## Ingestion Pipeline
 
 - [ ] `curl http://127.0.0.1:8081/newswire/status` shows recent persisted Newswire activity
+- [ ] `curl 'http://127.0.0.1:8081/newswire/feed?limit=5'` returns clustered stories with `story_id`, `revision`, and `assessment`
 - [ ] `curl http://127.0.0.1:8081/newswire/events?source=alpaca&limit=5` returns Alpaca-sourced events with populated fields:
   - `event_id` starts with `nw_`
   - `headline` and `body` are non-empty
@@ -37,6 +39,8 @@ docker compose --profile discord-publisher up -d discord-publisher
   - `asset_class` is `"equity"` for stock news
   - `event_type` is classified (e.g., `"earnings"`, `"analyst_rating"`, `"press_release"`)
   - `importance_score` is between 0-100
+  - `assessment.assessment_version` is `newswire_assessment_v2`
+  - `assessment.feed_action` and `assessment.engine_action` are populated with reason codes
   - `tradability.allow_auto_trade` is `false`
   - `tradability.halt_state_checked` is `true`
 
@@ -44,25 +48,30 @@ docker compose --profile discord-publisher up -d discord-publisher
 
 - [ ] Wait a few minutes for repeated headlines
 - [ ] `curl http://127.0.0.1:8081/newswire/status` shows one latest event stream, not duplicate worker streams
-- [ ] No duplicate headlines in `http://127.0.0.1:8081/newswire/events?limit=50` (same `external_id` not appearing twice)
+- [ ] Repeated/corroborating reports appear as one `/newswire/feed` story with an increased `revision`/`independent_source_count`
+- [ ] Raw `newswire_events` still dedupe the same upstream `external_id`
 
 ## Discord Delivery
 
 - [ ] `POST /newswire/discord/test` returns an accepted command for `discord_publisher`; poll the returned `/commands/{id}` until completed
-- [ ] Breaking news (urgency=breaking or score >= NEWSWIRE_BREAKING_MIN_IMPORTANCE) appears immediately in the #news channel
-- [ ] Non-breaking news appears in periodic digest posts (every NEWSWIRE_DIGEST_INTERVAL_SECONDS)
+- [ ] V2 `high`/`breaking` stories appear immediately, capped by `NEWSWIRE_DISCORD_MAX_IMMEDIATE_PER_HOUR`
+- [ ] V2 `standard` stories appear in periodic digest posts (every `NEWSWIRE_DIGEST_INTERVAL_SECONDS`)
+- [ ] `/newswire/status` reports Discord gateway `ready=true`; a merely running worker is not reported as ready
+- [ ] `/newswire/status` reports a healthy delivery outbox with no growing `failed`/old `pending` count
 - [ ] Messages render as a single Discord embed without a duplicated plaintext digest
 - [ ] Headlines render decoded punctuation such as apostrophes instead of HTML entities like `&#39;`
 - [ ] Halt-state events (`⛔ Halt state`) show the halt warning when applicable
 
 ## Institutional Engine Delivery
 
-The `trader` worker consumes persisted Newswire rows through `trader:engine_newswire`; it does not own Alpaca/RSS/X/TradingEconomics connections.
+The `trader` worker consumes persisted canonical story revisions through `trader:engine_newswire`; it does not own Alpaca/RSS/X/TradingEconomics connections.
 
 - [ ] `curl http://127.0.0.1:8081/runtime/offsets` includes `trader:engine_newswire`
 - [ ] `curl http://127.0.0.1:8081/runtime/heartbeats?service_role=trader` shows `metadata.engine_newsfeed.pump.running=true`
-- [ ] Fresh events with `importance_score >= ENGINE_NEWS_MIN_IMPORTANCE` and symbols in the engine core universe (`BTC,ETH,HYPE` by default) appear in `/engine/events?event_type=newswire`
-- [ ] Macro events without symbols require `importance_score >= ENGINE_NEWS_MACRO_MIN_IMPORTANCE` to proxy into core symbols
+- [ ] Stories with `assessment.engine_action != ignore` appear as appropriate in `/engine/events?event_type=newswire`
+- [ ] `GET /newswire/risk-state` exposes persisted state/evidence and transition history
+- [ ] With overlay mode `shadow`, regime metadata shows the observed news mode while effective permissions/sizing remain unchanged
+- [ ] `directional_feature` stories require trusted/corroborated sources and market confirmation before `news_event_alpha_v2` emits
 - [ ] Engine news features are advisory only: no Discord news post or engine news event places a trade
 
 ## WebSocket Stream
@@ -78,10 +87,11 @@ The `trader` worker consumes persisted Newswire rows through `trader:engine_news
 - [ ] `curl http://127.0.0.1:8081/newswire/status` reports degraded/latest state but the API remains healthy
 - [ ] `curl http://127.0.0.1:8081/newswire/sources` — `"alpaca"` shows `"transport":"websocket"` with correct source score
 
-## Threshold Reference
+## Routing Reference
 
-- Discord #news: `NEWSWIRE_NEWS_MIN_IMPORTANCE`; breaking/immediate posts use `NEWSWIRE_BREAKING_MIN_IMPORTANCE`, otherwise qualifying items roll into `NEWSWIRE_DIGEST_INTERVAL_SECONDS` digests.
-- Institutional Engine: `ENGINE_NEWS_MIN_IMPORTANCE` for event admission, `ENGINE_NEWS_MIN_SOURCE_SCORE` for feature derivation, `ENGINE_NEWS_MACRO_MIN_IMPORTANCE` for macro proxying, and `ENGINE_NEWS_CATALYST_THRESHOLD` for regime `news_state=catalyst`.
+- Discord #news: `assessment.feed_action` drives drop/watch/standard/high/breaking routing. Legacy importance thresholds apply only when V2 routing is shadowed or an old event has no assessment.
+- Institutional Engine: `assessment.engine_action` drives ledger/risk/directional/macro routing. `ENGINE_NEWS_MIN_SOURCE_SCORE` remains a final source-quality guard.
+- Risk state: `ENGINE_NEWS_RISK_*` controls decay, TTLs, transition thresholds, hysteresis, and `shadow|active` application.
 
 ## End-to-End with Autonomy
 
