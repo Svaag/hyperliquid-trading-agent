@@ -11,6 +11,7 @@ from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.newswire.policy import EngineAction, NewsDecision, NewswireAction
 from hyperliquid_trading_agent.app.newswire.schemas import (
+    AudienceScope,
     EngineRouteAction,
     FeedAction,
     NewswireAssessment,
@@ -22,7 +23,7 @@ from hyperliquid_trading_agent.app.newswire.watchlist import EntityMatch
 
 log = get_logger(__name__)
 
-ASSESSMENT_VERSION = "newswire_assessment_v2"
+ASSESSMENT_VERSION = "newswire_assessment_v2.1"
 
 _SYSTEMIC_TYPES = {"halt", "regulatory", "crypto_protocol", "exchange_status", "macro"}
 _HIGH_IMPACT_TERMS = (
@@ -84,7 +85,8 @@ class NewswireAssessor:
         self.settings = settings
 
     def assess(self, event: NewswireEvent, story: NewswireStory, entity: EntityMatch) -> NewswireAssessment:
-        relevance, relevance_reason = _relevance(event, entity)
+        audience_scope = _audience_scope(event, entity)
+        relevance, relevance_reason = _relevance(event, entity, audience_scope)
         impact, impact_reasons = _impact(event, entity.topics)
         urgency, urgency_reason = _urgency(event)
         source_quality = round(max(0.0, min(100.0, float(event.source_score or 0.0) * 100.0)), 4)
@@ -93,7 +95,15 @@ class NewswireAssessor:
         direction_confidence = _direction_confidence(event, impact, source_quality)
         risk_bias = _risk_bias(event.sentiment)
         risk_severity = _risk_severity(event, impact)
-        feed_action, penalties = _feed_action(event, story, entity, priority, source_quality, impact)
+        feed_action, penalties = _feed_action(
+            event,
+            story,
+            entity,
+            priority,
+            source_quality,
+            impact,
+            audience_scope=audience_scope,
+        )
         engine_action = _engine_action(
             event,
             story,
@@ -102,6 +112,13 @@ class NewswireAssessor:
             source_quality=source_quality,
             direction_confidence=direction_confidence,
             risk_severity=risk_severity,
+            audience_scope=audience_scope,
+        )
+        model_review_required, model_review_reason = self.model_review_eligibility(
+            event,
+            entity,
+            priority,
+            audience_scope=audience_scope,
         )
         decision_id = _decision_id(story.story_id, story.revision, ASSESSMENT_VERSION)
         reasons = [
@@ -111,14 +128,17 @@ class NewswireAssessor:
             f"source_quality:{source_quality:.1f}",
             novelty_reason,
             f"priority:{priority:.1f}",
+            f"audience_scope:{audience_scope}",
             f"feed_action:{feed_action}",
             f"engine_action:{engine_action}",
+            f"model_review:{model_review_reason}",
         ]
         return NewswireAssessment(
             decision_id=decision_id,
             story_id=story.story_id,
             story_revision=story.revision,
             watch_priority=entity.watch_priority,
+            audience_scope=audience_scope,
             matched_symbols=list(entity.symbols),
             symbol_match_reasons=dict(entity.reasons),
             topics=list(entity.topics),
@@ -136,21 +156,41 @@ class NewswireAssessor:
             engine_action=engine_action,
             reason_codes=reasons,
             penalty_codes=penalties,
-            model_review_state="pending" if self.should_model_review(event, entity, impact, priority) else "not_required",
+            model_review_state="pending" if model_review_required else "not_required",
             assessed_at_ms=_now_ms(),
         )
 
     def should_model_review(self, event: NewswireEvent, entity: EntityMatch, impact: float, priority: float) -> bool:
-        if not getattr(self.settings, "newswire_model_classify_enabled", True):
-            return False
-        near_boundary = any(abs(priority - boundary) <= 8 for boundary in (35, 50, 70, 80))
-        uncertain_direction = event.sentiment == "unknown" and impact >= 50
-        generic_material = event.event_type in {"headline", "other"} and impact >= 45
-        uncertain_symbol = bool(entity.symbols) and any(
-            all(reason.startswith("ticker") or reason == "uppercase_ticker" for reason in reasons)
-            for reasons in entity.reasons.values()
+        required, _ = self.model_review_eligibility(
+            event,
+            entity,
+            priority,
+            audience_scope=_audience_scope(event, entity),
         )
-        return near_boundary or uncertain_direction or generic_material or uncertain_symbol
+        return required
+
+    def model_review_eligibility(
+        self,
+        event: NewswireEvent,
+        entity: EntityMatch,
+        priority: float,
+        *,
+        audience_scope: AudienceScope,
+    ) -> tuple[bool, str]:
+        if not getattr(self.settings, "newswire_model_classify_enabled", True):
+            return False, "disabled"
+        if event.freshness == "stale":
+            return False, "stale"
+        if bool(event.metadata.get("newswire_startup_backlog")):
+            return False, "startup_backlog"
+        if bool(event.metadata.get("newswire_reclassification")) or bool(event.metadata.get("replay")):
+            return False, "offline_operation"
+        if event.asset_class == "equity" and audience_scope == "unwatched_single_name":
+            return False, "unwatched_equity"
+        boundary = next((item for item in (35.0, 50.0, 70.0, 80.0) if abs(priority - item) <= 3.0), None)
+        if boundary is None:
+            return False, "outside_boundary_band"
+        return True, f"boundary_{int(boundary)}"
 
     def apply_model_review(
         self,
@@ -188,6 +228,7 @@ class NewswireAssessor:
             priority,
             assessment.source_quality_score,
             adjusted_impact,
+            audience_scope=assessment.audience_scope,
         )
         # A model can move one tier and can never independently manufacture breaking.
         max_rank = min(3, _ACTION_RANK[assessment.feed_action] + 1)
@@ -203,6 +244,7 @@ class NewswireAssessor:
             source_quality=assessment.source_quality_score,
             direction_confidence=direction_confidence,
             risk_severity=risk_severity,
+            audience_scope=assessment.audience_scope,
         )
         return assessment.model_copy(
             update={
@@ -229,10 +271,67 @@ class SelectiveAssessmentReviewer:
         self.model_gateway = model_gateway
         self._call_times: list[float] = []
         self._cache: dict[str, ModelAssessmentResult] = {}
+        self._queue: asyncio.Queue[
+            tuple[NewswireEvent, NewswireAssessment, asyncio.Future[tuple[ModelAssessmentResult | None, str]]]
+        ] = asyncio.Queue(maxsize=max(1, int(getattr(settings, "newswire_model_classify_queue_size", 32))))
+        self._worker_task: asyncio.Task[None] | None = None
+        self.queue_dropped = 0
+        self.completed = 0
+        self.fallbacks = 0
+
+    async def start(self) -> None:
+        if self.model_gateway is not None and (self._worker_task is None or self._worker_task.done()):
+            self._worker_task = asyncio.create_task(self._run(), name="newswire-model-review")
+
+    async def stop(self) -> None:
+        if self._worker_task is None:
+            return
+        self._worker_task.cancel()
+        try:
+            await self._worker_task
+        except asyncio.CancelledError:
+            pass
+        self._worker_task = None
+        while not self._queue.empty():
+            _, _, future = self._queue.get_nowait()
+            if not future.done():
+                future.set_result((None, "fallback"))
+            self._queue.task_done()
 
     async def review(self, event: NewswireEvent, assessment: NewswireAssessment) -> tuple[ModelAssessmentResult | None, str]:
         if self.model_gateway is None:
             return None, "unavailable"
+        await self.start()
+        future: asyncio.Future[tuple[ModelAssessmentResult | None, str]] = asyncio.get_running_loop().create_future()
+        try:
+            self._queue.put_nowait((event, assessment, future))
+        except asyncio.QueueFull:
+            self.queue_dropped += 1
+            return None, "fallback"
+        return await future
+
+    async def _run(self) -> None:
+        while True:
+            event, assessment, future = await self._queue.get()
+            try:
+                result = await self._review_once(event, assessment)
+                self.completed += 1
+                if result[0] is None:
+                    self.fallbacks += 1
+                if not future.done():
+                    future.set_result(result)
+            except asyncio.CancelledError:
+                if not future.done():
+                    future.set_result((None, "fallback"))
+                raise
+            finally:
+                self._queue.task_done()
+
+    async def _review_once(
+        self,
+        event: NewswireEvent,
+        assessment: NewswireAssessment,
+    ) -> tuple[ModelAssessmentResult | None, str]:
         cache_key = hashlib.sha1(f"{event.headline}\n{event.body}".encode()).hexdigest()
         if cache_key in self._cache:
             return self._cache[cache_key], "applied"
@@ -250,11 +349,33 @@ class SelectiveAssessmentReviewer:
         )
         system = "You are a cautious financial-news classifier. Never invent tickers, facts, or confirmations."
         try:
+            gateway = self.model_gateway
+            if gateway is None:
+                return None, "unavailable"
+            configured = [
+                attempt.model
+                for attempt in gateway.configured_attempts()
+                if getattr(attempt, "missing_reason", None) is None
+            ]
+            model_chain = configured[:1] or list(getattr(self.settings, "model_chain", []))[:1]
+            if not model_chain:
+                return None, "unavailable"
             response = await asyncio.wait_for(
-                self.model_gateway.complete_structured(prompt, system, ModelAssessmentResult, max_tokens=350),
+                gateway.complete_with_chain(
+                    prompt,
+                    system
+                    + " Return one valid JSON object only with event_type, symbols, direction, risk_bias, impact_band, confidence, and rationale.",
+                    model_chain=model_chain,
+                    temperature=0.0,
+                    max_tokens=350,
+                    attempt_timeout_budget=max(
+                        1.0,
+                        float(getattr(self.settings, "newswire_model_classify_timeout_seconds", 5.0)),
+                    ),
+                ),
                 timeout=max(1.0, float(getattr(self.settings, "newswire_model_classify_timeout_seconds", 5.0))),
             )
-            result: ModelAssessmentResult = response.parsed
+            result = ModelAssessmentResult.model_validate_json(response.content)
             self._cache[cache_key] = result
             if len(self._cache) > 1000:
                 self._cache.pop(next(iter(self._cache)))
@@ -268,7 +389,18 @@ class SelectiveAssessmentReviewer:
     def status(self) -> dict[str, Any]:
         now = time.monotonic()
         calls = len([item for item in self._call_times if now - item < 3600])
-        return {"configured": self.model_gateway is not None, "calls_last_hour": calls, "cache_entries": len(self._cache)}
+        return {
+            "configured": self.model_gateway is not None,
+            "running": self._worker_task is not None and not self._worker_task.done(),
+            "calls_last_hour": calls,
+            "cache_entries": len(self._cache),
+            "queue_depth": self._queue.qsize(),
+            "queue_capacity": self._queue.maxsize,
+            "queue_dropped": self.queue_dropped,
+            "completed": self.completed,
+            "fallbacks": self.fallbacks,
+            "attempt_policy": "one_model_call_no_repair",
+        }
 
 
 def assessment_to_decision(event: NewswireEvent, story: NewswireStory, assessment: NewswireAssessment) -> NewsDecision:
@@ -290,6 +422,7 @@ def assessment_to_decision(event: NewswireEvent, story: NewswireStory, assessmen
         asset_class=event.asset_class,
         features={
             "watch_priority": assessment.watch_priority,
+            "audience_scope": assessment.audience_scope,
             "topics": assessment.topics,
             "symbol_match_reasons": assessment.symbol_match_reasons,
             "model_review_state": assessment.model_review_state,
@@ -324,13 +457,33 @@ def assessment_to_decision(event: NewswireEvent, story: NewswireStory, assessmen
     )
 
 
-def _relevance(event: NewswireEvent, entity: EntityMatch) -> tuple[float, str]:
+def _audience_scope(event: NewswireEvent, entity: EntityMatch) -> AudienceScope:
+    if entity.watch_priority != "unwatched":
+        return "watched_asset"
+    systemic_macro = event.asset_class == "macro" and bool(set(entity.topics) & _SYSTEMIC_TOPICS)
+    broad_crypto_shock = event.asset_class == "crypto" and event.event_type in {"crypto_protocol", "exchange_status"}
+    if systemic_macro or broad_crypto_shock:
+        return "broad_market"
+    if event.asset_class == "equity" and bool(entity.symbols):
+        return "unwatched_single_name"
+    return "general"
+
+
+def _relevance(
+    event: NewswireEvent,
+    entity: EntityMatch,
+    audience_scope: AudienceScope,
+) -> tuple[float, str]:
     score_by_priority = {"position": 100.0, "core": 90.0, "active": 82.0, "top_volume": 70.0, "unwatched": 0.0}
     if entity.watch_priority != "unwatched":
         score = score_by_priority[entity.watch_priority]
         return score, f"watch_priority:{entity.watch_priority}"
-    if event.asset_class == "macro" and set(entity.topics) & _SYSTEMIC_TOPICS:
+    if audience_scope == "broad_market" and event.asset_class == "macro":
         return 75.0, "systemic_macro_scope"
+    if audience_scope == "broad_market":
+        return 65.0, "broad_market_scope"
+    if audience_scope == "unwatched_single_name":
+        return 25.0, "unwatched_single_name_scope"
     if event.asset_class == "crypto":
         return 45.0, "broad_crypto_scope"
     if event.symbols:
@@ -427,6 +580,8 @@ def _feed_action(
     priority: float,
     source_quality: float,
     impact: float,
+    *,
+    audience_scope: AudienceScope,
 ) -> tuple[FeedAction, list[str]]:
     penalties: list[str] = []
     if event.action == "removed" or story.status == "retracted":
@@ -435,7 +590,16 @@ def _feed_action(
         return "drop", ["stale"]
     if story.revision > 1 and story.metadata.get("last_update_type") == "duplicate":
         return "drop", ["duplicate"]
-    trusted_shock = source_quality >= 85 and impact >= 85 and event.event_type in _SYSTEMIC_TYPES
+    trusted_shock = (
+        audience_scope in {"watched_asset", "broad_market"}
+        and source_quality >= 85
+        and impact >= 85
+        and event.event_type in _SYSTEMIC_TYPES
+    )
+    if audience_scope == "unwatched_single_name":
+        if priority >= 35 or source_quality >= 85 or impact >= 85:
+            return "watch", ["unwatched_single_name_cap"]
+        return "drop", ["unwatched_single_name_cap"]
     if trusted_shock or priority >= 80:
         return "breaking", penalties
     if priority >= 70:
@@ -458,17 +622,25 @@ def _engine_action(
     source_quality: float,
     direction_confidence: float,
     risk_severity: float,
+    audience_scope: AudienceScope,
 ) -> EngineRouteAction:
     if event.freshness == "stale" or event.action == "removed" or story.status == "retracted":
         return "ignore"
     systemic_macro = event.asset_class == "macro" and bool(set(entity.topics) & _SYSTEMIC_TOPICS)
     if systemic_macro and impact >= 65 and source_quality >= 70:
         return "macro_proxy"
-    relevant = entity.watch_priority != "unwatched" or systemic_macro
+    relevant = audience_scope in {"watched_asset", "broad_market"} or systemic_macro
     if not relevant:
         return "ledger_only" if impact >= 55 and source_quality >= 60 else "ignore"
     corroborated = source_quality >= 90 or story.independent_source_count >= 2
-    if impact >= 65 and direction_confidence >= 0.70 and source_quality >= 70 and corroborated and entity.symbols:
+    if (
+        audience_scope == "watched_asset"
+        and impact >= 65
+        and direction_confidence >= 0.70
+        and source_quality >= 70
+        and corroborated
+        and entity.symbols
+    ):
         return "directional_feature"
     if risk_severity >= 0.55 and impact >= 55 and source_quality >= 60:
         return "risk_only"

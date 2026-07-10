@@ -21,6 +21,7 @@ from hyperliquid_trading_agent.app.engine.validation_report import (
     build_engine_validation_report,
     render_engine_validation_dashboard,
 )
+from hyperliquid_trading_agent.app.newswire.observability import build_engine_newsfeed_health
 
 RequireAuth = Callable[[Settings, str | None], None]
 
@@ -178,6 +179,30 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
         news_consumer = getattr(app.state, "engine_news_consumer", None)
         news_status = news_consumer.status() if news_consumer is not None and callable(getattr(news_consumer, "status", None)) else {}
         news_runtime = {} if news_status.get("running") else await _latest_trader_engine_newsfeed(repository)
+        try:
+            engine_news_offset = await repository.get_consumer_offset(
+                "trader:engine_newswire",
+                source_table="newswire_story_revisions",
+            )
+            latest_newswire_stories = await repository.list_newswire_stories(limit=1)
+            newswire_heartbeats = await repository.list_service_heartbeats(service_role="newswire", limit=5)
+        except Exception:
+            engine_news_offset = {}
+            latest_newswire_stories = []
+            newswire_heartbeats = []
+        newsfeed_health = build_engine_newsfeed_health(
+            settings,
+            news_runtime or {"consumer": news_status, "pump": {}},
+            engine_news_offset,
+            newswire_active=bool(
+                latest_newswire_stories and any(item.get("status") == "running" for item in newswire_heartbeats)
+            ),
+            latest_source_at_ms=(
+                int(latest_newswire_stories[0].get("last_updated_at_ms") or 0)
+                if latest_newswire_stories
+                else None
+            ),
+        )
         engine_runtime = await resolve_engine_runtime(repository, settings, local_service=service)
         operator_proposals_runtime = await _latest_trader_operator_proposals(repository)
         validation_monitor_runtime = await _latest_trader_validation_monitor(repository)
@@ -201,6 +226,7 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
             "operator_proposals": operator_proposals_runtime,
             "newsfeed": news_status,
             "newsfeed_runtime": news_runtime,
+            "newsfeed_health": newsfeed_health,
             "validation_monitor": validation_monitor_runtime
             or {**monitor_status, "running": False, "owner_role": "trader", "runtime_source": "awaiting_trader_heartbeat"},
             "pnl_attribution": pnl_status,

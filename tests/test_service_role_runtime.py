@@ -171,6 +171,7 @@ def test_api_runtime_status_and_command_intent_routes(monkeypatch: pytest.Monkey
     dashboard = client.get("/runtime/dashboard/data")
     assert dashboard.status_code == 200
     assert dashboard.json()["command_health"]["registered_command_count"] >= 1
+    assert "health" in dashboard.json()["newsfeed"]
     assert client.get("/runtime/dashboard").status_code == 200
     assert client.get("/runtime/command-registry").json()["count"] >= 1
     assert client.get("/runtime/offsets").json()["count"] == 1

@@ -50,6 +50,7 @@ class NewswireService:
         self.halt_gate = HaltStateGate()
         self.adapters: list[NewswireAdapter] = []
         self.running = False
+        self.started_at_ms = now_ms()
         self._tasks: list[asyncio.Task] = []
         self._adapter_tasks: list[asyncio.Task] = []
         self._worker_tasks: list[asyncio.Task] = []
@@ -114,8 +115,10 @@ class NewswireService:
         if not self.settings.newswire_enabled or self.running:
             return
         self.running = True
+        self.started_at_ms = now_ms()
         await self.watch_set.refresh_if_due(force=True)
         await self._hydrate_stories()
+        await self.model_reviewer.start()
         worker_count = max(1, int(self.settings.newswire_ingest_worker_count))
         for index in range(worker_count):
             task = asyncio.create_task(self._ingest_worker(), name=f"newswire-ingest-{index}")
@@ -154,6 +157,7 @@ class NewswireService:
             except asyncio.CancelledError:
                 pass
         self._worker_tasks = []
+        await self.model_reviewer.stop()
         self._tasks = []
 
     async def _supervise(self, adapter: NewswireAdapter) -> None:
@@ -251,6 +255,15 @@ class NewswireService:
             watch_priority=snapshot.priority_for(story.symbols),
         )
         assessment_event = story.to_event(update_type=update_type)
+        if self._is_startup_backlog(assessment_event):
+            assessment_event = assessment_event.model_copy(
+                update={
+                    "metadata": {
+                        **assessment_event.metadata,
+                        "newswire_startup_backlog": True,
+                    }
+                }
+            )
         assessment = self.assessor.assess(assessment_event, story, story_entity)
         if assessment.model_review_state == "pending":
             review, review_state = await self.model_reviewer.review(assessment_event, assessment)
@@ -307,6 +320,7 @@ class NewswireService:
             "policy_version": assessment.assessment_version,
             "policy_type": "static",
             "shadow_only": self.settings.newswire_routing_mode == "shadow",
+            "audience_scope": assessment.audience_scope,
             "newswire_action": assessment.feed_action,
             "engine_action": assessment.engine_action,
             "quality_score": decision.quality_score,
@@ -464,6 +478,12 @@ class NewswireService:
     def _record_drop(self, reason: str) -> None:
         self.dropped_events_by_reason[reason] = self.dropped_events_by_reason.get(reason, 0) + 1
 
+    def _is_startup_backlog(self, event: NewswireEvent) -> bool:
+        if event.published_at_ms is None:
+            return False
+        grace_ms = max(0, int(self.settings.newswire_discord_startup_grace_seconds)) * 1000
+        return int(event.published_at_ms) < self.started_at_ms - grace_ms
+
     def _index(self, event: NewswireEvent) -> None:
         self._by_id.pop(event.event_id, None)  # move-to-end on update
         self._by_id[event.event_id] = event
@@ -491,10 +511,128 @@ class NewswireService:
     def list_stories(self, *, limit: int = 100) -> list[NewswireStory]:
         return self.story_clusterer.list(limit=limit)
 
+    async def reclassify_stories(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Reassess stored stories without replaying them into live consumers."""
+        limit = max(1, min(5000, int(payload.get("limit") or 500)))
+        start_ms = max(0, int(payload.get("start_ms") or 0))
+        end_ms = max(start_ms, int(payload.get("end_ms") or now_ms()))
+        wanted_symbols = {str(symbol).upper() for symbol in payload.get("symbols") or [] if symbol}
+        wanted_source = str(payload.get("source") or "").strip().lower()
+        dry_run = bool(payload.get("dry_run", True))
+        repository = self.repository
+        if repository is not None and callable(getattr(repository, "list_newswire_stories", None)):
+            rows = await repository.list_newswire_stories(limit=limit)
+            stories = []
+            for row in rows:
+                try:
+                    stories.append(NewswireStory.model_validate(row))
+                except Exception:
+                    continue
+        else:
+            stories = self.list_stories(limit=limit)
+        stories = [
+            story
+            for story in stories
+            if start_ms <= story.last_updated_at_ms <= end_ms
+            and (not wanted_symbols or bool(wanted_symbols & {symbol.upper() for symbol in story.symbols}))
+            and (not wanted_source or story.source.lower() == wanted_source or wanted_source in {item.lower() for item in story.sources})
+        ]
+        snapshot = await self.watch_set.refresh_if_due(force=True)
+        changed = 0
+        unchanged = 0
+        applied = 0
+        deltas: list[dict[str, Any]] = []
+        async with self._story_pipeline_lock:
+            for story in stories:
+                projected = story.to_event(update_type="reclassified")
+                projected = projected.model_copy(
+                    update={
+                        "metadata": {
+                            **projected.metadata,
+                            "newswire_reclassification": True,
+                            "execution_authority": "none",
+                        }
+                    }
+                )
+                entity = resolve_entities(projected, snapshot)
+                combined_symbols = sorted(set([*story.symbols, *entity.symbols]))
+                story_entity = EntityMatch(
+                    symbols=combined_symbols,
+                    reasons={
+                        **entity.reasons,
+                        **{symbol: entity.reasons.get(symbol, ["story_member_symbol"]) for symbol in story.symbols},
+                    },
+                    topics=sorted(set([*story.topics, *entity.topics])),
+                    watch_priority=snapshot.priority_for(combined_symbols),
+                )
+                assessment = self.assessor.assess(projected, story, story_entity)
+                previous = story.assessment
+                is_changed = previous is None or (
+                    previous.assessment_version != assessment.assessment_version
+                    or previous.feed_action != assessment.feed_action
+                    or previous.engine_action != assessment.engine_action
+                    or previous.audience_scope != assessment.audience_scope
+                    or previous.priority_score != assessment.priority_score
+                )
+                changed += int(is_changed)
+                unchanged += int(not is_changed)
+                deltas.append(
+                    {
+                        "story_id": story.story_id,
+                        "previous_version": previous.assessment_version if previous else None,
+                        "assessment_version": assessment.assessment_version,
+                        "previous_feed_action": previous.feed_action if previous else None,
+                        "feed_action": assessment.feed_action,
+                        "previous_engine_action": previous.engine_action if previous else None,
+                        "engine_action": assessment.engine_action,
+                        "audience_scope": assessment.audience_scope,
+                        "priority_score": assessment.priority_score,
+                    }
+                )
+                if dry_run:
+                    continue
+                updated_story = story.model_copy(
+                    update={
+                        "assessment": assessment,
+                        "metadata": {
+                            **story.metadata,
+                            "reclassified_at_ms": now_ms(),
+                            "reclassified_from_version": previous.assessment_version if previous else None,
+                            "last_reclassification_execution_authority": "none",
+                        },
+                    }
+                )
+                self.story_clusterer.replace(updated_story)
+                if repository is not None and getattr(repository, "enabled", False):
+                    await self._persist_story(updated_story.model_dump(mode="json"))
+                    decision = assessment_to_decision(projected, updated_story, assessment)
+                    await self._persist_decision(decision.model_dump(mode="json"))
+                applied += 1
+        return {
+            "assessment_version": ASSESSMENT_VERSION,
+            "dry_run": dry_run,
+            "scanned": len(stories),
+            "changed": changed,
+            "unchanged": unchanged,
+            "applied": applied,
+            "filters": {
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "symbols": sorted(wanted_symbols),
+                "source": wanted_source or None,
+                "limit": limit,
+            },
+            "deltas": deltas[:250],
+            "execution_authority": "none",
+            "published_to_live_bus": False,
+            "live_consumer_offset_mutated": False,
+        }
+
     def status(self) -> dict[str, Any]:
         return {
             "enabled": self.settings.newswire_enabled,
             "running": self.running,
+            "started_at_ms": self.started_at_ms,
             "adapters": [self._adapter_status(adapter) for adapter in self.adapters],
             "configured_adapter_names": [adapter.name for adapter in self.adapters],
             "adapter_errors": self.adapter_errors,

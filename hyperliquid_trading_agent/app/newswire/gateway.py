@@ -10,8 +10,14 @@ from pydantic import BaseModel, Field, ValidationError
 
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.logging import get_logger
+from hyperliquid_trading_agent.app.newswire.assessment import ASSESSMENT_VERSION
+from hyperliquid_trading_agent.app.newswire.calibration import build_calibration_report
 from hyperliquid_trading_agent.app.newswire.classify import SOURCE_SCORES
 from hyperliquid_trading_agent.app.newswire.learning import train_contextual_bandit_policy
+from hyperliquid_trading_agent.app.newswire.observability import (
+    build_engine_newsfeed_health,
+    build_newswire_soak_readiness,
+)
 from hyperliquid_trading_agent.app.newswire.policy import NewsEval
 from hyperliquid_trading_agent.app.newswire.reward import build_reward
 from hyperliquid_trading_agent.app.newswire.schemas import (
@@ -54,6 +60,26 @@ class NewswireRewardBuildRequest(BaseModel):
 class NewswirePolicyTrainRequest(BaseModel):
     min_rows: int | None = None
     limit: int = 5000
+
+
+class NewswireReclassifyRequest(BaseModel):
+    start_ms: int = Field(default=0, ge=0)
+    end_ms: int | None = Field(default=None, ge=1)
+    symbols: list[str] = Field(default_factory=list, max_length=100)
+    source: str | None = Field(default=None, max_length=64)
+    limit: int = Field(default=500, ge=1, le=5000)
+    dry_run: bool = True
+
+
+class NewswireReplayRequest(BaseModel):
+    start_ms: int | None = Field(default=None, ge=1)
+    end_ms: int | None = Field(default=None, ge=1)
+    window_hours: int = Field(default=24, ge=1, le=24 * 30)
+    symbols: list[str] = Field(default_factory=list, max_length=100)
+    source: str | None = Field(default=None, max_length=64)
+    min_importance: float = Field(default=0.0, ge=0.0, le=100.0)
+    limit: int = Field(default=1000, ge=1, le=5000)
+    dry_run: bool = True
 
 
 def register_newswire_routes(app: FastAPI) -> None:
@@ -132,6 +158,7 @@ async def list_newswire_feed(
     topic: str | None = None,
     status: str | None = None,
     feed_action: str | None = None,
+    audience_scope: str | None = None,
     min_priority: float = 0.0,
     include_dropped: bool = False,
     limit: int = 100,
@@ -170,6 +197,8 @@ async def list_newswire_feed(
             continue
         if assessment is not None and assessment.priority_score < min_priority:
             continue
+        if audience_scope and (assessment is None or assessment.audience_scope != audience_scope):
+            continue
         if topic and topic.lower() not in {item.lower() for item in story.topics}:
             continue
         stories.append(story)
@@ -179,7 +208,7 @@ async def list_newswire_feed(
         "items": [story.model_dump(mode="json") for story in stories],
         "count": len(stories),
         "view": "canonical_stories",
-        "assessment_version": "newswire_assessment_v2",
+        "assessment_version": ASSESSMENT_VERSION,
     }
 
 
@@ -260,6 +289,11 @@ async def newswire_status(request: Request, authorization: str | None = Header(d
         risk_states = await repo.list_newswire_risk_states(limit=100)
         newswire_workers = await repo.list_service_heartbeats(service_role="newswire", limit=10)
         publisher_workers = await repo.list_service_heartbeats(service_role="discord_publisher", limit=10)
+        trader_workers = await repo.list_service_heartbeats(service_role="trader", limit=10)
+        engine_offset = await repo.get_consumer_offset(
+            "trader:engine_newswire",
+            source_table="newswire_story_revisions",
+        )
     except Exception:
         service = getattr(request.app.state, "newswire_service", None)
         status = service.status() if service is not None else {"enabled": request.app.state.settings.newswire_enabled, "running": False}
@@ -273,6 +307,18 @@ async def newswire_status(request: Request, authorization: str | None = Header(d
     engine_action_counts = Counter(
         str((story.get("assessment") or {}).get("engine_action") or "unassessed") for story in latest_stories
     )
+    trader = next((item for item in trader_workers if item.get("status") == "running"), None)
+    raw_trader_metadata = trader.get("metadata") if isinstance(trader, dict) else None
+    trader_metadata = dict(raw_trader_metadata) if isinstance(raw_trader_metadata, dict) else {}
+    raw_newsfeed_runtime = trader_metadata.get("engine_newsfeed")
+    newsfeed_runtime = dict(raw_newsfeed_runtime) if isinstance(raw_newsfeed_runtime, dict) else {}
+    newsfeed_health = build_engine_newsfeed_health(
+        request.app.state.settings,
+        newsfeed_runtime,
+        engine_offset,
+        newswire_active=bool(latest_stories and any(item.get("status") == "running" for item in newswire_workers)),
+        latest_source_at_ms=int(latest_stories[0].get("last_updated_at_ms") or 0) if latest_stories else None,
+    )
     result = {
         "enabled": request.app.state.settings.newswire_enabled,
         "running": any(item.get("status") == "running" for item in newswire_workers),
@@ -284,11 +330,113 @@ async def newswire_status(request: Request, authorization: str | None = Header(d
         "risk_states": risk_states,
         "workers": newswire_workers,
         "discord_publisher_workers": publisher_workers,
+        "engine_newsfeed": {
+            "runtime": newsfeed_runtime,
+            "offset": engine_offset,
+            "health": newsfeed_health,
+        },
     }
     channel_id = request.app.state.settings.newswire_news_channel_id
     if channel_id and callable(getattr(repo, "newswire_delivery_status", None)):
         result["discord_delivery"] = await repo.newswire_delivery_status(channel_id)
     return result
+
+
+@router.get("/newswire/readiness")
+async def newswire_readiness(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _auth(request.app.state.settings, authorization)
+    return await build_newswire_soak_readiness(
+        request.app.state.repository,
+        request.app.state.settings,
+    )
+
+
+@router.get("/newswire/calibration")
+async def newswire_calibration(
+    request: Request,
+    limit: int = 2000,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _auth(request.app.state.settings, authorization)
+    bounded_limit = max(1, min(5000, limit))
+    try:
+        rows = await request.app.state.repository.list_newswire_stories(limit=bounded_limit)
+    except Exception:
+        service = getattr(request.app.state, "newswire_service", None)
+        rows = service.list_stories(limit=bounded_limit) if service is not None else []
+    return {
+        **build_calibration_report(rows),
+        "generated_at_ms": _now_ms(),
+        "query_limit": bounded_limit,
+    }
+
+
+@router.post("/newswire/reclassify")
+async def newswire_reclassify(
+    body: NewswireReclassifyRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _auth(request.app.state.settings, authorization)
+    payload = body.model_dump(mode="json", exclude_none=True)
+    try:
+        command = await request.app.state.repository.enqueue_worker_command(
+            target_role="newswire",
+            command_type="newswire_reclassify",
+            payload=payload,
+            requested_by="api",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"newswire command queue unavailable: {type(exc).__name__}") from None
+    command_id = str(command.get("command_id") or "")
+    return {
+        "accepted": True,
+        "command_id": command_id,
+        "status_url": f"/commands/{command_id}",
+        "target_role": "newswire",
+        "command_type": "newswire_reclassify",
+        "status": command.get("status"),
+        "dry_run": body.dry_run,
+        "execution_authority": "none",
+        "publishes_to_live_bus": False,
+    }
+
+
+@router.post("/newswire/replay")
+async def newswire_replay(
+    body: NewswireReplayRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _auth(request.app.state.settings, authorization)
+    if body.start_ms is not None and body.end_ms is not None and body.start_ms >= body.end_ms:
+        raise HTTPException(status_code=422, detail="start_ms must be before end_ms")
+    payload = body.model_dump(mode="json", exclude_none=True)
+    try:
+        command = await request.app.state.repository.enqueue_worker_command(
+            target_role="trader",
+            command_type="engine_newswire_replay",
+            payload=payload,
+            requested_by="api",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"trader command queue unavailable: {type(exc).__name__}") from None
+    command_id = str(command.get("command_id") or "")
+    return {
+        "accepted": True,
+        "command_id": command_id,
+        "status_url": f"/commands/{command_id}",
+        "target_role": "trader",
+        "command_type": "engine_newswire_replay",
+        "status": command.get("status"),
+        "dry_run": body.dry_run,
+        "report_only": True,
+        "execution_authority": "none",
+        "live_consumer_offset_mutation": False,
+    }
 
 
 @router.post("/newswire/discord/test")

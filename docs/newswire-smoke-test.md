@@ -39,7 +39,8 @@ docker compose --profile discord-publisher up -d discord-publisher
   - `asset_class` is `"equity"` for stock news
   - `event_type` is classified (e.g., `"earnings"`, `"analyst_rating"`, `"press_release"`)
   - `importance_score` is between 0-100
-  - `assessment.assessment_version` is `newswire_assessment_v2`
+  - `assessment.assessment_version` is `newswire_assessment_v2.1`
+  - `assessment.audience_scope` explains whether the story is watched, broad-market, or an unwatched single name
   - `assessment.feed_action` and `assessment.engine_action` are populated with reason codes
   - `tradability.allow_auto_trade` is `false`
   - `tradability.halt_state_checked` is `true`
@@ -68,6 +69,8 @@ The `trader` worker consumes persisted canonical story revisions through `trader
 
 - [ ] `curl http://127.0.0.1:8081/runtime/offsets` includes `trader:engine_newswire`
 - [ ] `curl http://127.0.0.1:8081/runtime/heartbeats?service_role=trader` shows `metadata.engine_newsfeed.pump.running=true`
+- [ ] `curl http://127.0.0.1:8081/newswire/readiness` reports a time-based continuous soak; worker restarts reset its 24-hour clock
+- [ ] `/runtime/dashboard` shows Engine Newsfeed offset age, processed/recorded/features counts, skips, and degraded reasons
 - [ ] Stories with `assessment.engine_action != ignore` appear as appropriate in `/engine/events?event_type=newswire`
 - [ ] `GET /newswire/risk-state` exposes persisted state/evidence and transition history
 - [ ] With overlay mode `shadow`, regime metadata shows the observed news mode while effective permissions/sizing remain unchanged
@@ -91,6 +94,8 @@ The `trader` worker consumes persisted canonical story revisions through `trader
 
 - Discord #news: `assessment.feed_action` drives drop/watch/standard/high/breaking routing. Legacy importance thresholds apply only when V2 routing is shadowed or an old event has no assessment.
 - Institutional Engine: `assessment.engine_action` drives ledger/risk/directional/macro routing. `ENGINE_NEWS_MIN_SOURCE_SCORE` remains a final source-quality guard.
+- Audience guardrail: an unwatched single-name equity can never exceed `watch`; a trusted shock reaches `breaking` only for a watched asset or broad-market scope.
+- Model review: only fresh deterministic scores within ±3 points of a routing boundary are eligible. Startup backlog, stale stories, unwatched equities, replay, and reclassification are excluded; each item gets one model attempt with no repair call.
 - Risk state: `ENGINE_NEWS_RISK_*` controls decay, TTLs, transition thresholds, hysteresis, and `shadow|active` application.
 
 ## End-to-End with Autonomy

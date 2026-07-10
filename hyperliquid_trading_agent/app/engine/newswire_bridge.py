@@ -277,6 +277,13 @@ def engine_symbols_for_newswire_event(event: NewswireEvent, *, settings: Setting
     core = {symbol.upper() for symbol in settings.autonomy_core_symbols}
     symbols = {symbol.upper() for symbol in event.symbols if symbol.upper() in core}
     macro_proxy = str(decision.get("engine_action") or "") == "macro_proxy"
+    broad_crypto_risk = (
+        event.asset_class == "crypto"
+        and str(decision.get("audience_scope") or "") == "broad_market"
+        and str(decision.get("engine_action") or "") == "risk_only"
+    )
+    if broad_crypto_risk:
+        symbols.update(core)
     if macro_proxy or (event.asset_class == "macro" and float(event.importance_score or 0.0) >= float(settings.engine_news_macro_min_importance)):
         symbols.update(symbol.upper() for symbol in settings.engine_news_macro_proxy_symbol_list)
     return sorted(symbols)

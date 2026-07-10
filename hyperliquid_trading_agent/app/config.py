@@ -564,6 +564,9 @@ class Settings(BaseSettings):
     newswire_model_classify_enabled: bool = True
     newswire_model_classify_max_calls_per_hour: int = 30
     newswire_model_classify_timeout_seconds: float = 5.0
+    newswire_model_classify_queue_size: int = 32
+    newswire_soak_required_hours: int = 24
+    newswire_engine_offset_stale_seconds: int = 300
     newswire_policy_enabled: bool = True
     newswire_policy_shadow_only: bool = True
     newswire_active_policy_version: str = ""
@@ -1138,6 +1141,12 @@ class Settings(BaseSettings):
             warnings.append("NEWSWIRE_TOP_VOLUME_WATCH_COUNT must be non-negative")
         if self.newswire_ingest_worker_count <= 0 or self.newswire_ingest_queue_size <= 0:
             warnings.append("NEWSWIRE_INGEST_WORKER_COUNT and NEWSWIRE_INGEST_QUEUE_SIZE must be positive")
+        if self.newswire_model_classify_queue_size <= 0:
+            warnings.append("NEWSWIRE_MODEL_CLASSIFY_QUEUE_SIZE must be positive")
+        if self.newswire_soak_required_hours < 24:
+            warnings.append("NEWSWIRE_SOAK_REQUIRED_HOURS should remain at least 24")
+        if self.newswire_engine_offset_stale_seconds <= 0:
+            warnings.append("NEWSWIRE_ENGINE_OFFSET_STALE_SECONDS must be positive")
         if self.engine_news_alpha_mode == "paper" and not self.engine_paper_enabled:
             warnings.append("ENGINE_NEWS_ALPHA_MODE=paper requires ENGINE_PAPER_ENABLED=true; Newswire intents will remain shadow")
         for name, value in {

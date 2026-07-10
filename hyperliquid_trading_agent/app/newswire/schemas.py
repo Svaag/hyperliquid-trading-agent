@@ -13,6 +13,7 @@ Action = Literal["created", "updated", "removed"]
 AssetClass = Literal["equity", "crypto", "macro", "fx", "commodity", "unknown"]
 Urgency = Literal["breaking", "normal", "background"]
 WatchPriority = Literal["position", "core", "active", "top_volume", "unwatched"]
+AudienceScope = Literal["watched_asset", "broad_market", "unwatched_single_name", "general"]
 FeedAction = Literal["drop", "watch", "standard", "high", "breaking"]
 EngineRouteAction = Literal["ignore", "ledger_only", "risk_only", "directional_feature", "macro_proxy"]
 ModelReviewState = Literal["not_required", "pending", "applied", "fallback", "unavailable"]
@@ -45,11 +46,12 @@ class NewswireAssessment(BaseModel):
     logic from ``importance_score``.
     """
 
-    assessment_version: str = "newswire_assessment_v2"
+    assessment_version: str = "newswire_assessment_v2.1"
     decision_id: str
     story_id: str
     story_revision: int = 1
     watch_priority: WatchPriority = "unwatched"
+    audience_scope: AudienceScope = "general"
     matched_symbols: list[str] = Field(default_factory=list)
     symbol_match_reasons: dict[str, list[str]] = Field(default_factory=dict)
     topics: list[str] = Field(default_factory=list)
@@ -126,6 +128,7 @@ class NewswireStory(BaseModel):
                 "policy_version": assessment.assessment_version,
                 "policy_type": "static",
                 "shadow_only": shadow_only,
+                "audience_scope": assessment.audience_scope,
                 "newswire_action": assessment.feed_action,
                 "engine_action": assessment.engine_action,
                 "quality_score": round((assessment.source_quality_score + assessment.novelty_score) / 2.0, 4),

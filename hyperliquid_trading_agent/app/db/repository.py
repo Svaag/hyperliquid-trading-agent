@@ -5849,7 +5849,7 @@ def _newswire_risk_state_kwargs(state: dict[str, Any]) -> dict[str, Any]:
         "entered_at_ms": int(state.get("entered_at_ms") or 0),
         "updated_at_ms": int(state.get("updated_at_ms") or 0),
         "expires_at_ms": int(state.get("expires_at_ms") or 0),
-        "assessment_version": str(state.get("assessment_version") or "newswire_assessment_v2"),
+        "assessment_version": str(state.get("assessment_version") or "newswire_assessment_v2.1"),
         "transition_reason": str(state.get("transition_reason") or "updated"),
         "metadata_json": redact_secrets(dict(state.get("metadata") or {})),
     }
