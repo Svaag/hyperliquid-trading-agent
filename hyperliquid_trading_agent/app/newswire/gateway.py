@@ -319,9 +319,16 @@ async def newswire_status(request: Request, authorization: str | None = Header(d
         newswire_active=bool(latest_stories and any(item.get("status") == "running" for item in newswire_workers)),
         latest_source_at_ms=int(latest_stories[0].get("last_updated_at_ms") or 0) if latest_stories else None,
     )
+    worker_running = any(item.get("status") == "running" for item in newswire_workers)
+    local_service = getattr(request.app.state, "newswire_service", None)
+    local_status = local_service.status() if local_service is not None else {}
+    local_running = bool(local_status.get("running"))
     result = {
-        "enabled": request.app.state.settings.newswire_enabled,
-        "running": any(item.get("status") == "running" for item in newswire_workers),
+        "enabled": bool(worker_running or request.app.state.settings.newswire_enabled),
+        "running": bool(worker_running or local_running),
+        "configured_for_api_role": request.app.state.settings.newswire_enabled,
+        "owner_role": "newswire",
+        "runtime_source": "newswire_heartbeat" if worker_running else "local_service",
         "latest_event": latest[0] if latest else None,
         "latest_story": latest_stories[0] if latest_stories else None,
         "story_sample_count": len(latest_stories),

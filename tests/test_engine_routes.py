@@ -114,7 +114,11 @@ def test_engine_readonly_routes_are_registered_and_auth_protected_in_dev():
     app.state.repository = FakeEngineRepository()
     client = TestClient(app)
 
-    assert client.get("/engine/status").json()["execution_modes"] == ["paper", "shadow"]
+    status = client.get("/engine/status").json()
+    assert status["execution_modes"] == ["paper", "shadow"]
+    assert isinstance(status["running"], bool)
+    assert status["owner_role"] == "trader"
+    assert status["runtime_source"]
     assert client.get("/engine/events").json()[0]["event_id"] == "evt_1"
     assert client.get("/engine/events/evt_1").json()["event_id"] == "evt_1"
     assert client.get("/engine/features", params={"asset": "BTC"}).json()[0]["asset"] == "BTC"
