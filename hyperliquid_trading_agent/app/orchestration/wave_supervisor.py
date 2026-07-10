@@ -20,6 +20,7 @@ from hyperliquid_trading_agent.app.engine.strategy_performance import refresh_st
 from hyperliquid_trading_agent.app.engine.validation_report import build_engine_validation_report
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.orchestration.agent_core_trace import AgentCoreTraceEmitter, trace_run_id
+from hyperliquid_trading_agent.app.orchestration.gate_snapshots import GateEvidenceSnapshotService
 from hyperliquid_trading_agent.app.orchestration.lhp import (
     render_engineering_issue_body,
     render_wave_handoff_payload,
@@ -92,6 +93,12 @@ class WaveSupervisor:
         self.engine_service = engine_service
         self.trace = trace_emitter or AgentCoreTraceEmitter(settings=settings)
         self.github_escalator = github_escalator or GitHubIssueEscalator(settings=settings)
+        self.gate_snapshots = GateEvidenceSnapshotService(
+            settings=settings,
+            repository=repository,
+            engine_service=engine_service,
+            github_client=self.github_escalator,
+        )
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._last_result: dict[str, Any] | None = None
@@ -124,6 +131,7 @@ class WaveSupervisor:
             "interval_seconds": self.settings.orchestration_wave_supervisor_interval_seconds,
             "maintenance_enabled": self.settings.orchestration_wave_supervisor_maintenance_enabled,
             "escalation_enabled": self.settings.orchestration_wave_supervisor_escalation_enabled,
+            "gate_snapshots_enabled": self.settings.orchestration_gate_snapshots_enabled,
             "handoff_repo": self.settings.orchestration_wave_supervisor_handoff_repo,
             "started_at_ms": self._started_at_ms,
             "run_count": self._run_count,
@@ -208,6 +216,12 @@ class WaveSupervisor:
                         "promotion_requires_pr_or_signed_operator_gate": True,
                     },
                 }
+                try:
+                    result["gate_snapshots"] = await self.gate_snapshots.capture_due()
+                except Exception as exc:  # pragma: no cover - milestone evidence cannot stop supervision
+                    result["gate_snapshots"] = [{"status": "error", "error": type(exc).__name__}]
+                result["completed_at_ms"] = _now_ms()
+                result["duration_ms"] = result["completed_at_ms"] - started_ms
                 self._run_count += 1
                 self._last_result = result
                 self._last_error = None
@@ -381,6 +395,76 @@ class GitHubIssueEscalator:
                 return {"status": "failed", "repo": self.repo, "status_code": response.status_code, "error": response.text[:300]}
             issue = response.json()
             return {"status": "created", "repo": self.repo, "issue_number": issue.get("number"), "issue_url": issue.get("html_url"), "handoff_id": handoff_id, "labels": self.labels}
+
+    async def upsert_comment(self, *, issue_number: int, body: str, marker: str) -> dict[str, Any]:
+        """Create one immutable evidence comment, deduplicated by hidden marker."""
+
+        if not self.repo:
+            return {"status": "skipped", "reason": "handoff_repo_not_configured"}
+        if not self.token:
+            return {"status": "skipped", "reason": "github_token_not_configured", "repo": self.repo}
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        async with httpx.AsyncClient(timeout=self.timeout, headers=headers) as client:
+            comments_url = f"https://api.github.com/repos/{self.repo}/issues/{int(issue_number)}/comments"
+            response = await self._request_with_retry(client, "GET", comments_url, params={"per_page": 100})
+            if response is None:
+                return {"status": "failed", "reason": "github_comments_unavailable", "issue_number": issue_number}
+            if response.status_code in {401, 403}:
+                return {"status": "failed", "terminal": True, "status_code": response.status_code, "reason": "github_auth_failed", "issue_number": issue_number}
+            if response.status_code >= 400:
+                return {"status": "failed", "status_code": response.status_code, "error": response.text[:300], "issue_number": issue_number}
+            for comment in response.json():
+                if isinstance(comment, dict) and marker in str(comment.get("body") or ""):
+                    return {
+                        "status": "existing",
+                        "repo": self.repo,
+                        "issue_number": issue_number,
+                        "comment_id": comment.get("id"),
+                        "comment_url": comment.get("html_url"),
+                    }
+            response = await self._request_with_retry(client, "POST", comments_url, json={"body": body})
+            if response is None:
+                return {"status": "failed", "reason": "github_comment_post_unavailable", "issue_number": issue_number}
+            if response.status_code in {401, 403}:
+                return {"status": "failed", "terminal": True, "status_code": response.status_code, "reason": "github_auth_failed", "issue_number": issue_number}
+            if response.status_code >= 400:
+                return {"status": "failed", "status_code": response.status_code, "error": response.text[:300], "issue_number": issue_number}
+            comment = response.json()
+            return {
+                "status": "created",
+                "repo": self.repo,
+                "issue_number": issue_number,
+                "comment_id": comment.get("id"),
+                "comment_url": comment.get("html_url"),
+            }
+
+    async def _request_with_retry(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> httpx.Response | None:
+        for attempt in range(3):
+            try:
+                response = await client.request(method, url, **kwargs)
+            except (httpx.TimeoutException, httpx.TransportError):
+                response = None
+            if response is not None and (response.status_code < 500 and response.status_code != 429):
+                return response
+            if attempt == 2:
+                return response
+            retry_after = response.headers.get("Retry-After") if response is not None else None
+            try:
+                delay = max(0.1, min(30.0, float(retry_after))) if retry_after else float(2**attempt)
+            except ValueError:
+                delay = float(2**attempt)
+            await asyncio.sleep(delay)
+        return None
 
     async def _find_existing(self, client: httpx.AsyncClient, marker: str) -> dict[str, Any] | None:
         params: dict[str, Any] = {"state": "open", "per_page": 50}

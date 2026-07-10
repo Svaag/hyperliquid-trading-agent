@@ -116,11 +116,25 @@ class DeterministicCouncil:
         diversity = metadata.get("diversity") if isinstance(metadata.get("diversity"), dict) else {}
         reasons = list(allocation.get("reason_codes") or []) + list(diversity.get("reason_codes") or [])
         concentration_reasons = [reason for reason in reasons if "share" in str(reason) or "concentration" in str(reason)]
-        vetoes = ["concentration_cap_breach"] if concentration_reasons else []
+        projected = diversity.get("projected") if isinstance(diversity.get("projected"), dict) else {}
+        report_only = bool(
+            projected.get("shadow_observation_report_only")
+            or diversity.get("shadow_observation_report_only")
+            or "shadow_observation_report_only" in reasons
+        )
+        enforced_concentration = bool(
+            concentration_reasons
+            and str(diversity.get("decision") or "allow") == "throttle"
+            and not report_only
+        )
+        vetoes = ["concentration_cap_breach"] if enforced_concentration else []
         status = str(allocation.get("status") or "skip")
         if status not in {"allocate", "reduce", "require_debate"} and not vetoes:
             vetoes.append("allocation_not_approved")
-        return self._vote(review_id, "Portfolio Council", "veto" if vetoes else "allow", "Checks allocation status and diversity controller output.", ts, vetoes=vetoes, warnings=concentration_reasons, scores={"portfolio_impact": 0.0 if vetoes else 0.85})
+        warnings = list(concentration_reasons)
+        if report_only and concentration_reasons:
+            warnings.append("shadow_diversity_observation_only")
+        return self._vote(review_id, "Portfolio Council", "veto" if vetoes else "allow", "Checks allocation status and enforced diversity controller output.", ts, vetoes=vetoes, warnings=warnings, scores={"portfolio_impact": 0.0 if vetoes else 0.85})
 
     def _microstructure_vote(self, review_id: str, packet: CandidateTradePacket, regime: RegimeVector, ts: int) -> CouncilVote:
         candidate = packet.candidate or {}

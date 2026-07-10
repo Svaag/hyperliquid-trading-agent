@@ -17,7 +17,14 @@ async def refresh_strategy_regime_performance(
     limit: int = 5000,
 ) -> list[dict[str, Any]]:
     outcome_rows = await _list_outcomes(repository, limit=limit)
-    outcome_rows = [item for item in outcome_rows if window_start_ms <= int(item.get("window_end_ms") or item.get("created_at_ms") or 0) <= window_end_ms]
+    outcome_rows = [
+        item
+        for item in outcome_rows
+        if str(item.get("terminal_state") or "") == "matured"
+        and window_start_ms
+        <= int(item.get("window_end_ms") or item.get("created_at_ms") or 0)
+        <= window_end_ms
+    ]
     if outcome_rows:
         return await _refresh_from_candidate_outcomes(repository, outcome_rows, window_start_ms=window_start_ms, window_end_ms=window_end_ms, limit=limit)
     return await _refresh_from_legacy_ledgers(repository, window_start_ms=window_start_ms, window_end_ms=window_end_ms, limit=limit)
@@ -31,6 +38,10 @@ async def _refresh_from_candidate_outcomes(
     window_end_ms: int,
     limit: int,
 ) -> list[dict[str, Any]]:
+    regime_ids = sorted({str(item.get("regime_snapshot_id") or "") for item in outcomes if item.get("regime_snapshot_id")})
+    list_regimes = getattr(repository, "list_regime_snapshots_by_ids", None)
+    regime_rows = await list_regimes(regime_ids) if callable(list_regimes) else []
+    regimes = {str(item.get("regime_snapshot_id") or ""): item for item in regime_rows}
     concentration_events = await _list_concentration_events(repository, limit=limit)
     concentration_events = [item for item in concentration_events if window_start_ms <= int(item.get("created_at_ms") or 0) <= window_end_ms]
     concentration_by_group: dict[tuple[str, str, str], int] = defaultdict(int)
@@ -43,7 +54,15 @@ async def _refresh_from_candidate_outcomes(
         strategy_id = str(outcome.get("strategy_id") or "unknown")
         strategy_version = str(outcome.get("strategy_version") or "unknown")
         strategy_family = str(outcome.get("strategy_family") or "unknown")
-        regime_label = str(metadata.get("regime_label") or outcome.get("regime_label") or outcome.get("regime_snapshot_id") or "unknown")
+        regime_row = regimes.get(str(outcome.get("regime_snapshot_id") or "")) or {}
+        regime_vector = regime_row.get("vector") if isinstance(regime_row.get("vector"), dict) else regime_row
+        regime_label = str(
+            regime_vector.get("regime_label")
+            or metadata.get("regime_label")
+            or outcome.get("regime_label")
+            or outcome.get("regime_snapshot_id")
+            or "unknown"
+        )
         asset = str(outcome.get("asset") or "GLOBAL").upper()
         venue = str(outcome.get("venue") or "unknown")
         outcome_window = str(outcome.get("outcome_window") or "unknown")

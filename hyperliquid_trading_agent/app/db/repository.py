@@ -41,6 +41,7 @@ from hyperliquid_trading_agent.app.db.models import (
     DecisionRun,
     DecisionStateSnapshot,
     EngineOperatorProposalRow,
+    EngineStrategyEvaluationRecord,
     EquityOptionsFlowEventRecord,
     EquityPaperFillRecord,
     EquityPaperOrderRecord,
@@ -1297,6 +1298,74 @@ class Repository:
             filters.append(StrategySpecRecord.enabled == enabled)
         return await self._list_engine_records(StrategySpecRecord, order_by=StrategySpecRecord.strategy_id, limit=limit, filters=filters)
 
+    async def record_engine_strategy_evaluation(self, evaluation: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            EngineStrategyEvaluationRecord(
+                evaluation_id=str(evaluation["evaluation_id"]),
+                engine_run_id=str(evaluation.get("engine_run_id") or "unknown"),
+                evaluated_at_ms=int(evaluation.get("evaluated_at_ms") or 0),
+                asset=str(evaluation.get("asset") or "UNKNOWN").upper(),
+                venue=str(evaluation.get("venue") or "hyperliquid"),
+                strategy_id=str(evaluation.get("strategy_id") or "unknown"),
+                strategy_version=str(evaluation.get("strategy_version") or "unknown"),
+                strategy_family=str(evaluation.get("strategy_family") or "unknown"),
+                catalog_mode=str(evaluation.get("catalog_mode") or "unknown"),
+                activation_scope=str(evaluation.get("activation_scope") or "paper_shadow"),
+                paper_eligible=bool(evaluation.get("paper_eligible", False)),
+                counts_for_breadth=bool(evaluation.get("counts_for_breadth", True)),
+                selection_status=str(evaluation.get("selection_status") or "unknown"),
+                selection_reason=evaluation.get("selection_reason"),
+                regime_snapshot_id=evaluation.get("regime_snapshot_id"),
+                regime_label=str(evaluation.get("regime_label") or "unknown"),
+                news_risk_tier=str(evaluation.get("news_risk_tier") or "no_event"),
+                required_feature_count=int(evaluation.get("required_feature_count") or 0),
+                present_feature_count=int(evaluation.get("present_feature_count") or 0),
+                fresh_feature_count=int(evaluation.get("fresh_feature_count") or 0),
+                feature_coverage_pct=float(evaluation.get("feature_coverage_pct") or 0.0),
+                fresh_feature_coverage_pct=float(evaluation.get("fresh_feature_coverage_pct") or 0.0),
+                missing_features_json=list(evaluation.get("missing_features") or []),
+                stale_features_json=list(evaluation.get("stale_features") or []),
+                feature_ages_ms_json=redact_secrets(dict(evaluation.get("feature_ages_ms") or {})),
+                generation_attempted=bool(evaluation.get("generation_attempted", False)),
+                generation_outcome=str(evaluation.get("generation_outcome") or "not_attempted"),
+                trigger_fired=bool(evaluation.get("trigger_fired", False)),
+                candidate_count=int(evaluation.get("candidate_count") or 0),
+                candidate_ids_json=list(evaluation.get("candidate_ids") or []),
+                reason_codes_json=list(evaluation.get("reason_codes") or []),
+                diagnostics_json=redact_secrets(dict(evaluation.get("diagnostics") or {})),
+                metadata_json=redact_secrets(dict(evaluation.get("metadata") or {})),
+            ),
+            "evaluation_id",
+        )
+
+    async def list_engine_strategy_evaluations(
+        self,
+        *,
+        strategy_id: str | None = None,
+        asset: str | None = None,
+        generation_outcome: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        filters = []
+        if strategy_id:
+            filters.append(EngineStrategyEvaluationRecord.strategy_id == str(strategy_id))
+        if asset:
+            filters.append(EngineStrategyEvaluationRecord.asset == str(asset).upper())
+        if generation_outcome:
+            filters.append(EngineStrategyEvaluationRecord.generation_outcome == str(generation_outcome))
+        if since_ms is not None:
+            filters.append(EngineStrategyEvaluationRecord.evaluated_at_ms >= int(since_ms))
+        if until_ms is not None:
+            filters.append(EngineStrategyEvaluationRecord.evaluated_at_ms <= int(until_ms))
+        return await self._list_engine_records(
+            EngineStrategyEvaluationRecord,
+            order_by=EngineStrategyEvaluationRecord.evaluated_at_ms,
+            limit=limit,
+            filters=filters,
+        )
+
     async def get_strategy_spec(self, strategy_id: str) -> dict[str, Any] | None:
         return await self._get_engine_record(StrategySpecRecord, strategy_id)
 
@@ -1333,6 +1402,16 @@ class Repository:
             filters.append(RegimeSnapshotRecord.created_at_ms >= int(since_ms))
         return await self._list_engine_records(RegimeSnapshotRecord, order_by=RegimeSnapshotRecord.created_at_ms, limit=limit, filters=filters)
 
+    async def list_regime_snapshots_by_ids(self, regime_snapshot_ids: list[str]) -> list[dict[str, Any]]:
+        ids = sorted({str(item) for item in regime_snapshot_ids if item})
+        if not ids or self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            result = await session.execute(
+                select(RegimeSnapshotRecord).where(RegimeSnapshotRecord.regime_snapshot_id.in_(ids))
+            )
+            return [_engine_record_to_dict(item) for item in result.scalars().all()]
+
     async def record_alpha_candidate(self, candidate: dict[str, Any]) -> str | None:
         metadata = {
             **dict(candidate.get("metadata") or {}),
@@ -1344,6 +1423,7 @@ class Repository:
             "expected_edge_bps": candidate.get("expected_edge_bps", 0.0),
             "risk_tags": list(candidate.get("risk_tags") or []),
             "counts_for_breadth": candidate.get("counts_for_breadth", True),
+            "source_integrity": redact_secrets(dict(candidate.get("source_integrity") or {})),
         }
         return await self._merge_engine_record(
             AlphaCandidateRecord(
@@ -1492,6 +1572,16 @@ class Repository:
             filters.append(AllocationDecisionRecord.created_at_ms <= int(until_ms))
         return await self._list_engine_records(AllocationDecisionRecord, order_by=AllocationDecisionRecord.created_at_ms, limit=limit, filters=filters)
 
+    async def list_allocation_decisions_by_ids(self, allocation_ids: list[str]) -> list[dict[str, Any]]:
+        ids = sorted({str(item) for item in allocation_ids if item})
+        if not ids or self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            result = await session.execute(
+                select(AllocationDecisionRecord).where(AllocationDecisionRecord.allocation_id.in_(ids))
+            )
+            return [_engine_record_to_dict(item) for item in result.scalars().all()]
+
     async def record_allocation_diversity_event(self, event: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
             AllocationDiversityEventRecord(
@@ -1636,6 +1726,7 @@ class Repository:
         since_ms: int | None = None,
         until_ms: int | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         filters = []
         if candidate_id:
@@ -1650,7 +1741,13 @@ class Repository:
             filters.append(CandidateOutcomeAttributionRecord.window_end_ms >= int(since_ms))
         if until_ms is not None:
             filters.append(CandidateOutcomeAttributionRecord.window_end_ms <= int(until_ms))
-        return await self._list_engine_records(CandidateOutcomeAttributionRecord, order_by=CandidateOutcomeAttributionRecord.window_end_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            CandidateOutcomeAttributionRecord,
+            order_by=CandidateOutcomeAttributionRecord.window_end_ms,
+            limit=limit,
+            offset=offset,
+            filters=filters,
+        )
 
     async def list_due_candidate_outcome_attributions(self, *, timestamp_ms: int, limit: int = 1000) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
@@ -2239,7 +2336,15 @@ class Repository:
             log.warning("engine_record_get_failed", table=getattr(record_cls, "__tablename__", "unknown"), error=type(exc).__name__)
             return None
 
-    async def _list_engine_records(self, record_cls: Any, *, order_by: Any, limit: int = 100, filters: list[Any] | None = None) -> list[dict[str, Any]]:
+    async def _list_engine_records(
+        self,
+        record_cls: Any,
+        *,
+        order_by: Any,
+        limit: int = 100,
+        offset: int = 0,
+        filters: list[Any] | None = None,
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         try:
@@ -2247,7 +2352,7 @@ class Repository:
                 stmt = select(record_cls)
                 for condition in filters or []:
                     stmt = stmt.where(condition)
-                stmt = stmt.order_by(order_by.desc()).limit(limit)
+                stmt = stmt.order_by(order_by.desc()).offset(max(0, int(offset))).limit(limit)
                 result = await session.execute(stmt)
                 return [_engine_record_to_dict(item) for item in result.scalars().all()]
         except Exception as exc:  # pragma: no cover
@@ -3157,6 +3262,35 @@ class Repository:
             result = await session.execute(stmt)
             return [_newswire_delivery_to_dict(item) for item in result.scalars().all()]
 
+    async def list_newswire_deliveries(
+        self,
+        *,
+        destination: str | None = None,
+        channel_id: str | None = None,
+        status: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(NewswireDeliveryRow)
+            if destination:
+                stmt = stmt.where(NewswireDeliveryRow.destination == str(destination))
+            if channel_id:
+                stmt = stmt.where(NewswireDeliveryRow.channel_id == str(channel_id))
+            if status:
+                stmt = stmt.where(NewswireDeliveryRow.status == str(status))
+            if since_ms is not None:
+                stmt = stmt.where(NewswireDeliveryRow.posted_at_ms >= int(since_ms))
+            if until_ms is not None:
+                stmt = stmt.where(NewswireDeliveryRow.posted_at_ms <= int(until_ms))
+            result = await session.execute(
+                stmt.order_by(NewswireDeliveryRow.posted_at_ms.desc()).limit(max(1, min(100_000, int(limit))))
+            )
+            return [_newswire_delivery_to_dict(item) for item in result.scalars().all()]
+
     async def claim_due_newswire_deliveries(
         self,
         *,
@@ -3729,7 +3863,15 @@ class Repository:
             log.warning("newswire_eval_record_failed", eval_id=eval_id, error=type(exc).__name__)
             return None
 
-    async def list_newswire_evals(self, *, event_id: str | None = None, decision_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_newswire_evals(
+        self,
+        *,
+        event_id: str | None = None,
+        decision_id: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
@@ -3738,6 +3880,10 @@ class Repository:
                 stmt = stmt.where(NewswireEvalRow.event_id == str(event_id))
             if decision_id:
                 stmt = stmt.where(NewswireEvalRow.decision_id == str(decision_id))
+            if since_ms is not None:
+                stmt = stmt.where(NewswireEvalRow.created_at_ms >= int(since_ms))
+            if until_ms is not None:
+                stmt = stmt.where(NewswireEvalRow.created_at_ms <= int(until_ms))
             result = await session.execute(stmt)
             return [_newswire_eval_to_dict(item) for item in result.scalars().all()]
 

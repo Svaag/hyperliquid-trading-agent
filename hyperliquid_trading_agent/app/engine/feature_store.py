@@ -152,6 +152,10 @@ class FeatureStore:
         selected = sorted(latest_by_name.values(), key=lambda item: item.computed_ts_ms)[-max_items:]
         features = {item.feature_name: item.value if item.scalar_value is None else item.scalar_value for item in selected}
         quality_flags = [f"low_quality:{item.feature_name}" for item in selected if item.quality_score < 0.5]
+        feature_timestamps_ms = {item.feature_name: int(item.computed_ts_ms) for item in selected}
+        feature_ages_ms = {
+            item.feature_name: max(0, int(cutoff) - int(item.computed_ts_ms)) for item in selected
+        }
         snapshot_id = "fs_" + hashlib.sha1(f"{asset}:{cutoff}:{sorted(features.items())}".encode()).hexdigest()[:24]
         return FeatureSnapshot(
             snapshot_id=snapshot_id,
@@ -160,6 +164,13 @@ class FeatureStore:
             feature_ids=[item.feature_id for item in selected],
             features=features,
             quality_flags=quality_flags,
+            metadata={
+                "feature_timestamps_ms": feature_timestamps_ms,
+                "feature_ages_ms": feature_ages_ms,
+                "feature_quality_scores": {
+                    item.feature_name: float(item.quality_score) for item in selected
+                },
+            },
         )
 
 

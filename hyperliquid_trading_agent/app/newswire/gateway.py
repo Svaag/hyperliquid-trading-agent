@@ -13,6 +13,7 @@ from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.newswire.assessment import ASSESSMENT_VERSION
 from hyperliquid_trading_agent.app.newswire.calibration import build_calibration_report
 from hyperliquid_trading_agent.app.newswire.classify import SOURCE_SCORES
+from hyperliquid_trading_agent.app.newswire.feedback import build_newswire_feedback_summary
 from hyperliquid_trading_agent.app.newswire.learning import train_contextual_bandit_policy
 from hyperliquid_trading_agent.app.newswire.observability import (
     build_engine_newsfeed_health,
@@ -379,6 +380,36 @@ async def newswire_calibration(
         "generated_at_ms": _now_ms(),
         "query_limit": bounded_limit,
     }
+
+
+@router.get("/newswire/feedback-summary")
+async def newswire_feedback_summary(
+    request: Request,
+    cohort_start_ms: int | None = None,
+    as_of_ms: int | None = None,
+    source: str | None = None,
+    score_bucket: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _auth(request.app.state.settings, authorization)
+    start_ms = cohort_start_ms
+    if start_ms is None:
+        try:
+            heartbeats = await request.app.state.repository.list_service_heartbeats(
+                service_role="discord_publisher",
+                limit=5,
+            )
+        except Exception:
+            heartbeats = []
+        current = next((item for item in heartbeats if item.get("status") == "running"), None)
+        start_ms = int((current or {}).get("started_at_ms") or 0)
+    return await build_newswire_feedback_summary(
+        request.app.state.repository,
+        cohort_start_ms=start_ms,
+        as_of_ms=as_of_ms,
+        source=source,
+        score_bucket=score_bucket,
+    )
 
 
 @router.post("/newswire/reclassify")

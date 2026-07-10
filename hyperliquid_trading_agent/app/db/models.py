@@ -1335,6 +1335,57 @@ class StrategySpecRecord(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class EngineStrategyEvaluationRecord(TimestampMixin, Base):
+    """Append-only per-run strategy activation evidence.
+
+    Candidate tables only describe strategies that fired.  This record keeps the
+    denominator: every runtime strategy considered for every asset in an engine
+    loop, including selector skips, missing/stale data, and no-trigger outcomes.
+    """
+
+    __tablename__ = "engine_strategy_evaluations"
+    __table_args__ = (
+        Index("ix_engine_strategy_evaluations_run", "engine_run_id"),
+        Index("ix_engine_strategy_evaluations_strategy_time", "strategy_id", "evaluated_at_ms"),
+        Index("ix_engine_strategy_evaluations_asset_strategy_time", "asset", "strategy_id", "evaluated_at_ms"),
+        Index("ix_engine_strategy_evaluations_outcome_time", "generation_outcome", "evaluated_at_ms"),
+    )
+
+    evaluation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    engine_run_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    evaluated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    asset: Mapped[str] = mapped_column(String(64), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False, default="hyperliquid")
+    strategy_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    strategy_family: Mapped[str] = mapped_column(String(96), nullable=False, default="unknown")
+    catalog_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    activation_scope: Mapped[str] = mapped_column(String(32), nullable=False, default="paper_shadow")
+    paper_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    counts_for_breadth: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    selection_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    selection_reason: Mapped[str | None] = mapped_column(String(96))
+    regime_snapshot_id: Mapped[str | None] = mapped_column(String(96))
+    regime_label: Mapped[str] = mapped_column(String(255), nullable=False, default="unknown")
+    news_risk_tier: Mapped[str] = mapped_column(String(32), nullable=False, default="no_event")
+    required_feature_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    present_feature_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fresh_feature_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    feature_coverage_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    fresh_feature_coverage_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    missing_features_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    stale_features_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    feature_ages_ms_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    generation_attempted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    generation_outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    trigger_fired: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    candidate_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    reason_codes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    diagnostics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class StrategyRegimePerformanceRecord(TimestampMixin, Base):
     __tablename__ = "strategy_regime_performance"
     __table_args__ = (

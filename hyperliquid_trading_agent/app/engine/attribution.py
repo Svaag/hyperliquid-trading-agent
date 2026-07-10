@@ -152,6 +152,11 @@ class CandidateOutcomeAttributionService:
                         "targets": list(getattr(candidate, "targets", []) or []),
                         "expected_net_ev_bps": ev.get("net_ev_bps"),
                         "risk_adjusted_utility": ev.get("risk_adjusted_utility"),
+                        "expected_fee_bps": ev.get("expected_fee_bps"),
+                        "expected_spread_cost_bps": ev.get("expected_spread_cost_bps"),
+                        "expected_slippage_bps": ev.get("expected_slippage_bps"),
+                        "expected_market_impact_bps": ev.get("expected_market_impact_bps"),
+                        "expected_funding_cost_bps": ev.get("expected_funding_cost_bps"),
                         "allocated_notional_usd": allocation.get("allocated_notional_usd"),
                         "allocated_size": allocation.get("allocated_size"),
                         "regime_label": (getattr(candidate, "metadata", {}) or {}).get("regime_label") if isinstance(getattr(candidate, "metadata", {}), dict) else None,
@@ -208,6 +213,8 @@ class CandidateOutcomeAttributionService:
                 timestamp_ms=ts,
                 mark_source=str(mark.get("mark_source") or "unknown"),
                 mark_lag_ms=mark.get("mark_lag_ms"),
+                mark_ts_ms=mark.get("mark_ts_ms"),
+                mark_age_ms=mark.get("mark_age_ms"),
                 path_mids=list(mark.get("path_mids") or []),
             )
             await self._persist_outcome(outcome)
@@ -232,6 +239,8 @@ class CandidateOutcomeAttributionService:
                 "mark_px": mark_px,
                 "mark_source": "feature_store_mid",
                 "mark_lag_ms": abs(target_ms - mark_ts),
+                "mark_ts_ms": mark_ts,
+                "mark_age_ms": target_ms - mark_ts,
                 "path_mids": path_mids,
             }
         latest_mark = _float(marks.get(asset))
@@ -239,6 +248,8 @@ class CandidateOutcomeAttributionService:
             "mark_px": latest_mark,
             "mark_source": "latest_mark_fallback",
             "mark_lag_ms": max(0, timestamp_ms - target_ms),
+            "mark_ts_ms": timestamp_ms,
+            "mark_age_ms": target_ms - timestamp_ms,
             "path_mids": path_mids,
         }
 
@@ -264,6 +275,8 @@ class CandidateOutcomeAttributionService:
         timestamp_ms: int,
         mark_source: str,
         mark_lag_ms: Any | None,
+        mark_ts_ms: Any | None,
+        mark_age_ms: Any | None,
         path_mids: list[tuple[int, float]],
     ) -> CandidateOutcomeAttribution:
         entry = _float(row.get("entry_px"))
@@ -285,10 +298,13 @@ class CandidateOutcomeAttributionService:
         mae = min(path_returns) if path_returns else min(gross, 0.0)
         quality_flags = list(row.get("quality_flags") or [])
         lag_ms = int(mark_lag_ms or 0)
+        age_ms = int(mark_age_ms or 0)
         if mark_source == "latest_mark_fallback":
             quality_flags.append("latest_mark_fallback")
         if lag_ms > 60_000:
             quality_flags.append("late_mark")
+        if age_ms < 0:
+            quality_flags.append("future_mark")
         return CandidateOutcomeAttribution(
             **{
                 **row,
@@ -301,7 +317,15 @@ class CandidateOutcomeAttributionService:
                 "terminal_state": "matured",
                 "quality_flags": sorted(set(quality_flags)),
                 "updated_at_ms": timestamp_ms,
-                "metadata": {**metadata, "mark_source": mark_source, "marked_at_ms": timestamp_ms, "mark_lag_ms": lag_ms, "path_mark_count": len(path_mids)},
+                "metadata": {
+                    **metadata,
+                    "mark_source": mark_source,
+                    "marked_at_ms": timestamp_ms,
+                    "mark_ts_ms": int(mark_ts_ms or 0),
+                    "mark_age_ms": age_ms,
+                    "mark_lag_ms": lag_ms,
+                    "path_mark_count": len(path_mids),
+                },
             }
         )
 

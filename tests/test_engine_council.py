@@ -162,3 +162,64 @@ def test_council_hard_vetoes_risk_reject_and_regime_mismatch():
     assert review.decision == "reject"
     assert "risk_gateway_reject" in review.vetoes
     assert "strategy_invalid_for_current_regime" in review.vetoes
+
+
+def test_shadow_report_only_diversity_warning_does_not_become_council_veto():
+    candidate = _candidate()
+    allocation = _allocation().model_copy(
+        update={
+            "metadata": {
+                **_allocation().metadata,
+                "diversity": {
+                    "decision": "allow",
+                    "reason_codes": ["family_hard_share_exceeded", "shadow_observation_report_only"],
+                    "projected": {"shadow_observation_report_only": True},
+                },
+            }
+        }
+    )
+    packet = build_candidate_trade_packet(
+        candidate=candidate,
+        ev=_ev(),
+        allocation=allocation,
+        order_intent=_intent("shadow"),
+        risk_decision={"decision": "allow", "allowed": True, "violations": []},
+        replay_context={"status": "advisory_pass"},
+        created_at_ms=1_000,
+    )
+
+    review = DeterministicCouncil().review(packet, _regime())
+
+    assert review.decision == "allow_shadow"
+    assert "concentration_cap_breach" not in review.vetoes
+    assert "shadow_diversity_observation_only" in review.warnings
+
+
+def test_enforced_diversity_throttle_remains_a_hard_veto():
+    candidate = _candidate()
+    allocation = _allocation().model_copy(
+        update={
+            "metadata": {
+                **_allocation().metadata,
+                "diversity": {
+                    "decision": "throttle",
+                    "reason_codes": ["family_hard_share_exceeded"],
+                    "projected": {},
+                },
+            }
+        }
+    )
+    packet = build_candidate_trade_packet(
+        candidate=candidate,
+        ev=_ev(),
+        allocation=allocation,
+        order_intent=_intent("paper"),
+        risk_decision={"decision": "allow", "allowed": True, "violations": []},
+        replay_context={"status": "passed"},
+        created_at_ms=1_000,
+    )
+
+    review = DeterministicCouncil().review(packet, _regime())
+
+    assert review.decision == "reject"
+    assert "concentration_cap_breach" in review.vetoes

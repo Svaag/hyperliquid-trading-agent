@@ -489,6 +489,12 @@ class Settings(BaseSettings):
     orchestration_wave_supervisor_handoff_labels: str = "loop:candidate,hyperliquid-wave"
     orchestration_wave_supervisor_github_token: str = ""
     orchestration_wave_supervisor_request_timeout_seconds: float = 10.0
+    orchestration_gate_snapshots_enabled: bool = True
+    orchestration_gate_snapshot_milestone_hours: str = "24,72"
+    orchestration_gate_snapshot_github_enabled: bool = True
+    orchestration_gate_snapshot_issue_10: int = 10
+    orchestration_gate_snapshot_issue_16: int = 16
+    orchestration_gate_snapshot_issue_21: int = 21
     agent_core_trace_enabled: bool = False
     agent_core_trace_path: str = ""
     agent_core_trace_collector_url: str = ""

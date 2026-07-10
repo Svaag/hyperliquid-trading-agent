@@ -9,6 +9,12 @@ from pydantic import BaseModel, Field
 
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.engine.alpha_graph import build_strategy_regime_alpha_graph
+from hyperliquid_trading_agent.app.engine.diagnostics import build_candidate_funnel, build_strategy_funnel
+from hyperliquid_trading_agent.app.engine.news_risk_counterfactual import (
+    latest_news_risk_counterfactual,
+    list_news_risk_counterfactuals,
+    run_news_risk_counterfactual,
+)
 from hyperliquid_trading_agent.app.engine.operator_proposals import project_operator_proposal_to_trade_signal
 from hyperliquid_trading_agent.app.engine.paper_signoff import build_paper_signoff_preflight
 from hyperliquid_trading_agent.app.engine.readiness import build_paper_readiness_scorecard
@@ -18,6 +24,7 @@ from hyperliquid_trading_agent.app.engine.replay_compare import (
 )
 from hyperliquid_trading_agent.app.engine.runtime import resolve_engine_runtime
 from hyperliquid_trading_agent.app.engine.signal_comparison import build_signal_path_comparison
+from hyperliquid_trading_agent.app.engine.signal_quality import build_signal_quality_report
 from hyperliquid_trading_agent.app.engine.validation_report import (
     build_engine_validation_report,
     render_engine_validation_dashboard,
@@ -49,6 +56,11 @@ class EngineReplayComparisonRequest(BaseModel):
     baseline_config: dict[str, Any] = Field(default_factory=dict)
     candidate_config: dict[str, Any] = Field(default_factory=dict)
     variant_id: str | None = None
+
+
+class EngineNewsRiskCounterfactualRequest(BaseModel):
+    window_hours: int = Field(default=24, ge=1, le=24 * 90)
+    as_of_ms: int | None = Field(default=None, ge=1)
 
 
 class EngineOperatorProposalActionRequest(BaseModel):
@@ -386,6 +398,40 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
         _auth(authorization)
         return await _repo().list_allocation_decisions(candidate_id=candidate_id, limit=limit)
 
+    @app.get("/engine/candidate-funnel")
+    async def engine_candidate_funnel(
+        window_hours: int = 24,
+        as_of_ms: int | None = None,
+        strategy_id: str | None = None,
+        asset: str | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _auth(authorization)
+        return await build_candidate_funnel(
+            _repo(),
+            window_hours=max(1, min(24 * 90, window_hours)),
+            as_of_ms=as_of_ms,
+            strategy_id=strategy_id,
+            asset=asset,
+        )
+
+    @app.get("/engine/strategy-funnel")
+    async def engine_strategy_funnel(
+        window_hours: int = 24,
+        as_of_ms: int | None = None,
+        strategy_id: str | None = None,
+        asset: str | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _auth(authorization)
+        return await build_strategy_funnel(
+            _repo(),
+            window_hours=max(1, min(24 * 90, window_hours)),
+            as_of_ms=as_of_ms,
+            strategy_id=strategy_id,
+            asset=asset,
+        )
+
     @app.get("/engine/strategies")
     async def engine_strategies(family: str | None = None, enabled: bool | None = None, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
         _auth(authorization)
@@ -565,6 +611,58 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
             limit=max(1, min(20_000, limit)),
             overlap_tolerance_minutes=max(1, min(24 * 60, overlap_tolerance_minutes)),
         )
+
+    @app.get("/engine/signal-quality")
+    async def engine_signal_quality(
+        window_hours: int = 24,
+        as_of_ms: int | None = None,
+        strategy_id: str | None = None,
+        symbol: str | None = None,
+        regime_label: str | None = None,
+        outcome_window: str | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _auth(authorization)
+        return await build_signal_quality_report(
+            _repo(),
+            window_hours=max(1, min(24 * 90, window_hours)),
+            as_of_ms=as_of_ms,
+            strategy_id=strategy_id,
+            symbol=symbol,
+            regime_label=regime_label,
+            outcome_window=outcome_window,
+        )
+
+    @app.post("/engine/news-risk-counterfactuals/run")
+    async def engine_news_risk_counterfactual_run(
+        request: EngineNewsRiskCounterfactualRequest,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _auth(authorization)
+        return await run_news_risk_counterfactual(
+            _repo(),
+            window_hours=request.window_hours,
+            as_of_ms=request.as_of_ms,
+            persist=True,
+        )
+
+    @app.get("/engine/news-risk-counterfactuals")
+    async def engine_news_risk_counterfactual_list(
+        limit: int = 100,
+        authorization: str | None = Header(default=None),
+    ) -> list[dict[str, Any]]:
+        _auth(authorization)
+        return await list_news_risk_counterfactuals(_repo(), limit=max(1, min(1000, limit)))
+
+    @app.get("/engine/news-risk-counterfactuals/latest")
+    async def engine_news_risk_counterfactual_latest(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _auth(authorization)
+        item = await latest_news_risk_counterfactual(_repo())
+        if item is None:
+            raise HTTPException(status_code=404, detail="news risk counterfactual not found")
+        return item
 
     @app.get("/engine/readiness")
     async def engine_readiness(window_hours: int | None = None, limit: int = 1000, authorization: str | None = Header(default=None)) -> dict[str, Any]:

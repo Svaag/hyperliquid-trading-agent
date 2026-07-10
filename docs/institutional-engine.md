@@ -149,13 +149,17 @@ Every candidate builds a `CandidateTradePacket`, receives a deterministic role-b
 
 Wave 2 remains paper/live deferred. `ENGINE_WAVE2_ENABLED=true` is rejected until Wave 1 outcome attribution, replay grouping, and readiness gates are reliable. In `shadow_full_catalog`, the Wave 2 research strategies can emit shadow candidates with `activation_scope=shadow_only`, `paper_eligible=false`, and `operator_promotion_required=true`; they still cannot bypass RiskGateway/Council or create paper/live authority. Wave 2 is not “more simple strategies”; it is reserved for DEX-native, cross-venue, regime-aware proprietary strategies. The planned Wave 2 specs cover: 2A lead/lag, liquidity vacuum, stop-cluster, and liquidation divergence; 2B crowded long/short unwind and liquidation-cluster followthrough/exhaustion; 2C perp-basis momentum/reversion, funding-curve dislocation, and carry-risk-off. Wave 2D remains constrained report-only policy recommendation metadata and may not place orders, raise leverage, bypass RiskGateway/Council, or auto-apply production config.
 
-## Shadow replay, throttles, and PnL marking
+## Shadow replay, diagnostics, and PnL marking
 
 `POST /engine/replay-comparisons/run` stores immutable engine shadow comparison summaries in the existing `replay_results` storage shape with `proposal_id="engine:{variant_id}"` and `metadata.artifact_type="engine_shadow_comparison"`.
 
 Strategy throttles cap candidates and allocations per strategy and annotate throttled candidates/allocations without creating exchange actions. The diversity controller additionally enforces 45% target strategy share, 55% hard strategy share, 60% family share, and 35% symbol+strategy share once the evidence window has enough samples.
 
 The engine PnL attribution loop marks simulated paper/shadow positions from Hyperliquid `all_mids`, records `pnl_attribution_records`, and closes simulated theses on stop/target/max-age conditions.
+
+`GET /engine/candidate-funnel` reconstructs the first terminal stage for each candidate from its pre-Council packet through shadow intent and matured attribution. It reports downstream reason codes separately, so a Council veto cannot also masquerade as an allocator root cause. `GET /engine/strategy-funnel` records every strategy/asset evaluation after migration `0029`, including selector gates, feature presence/age, trigger outcome, candidate count, and structured no-candidate reasons. Historical periods without that telemetry are reported as unavailable, not as zero activity.
+
+`GET /engine/signal-quality` uses the fixed grain `(candidate_id, outcome_window)`, canonical regime/allocation joins, and strict `feature_store_mid` marks. It never pools horizons for promotion and labels net returns as modeled rather than execution PnL. `POST /engine/news-risk-counterfactuals/run` evaluates the persisted Newswire overlay on the same candidate cohort; its replay artifact is research-only and cannot replace the readiness replay.
 
 See `docs/engine-paper-readiness-runbook.md` for promotion and rollback steps.
 
@@ -168,7 +172,12 @@ Key flags:
 - `ORCHESTRATION_WAVE_SUPERVISOR_ENABLED=false`
 - `ORCHESTRATION_WAVE_SUPERVISOR_ESCALATION_ENABLED=false`
 - `ORCHESTRATION_WAVE_SUPERVISOR_ESCALATION_TRANSPORT=disabled|github_issue`
+- `ORCHESTRATION_GATE_SNAPSHOTS_ENABLED=true`
+- `ORCHESTRATION_GATE_SNAPSHOT_MILESTONE_HOURS=24,72`
+- `ORCHESTRATION_GATE_SNAPSHOT_GITHUB_ENABLED=true`
 - `AGENT_CORE_TRACE_ENABLED=false`
+
+At each due milestone the scheduler stores one immutable, SHA-256-addressed evidence payload in `wave_supervisor_runs`. The clean-window anchor is the later of the current trader and Newswire starts, so either worker restarting moves future milestones. Components fail independently and include readiness, exact current-config replay, candidate/strategy funnels, fixed-horizon signal quality, Newswire soak and counterfactual, Discord feedback, and paper/live side-effect checks. When a GitHub token is configured, bounded projections are posted once to issues `#10`, `#16`, and `#21` using hidden idempotency markers.
 
 Endpoints:
 
@@ -223,11 +232,18 @@ GET /engine/risk-rejects
 GET /engine/pnl-attribution
 GET /engine/validation-report
 GET /engine/readiness
+GET /engine/candidate-funnel
+GET /engine/strategy-funnel
+GET /engine/signal-quality
 GET /engine/replay-comparisons
 GET /engine/replay-comparisons/latest
 POST /engine/replay-comparisons/run
+GET /engine/news-risk-counterfactuals
+GET /engine/news-risk-counterfactuals/latest
+POST /engine/news-risk-counterfactuals/run
 GET /orchestration/wave/status
 POST /orchestration/wave/run-once
+GET /orchestration/wave/runs?artifact_type=gate_evidence_snapshot
 GET /engine/dashboard
 GET /dashboard
 GET /dashboard/data
@@ -244,5 +260,6 @@ Alembic revisions:
 - `0014_model_registry_retention`
 - `0019_engine_strategy_regime_council_learning`
 - `0020_engine_candidate_outcome_evidence_spine`
+- `0029_engine_strategy_evaluations`
 
-High-frequency event/feature data is intended for bounded retention and rollups; candidates, candidate evidence links, delayed outcome attributions, replay result links, strategy specs, strategy-regime scorecards, Council reviews/votes, diversity/concentration events, bandit report-only recommendations, risk checks, evidence packs, execution reports, position theses, attribution, and governance records are durable audit artifacts.
+High-frequency event/feature data is intended for bounded retention and rollups; candidates, per-run strategy evaluations, candidate evidence links, delayed outcome attributions, replay result links, strategy specs, strategy-regime scorecards, Council reviews/votes, diversity/concentration events, bandit report-only recommendations, risk checks, evidence packs, execution reports, position theses, attribution, and governance records are durable audit artifacts.

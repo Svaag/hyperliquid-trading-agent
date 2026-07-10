@@ -102,10 +102,17 @@ def register_orchestration_routes(app: FastAPI, settings: Settings, require_auth
     @app.get("/orchestration/wave/runs")
     async def wave_orchestration_runs(
         limit: int = 100,
+        artifact_type: str | None = None,
         authorization: str | None = Header(default=None),
     ) -> dict:
         _auth(authorization)
         repository = getattr(app.state, "repository", None)
         list_runs = getattr(repository, "list_wave_supervisor_runs", None)
         items = await list_runs(limit=max(1, min(1000, limit))) if callable(list_runs) else []
+        if artifact_type:
+            items = [
+                item
+                for item in items
+                if (item.get("result") or {}).get("artifact_type") == artifact_type
+            ]
         return {"items": items, "count": len(items), "owner_role": "scheduler"}

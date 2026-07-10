@@ -58,6 +58,8 @@ NEWSWIRE_MODEL_CLASSIFY_QUEUE_SIZE=32
 
 Each story revision receives a deterministic outbox identity per destination/channel. Breaking/high stories post immediately subject to `NEWSWIRE_DISCORD_MAX_IMMEDIATE_PER_HOUR`; standard stories are released on the periodic schedule. Every qualifying story is sent as its own rich embed with story-specific feedback controls—scheduled stories are never concatenated into a visible digest. Failed sends remain durable and retry with bounded exponential backoff. Publisher status distinguishes a running worker from a ready Discord gateway and reports pending/failed outbox counts.
 
+Discord feedback is analyzed over the post-deploy publisher cohort. `GET /newswire/feedback-summary` reports coverage and the latest vote per story/evaluator/label by source and fixed score bucket. Its denominator is posted stories; Wrong Symbol and Wrong Direction are explicit flag rates, not claims that every unflagged story was correct. The same view is available on the unified dashboard's Newswire Feedback tab.
+
 ## Engine risk and alpha
 
 The engine consumes all routed revisions into its evidence ledger, then maintains decaying per-symbol and global news risk state: `neutral`, `risk_on`, `risk_off`, or `shock`. State transitions and supporting story IDs are persisted. Negative primary-source shocks enter quickly; positive risk-on requires corroboration and market confirmation; exits use TTL, decay, minimum hold, and hysteresis. Retractions remove the source contribution and supersede World Model beliefs.
@@ -76,6 +78,7 @@ The engine consumes all routed revisions into its evidence ledger, then maintain
 - `POST /newswire/reclassify`: bounded dry-run/apply reassessment owned by the Newswire worker.
 - `POST /newswire/replay`: timestamp-preserving, no-authority engine evidence replay owned by the trader.
 - `GET /newswire/readiness`: continuous 24-hour soak evidence that resets on worker restart.
+- `GET /newswire/feedback-summary`: posted-story feedback coverage and rates by source/score bucket.
 - `GET /autonomy/news`: compatibility projection backed by canonical stories.
 - `WS /newswire/stream`: canonical story revisions projected onto the additive `NewswireEvent` schema.
 
