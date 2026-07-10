@@ -31,11 +31,15 @@ def build_engine_newsfeed_health(
     stale_after_ms = max(1, int(settings.newswire_engine_offset_stale_seconds)) * 1000
     reasons: list[dict[str, str]] = []
 
-    enabled = bool(settings.engine_enabled and settings.engine_newsfeed_enabled)
+    configured_for_local_role = bool(settings.engine_enabled and settings.engine_newsfeed_enabled)
+    runtime_detected = bool(consumer.get("running") or pump.get("running"))
+    enabled = bool(configured_for_local_role or runtime_detected)
     if not enabled:
         return {
             "status": "disabled",
             "enabled": False,
+            "configured_for_local_role": configured_for_local_role,
+            "runtime_detected": runtime_detected,
             "healthy": True,
             "reasons": [],
             "offset_age_ms": offset_age_ms,
@@ -81,6 +85,8 @@ def build_engine_newsfeed_health(
     return {
         "status": status,
         "enabled": True,
+        "configured_for_local_role": configured_for_local_role,
+        "runtime_detected": runtime_detected,
         "healthy": status == "healthy",
         "reasons": reasons,
         "offset_age_ms": offset_age_ms,

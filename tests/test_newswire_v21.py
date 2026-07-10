@@ -405,6 +405,17 @@ def test_newsfeed_health_and_soak_readiness_are_machine_readable_and_time_based(
     )
     assert stale["status"] == "degraded"
     assert "live_offset_stale" in {item["code"] for item in stale["reasons"]}
+    api_role_health = build_engine_newsfeed_health(
+        _settings(engine_enabled=False),
+        runtime,
+        offset,
+        newswire_active=True,
+        generated_at_ms=now,
+    )
+    assert api_role_health["enabled"] is True
+    assert api_role_health["configured_for_local_role"] is False
+    assert api_role_health["runtime_detected"] is True
+    assert api_role_health["status"] == "healthy"
 
     class Repo:
         def __init__(self, started_at_ms: int) -> None:
@@ -517,6 +528,50 @@ def test_newswire_operator_endpoints_expose_calibration_and_queue_owned_commands
         "newswire_reclassify",
         "engine_newswire_replay",
     ]
+
+
+def test_newswire_status_uses_worker_runtime_when_api_role_is_disabled() -> None:
+    runtime = {
+        "consumer": {"running": True, "received_events": 4, "recorded_events": 1, "features_created": 8},
+        "pump": {"running": True, "processed": 4, "error_count": 0},
+    }
+
+    class Repo:
+        enabled = True
+
+        async def list_newswire_events(self, **_kwargs: Any) -> list[dict[str, Any]]:
+            return [{"event_id": "nw_1", "received_at_ms": 10}]
+
+        async def list_newswire_stories(self, **_kwargs: Any) -> list[dict[str, Any]]:
+            return [{"story_id": "nws_1", "last_updated_at_ms": 10, "assessment": {}}]
+
+        async def list_newswire_risk_states(self, **_kwargs: Any) -> list[dict[str, Any]]:
+            return []
+
+        async def list_service_heartbeats(self, service_role: str, **_kwargs: Any) -> list[dict[str, Any]]:
+            if service_role == "newswire":
+                return [{"service_role": service_role, "status": "running", "metadata": {}}]
+            if service_role == "discord_publisher":
+                return [{"service_role": service_role, "status": "running", "metadata": {}}]
+            if service_role == "trader":
+                return [{"service_role": service_role, "status": "running", "metadata": {"engine_newsfeed": runtime}}]
+            return []
+
+        async def get_consumer_offset(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"last_event_id": "nwsr_1", "last_event_ts_ms": 10, "updated_at_ms": _now_ms()}
+
+    settings = _settings(newswire_enabled=False, engine_enabled=False)
+    app = create_app(settings)
+    with TestClient(app) as client:
+        app.state.repository = Repo()
+        status = client.get("/newswire/status").json()
+
+    assert status["enabled"] is True
+    assert status["running"] is True
+    assert status["configured_for_api_role"] is False
+    assert status["owner_role"] == "newswire"
+    assert status["runtime_source"] == "newswire_heartbeat"
+    assert status["engine_newsfeed"]["health"]["enabled"] is True
 
 
 def _now_ms() -> int:

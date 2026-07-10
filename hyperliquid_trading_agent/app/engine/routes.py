@@ -206,8 +206,12 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
         engine_runtime = await resolve_engine_runtime(repository, settings, local_service=service)
         operator_proposals_runtime = await _latest_trader_operator_proposals(repository)
         validation_monitor_runtime = await _latest_trader_validation_monitor(repository)
+        runtime_running = bool(engine_runtime.get("runtime_running") or engine_runtime.get("running"))
         return {
             "enabled": bool(engine_runtime.get("enabled")),
+            "running": runtime_running,
+            "owner_role": str(engine_runtime.get("owner_role") or "trader"),
+            "runtime_source": str(engine_runtime.get("runtime_source") or "local_service"),
             "configured_for_api_role": settings.engine_enabled,
             "mode": settings.engine_mode,
             "execution_modes": engine_runtime.get("execution_modes") or settings.engine_execution_mode_list,
