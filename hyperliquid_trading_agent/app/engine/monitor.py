@@ -7,11 +7,9 @@ from typing import Any
 from hyperliquid_trading_agent.app.autonomy.discord import AutonomyAlertSink
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.discord_bot import _chunk
-from hyperliquid_trading_agent.app.engine.readiness import (
-    _latest_trader_engine_loop_status,
-    build_paper_readiness_scorecard,
-)
+from hyperliquid_trading_agent.app.engine.readiness import build_paper_readiness_scorecard
 from hyperliquid_trading_agent.app.engine.replay_compare import latest_engine_replay_comparison
+from hyperliquid_trading_agent.app.engine.runtime import resolve_engine_runtime
 from hyperliquid_trading_agent.app.engine.validation_report import build_engine_validation_report
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.metrics import ENGINE_VALIDATION_ALERTS, ENGINE_VALIDATION_DIGESTS
@@ -284,15 +282,12 @@ class EngineValidationMonitorService:
         return missing
 
     async def _engine_status(self) -> dict[str, Any]:
-        local: dict[str, Any] = {}
-        if self.engine_service is not None and callable(getattr(self.engine_service, "status", None)):
-            local = self.engine_service.status()
-        if int(local.get("run_count") or 0) > 0 or local.get("last_run_at_ms"):
-            return local
-        # This process may not host the engine loop (role split); fall back to
-        # the trader heartbeat runtime the readiness scorecard uses.
-        runtime = await _latest_trader_engine_loop_status(self.repository, self.settings, generated_at_ms=_now_ms())
-        return runtime or local
+        return await resolve_engine_runtime(
+            self.repository,
+            self.settings,
+            local_service=self.engine_service,
+            generated_at_ms=_now_ms(),
+        )
 
 
 def format_engine_validation_digest(

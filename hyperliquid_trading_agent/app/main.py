@@ -42,6 +42,7 @@ from hyperliquid_trading_agent.app.engine.newswire_bridge import EngineNewsConsu
 from hyperliquid_trading_agent.app.engine.operator_proposals import project_operator_proposal_to_trade_signal
 from hyperliquid_trading_agent.app.engine.pnl_loop import EnginePnLAttributionLoopService
 from hyperliquid_trading_agent.app.engine.routes import register_engine_routes
+from hyperliquid_trading_agent.app.engine.runtime import resolve_engine_runtime
 from hyperliquid_trading_agent.app.engine.service import InstitutionalEngineService
 from hyperliquid_trading_agent.app.governance.decision_context import DecisionContextRecorder
 from hyperliquid_trading_agent.app.governance.review import ReviewWorkflowService
@@ -389,8 +390,6 @@ async def lifespan(app: FastAPI):
         log.info("newswire_started")
     if settings.world_model_streams_enabled and not dashboard_only:
         await world_model_stream_service.start()
-    if settings.orchestration_wave_supervisor_enabled and not restricted_runtime:
-        await wave_supervisor.start()
     if liquidation_service is not None:
         await liquidation_service.start()
         log.info("liquidation_service_task_started")
@@ -400,8 +399,6 @@ async def lifespan(app: FastAPI):
         UP.set(0)
         if liquidation_service is not None:
             await liquidation_service.stop()
-        if settings.orchestration_wave_supervisor_enabled and not restricted_runtime:
-            await wave_supervisor.stop()
         if not restricted_runtime:
             await bot.stop()
         if settings.world_model_streams_enabled and not dashboard_only:
@@ -478,6 +475,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def config_health() -> dict[str, Any]:
         gateway = ModelGateway(settings)
         attempts = gateway.configured_attempts()
+        engine_runtime = await resolve_engine_runtime(
+            app.state.repository,
+            settings,
+            local_service=getattr(app.state, "engine_service", None),
+        )
+        try:
+            scheduler_heartbeats = await app.state.repository.list_service_heartbeats(
+                service_role="scheduler",
+                limit=1,
+            )
+        except Exception:
+            scheduler_heartbeats = []
+        scheduler_metadata = (
+            scheduler_heartbeats[0].get("metadata")
+            if scheduler_heartbeats and isinstance(scheduler_heartbeats[0].get("metadata"), dict)
+            else {}
+        )
+        wave_runtime = (
+            dict(scheduler_metadata.get("wave_supervisor"))
+            if isinstance(scheduler_metadata.get("wave_supervisor"), dict)
+            else {}
+        )
         return {
             "service_role": str(settings.service_role),
             "runtime_profile": settings.runtime_profile,
@@ -491,21 +510,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "autonomy": _autonomy_config_status(app),
             "tradfi": _tradfi_config_status(app),
             "engine": {
-                "enabled": settings.engine_enabled,
+                "enabled": bool(engine_runtime.get("enabled")),
+                "runtime_source": engine_runtime.get("runtime_source"),
+                "configured_for_api_role": settings.engine_enabled,
                 "mode": settings.engine_mode,
-                "execution_modes": settings.engine_execution_mode_list,
-                "paper_enabled": settings.engine_paper_enabled,
-                "shadow_enabled": settings.engine_shadow_enabled,
-                "live_enabled": settings.engine_live_enabled,
+                "execution_modes": engine_runtime.get("execution_modes") or settings.engine_execution_mode_list,
+                "paper_enabled": bool(engine_runtime.get("paper_enabled", settings.engine_paper_enabled)),
+                "shadow_enabled": bool(engine_runtime.get("shadow_enabled", settings.engine_shadow_enabled)),
+                "live_enabled": bool(engine_runtime.get("live_enabled", settings.engine_live_enabled)),
                 "debate_enabled": settings.engine_debate_enabled,
                 "debate_priority_min": settings.engine_debate_priority_min,
                 "min_net_ev_bps": settings.engine_min_net_ev_bps,
                 "min_risk_adjusted_utility": settings.engine_min_risk_adjusted_utility,
             },
             "orchestration": {
-                "wave_supervisor": app.state.wave_supervisor.status() if getattr(app.state, "wave_supervisor", None) is not None else {
+                "wave_supervisor": wave_runtime
+                or {
                     "enabled": settings.orchestration_wave_supervisor_enabled,
                     "running": False,
+                    "owner_role": "scheduler",
+                    "runtime_source": "awaiting_scheduler_heartbeat",
                     "handoff_repo": settings.orchestration_wave_supervisor_handoff_repo,
                 }
             },
@@ -584,10 +608,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     @app.get("/runtime/heartbeats")
-    async def runtime_heartbeats(service_role: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    async def runtime_heartbeats(
+        service_role: str | None = None,
+        include_history: bool = False,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        items = _annotate_heartbeats(settings, await app.state.repository.list_service_heartbeats(service_role=service_role, limit=100))
-        return {"items": items, "count": len(items), "stale_count": len([item for item in items if item.get("stale") is True])}
+        items = _annotate_heartbeats(
+            settings,
+            await app.state.repository.list_service_heartbeats(
+                service_role=service_role,
+                limit=100,
+                include_history=include_history,
+            ),
+        )
+        return {
+            "items": items,
+            "count": len(items),
+            "stale_count": len([item for item in items if item.get("stale") is True]),
+            "view": "history" if include_history else "current",
+        }
+
+    @app.get("/runtime/heartbeats/history")
+    async def runtime_heartbeat_history(
+        service_role: str | None = None,
+        limit: int = 500,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_agent_api(settings, authorization)
+        items = _annotate_heartbeats(
+            settings,
+            await app.state.repository.list_service_heartbeats(
+                service_role=service_role,
+                limit=max(1, min(5000, limit)),
+                include_history=True,
+            ),
+        )
+        return {"items": items, "count": len(items), "view": "history"}
 
     @app.get("/runtime/status")
     async def runtime_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -1454,7 +1511,7 @@ def _annotate_heartbeats(settings: Settings, heartbeats: list[dict[str, Any]]) -
         stale = False
         if isinstance(updated_at_ms, int):
             age_ms = max(0, now_ms - updated_at_ms)
-            stale = age_ms > stale_after_ms and str(item.get("status") or "").lower() not in {"stopping", "stopped"}
+            stale = age_ms > stale_after_ms and str(item.get("status") or "").lower() in {"starting", "running"}
         item["heartbeat_age_ms"] = age_ms
         item["stale"] = stale
         annotated.append(item)

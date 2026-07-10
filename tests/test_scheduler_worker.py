@@ -41,8 +41,21 @@ class _DummyEventEvaluationService:
 
 
 class _DummyWaveSupervisor:
+    def __init__(self) -> None:
+        self.started = False
+        self.stopped = False
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
     async def run_once(self, options: object | None = None) -> dict[str, object]:
         return {"ok": True, "options": options.__class__.__name__ if options else None}
+
+    def status(self) -> dict[str, object]:
+        return {"enabled": True, "running": self.started and not self.stopped, "owner_role": "scheduler"}
 
 
 def test_scheduler_signal_evaluation_handler_runs_real_service_methods() -> None:
@@ -75,5 +88,29 @@ def test_scheduler_event_evaluation_and_wave_handlers_run_real_service_methods()
         wave_result = await worker._handle_orchestration_wave_run_once({"command_type": "orchestration_wave_run_once", "payload": {"perform_maintenance": True}})
         assert wave_result["result"]["ok"] is True
         assert worker.heartbeat_metadata()["scheduler"]["command_count"] == 2
+
+    anyio.run(run)
+
+
+def test_scheduler_owns_wave_supervisor_lifecycle() -> None:
+    async def run() -> None:
+        worker = SchedulerWorker(
+            Settings(
+                environment="test",
+                orchestration_wave_supervisor_enabled=True,
+                _env_file=None,
+            )
+        )
+        supervisor = _DummyWaveSupervisor()
+        worker._wave_supervisor = supervisor
+
+        async def command_loop(handlers):
+            assert "orchestration_wave_run_once" in handlers
+
+        worker.command_loop = command_loop  # type: ignore[method-assign]
+        await worker.run()
+
+        assert supervisor.started is True
+        assert supervisor.stopped is True
 
     anyio.run(run)
