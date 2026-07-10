@@ -53,6 +53,7 @@ grpc = [
 [project.scripts]
 hyperliquid-trading-agent = "hyperliquid_trading_agent.app.main:main"
 hyperliquid-trading-agent-runtime = "hyperliquid_trading_agent.app.runtime:main"
+hyperliquid-trading-agent-vault = "hyperliquid_trading_agent.app.vault_admin:main"
 
 [build-system]
 requires = ["hatchling"]

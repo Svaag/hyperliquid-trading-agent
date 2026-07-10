@@ -12,6 +12,8 @@ from urllib.request import Request, urlopen
 
 from dotenv import dotenv_values
 
+from hyperliquid_trading_agent.app.security import redact_text
+
 ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
 
@@ -135,7 +137,16 @@ def _fetch_json(url: str, headers: dict[str, str], timeout: float) -> dict[str, 
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise VaultLoadError(f"Vault returned HTTP {exc.code}: {detail}") from exc
+        detail_lower = detail.lower()
+        if exc.code == 503 and "sealed" in detail_lower:
+            raise VaultLoadError(
+                "Vault is sealed; unseal the local Vault or run the approval-gated recovery procedure before enabling VAULT_ENABLED"
+            ) from exc
+        if exc.code == 501 or "not initialized" in detail_lower:
+            raise VaultLoadError(
+                "Vault is not initialized; run `python -m hyperliquid_trading_agent.app.vault_admin bootstrap-local`"
+            ) from exc
+        raise VaultLoadError(f"Vault returned HTTP {exc.code}: {redact_text(detail)}") from exc
     except URLError as exc:
         raise VaultLoadError(f"Vault request failed: {exc.reason}") from exc
     except json.JSONDecodeError as exc:

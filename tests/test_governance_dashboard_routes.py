@@ -90,6 +90,7 @@ def test_dashboard_html_and_data_endpoint():
 
     assert html.status_code == 200
     assert "Trading Agent Governance Dashboard" in html.text
+    assert "Export review" in html.text
     assert data.status_code == 200
     body = data.json()
     assert body["summary"]["review_ready_count"] == 1

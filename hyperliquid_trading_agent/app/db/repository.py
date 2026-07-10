@@ -4765,6 +4765,13 @@ class Repository:
             await session.commit()
             return item.rollback_plan_id
 
+    async def get_rollback_plan(self, rollback_plan_id: str) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(RollbackPlanRecord, rollback_plan_id)
+            return _rollback_plan_to_dict(item) if item is not None else None
+
     async def upsert_review_packet(self, packet: dict[str, Any]) -> str | None:
         if self.sessionmaker is None:
             return None
@@ -4824,6 +4831,16 @@ class Repository:
             session.add(item)
             await session.commit()
             return item.decision_id
+
+    async def list_promotion_decisions(self, proposal_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(PromotionDecisionRecord).order_by(PromotionDecisionRecord.created_at_ms.desc()).limit(limit)
+            if proposal_id:
+                stmt = stmt.where(PromotionDecisionRecord.proposal_id == proposal_id)
+            result = await session.execute(stmt)
+            return [_promotion_decision_to_dict(item) for item in result.scalars().all()]
 
     async def record_replay_result(self, result: dict[str, Any]) -> str | None:
         if self.sessionmaker is None:
@@ -7306,6 +7323,37 @@ def _review_packet_to_dict(item: ReviewPacketRecord) -> dict[str, Any]:
         "shadow_results": item.shadow_results_json,
         "reviewer_findings": item.reviewer_findings_json,
         "approval_requirements": item.approval_requirements_json,
+        "rollback_plan_id": item.rollback_plan_id,
+        "created_at_ms": item.created_at_ms,
+    }
+
+
+def _rollback_plan_to_dict(item: RollbackPlanRecord) -> dict[str, Any]:
+    return {
+        "rollback_plan_id": item.rollback_plan_id,
+        "target_type": item.target_type,
+        "target_id": item.target_id,
+        "previous_version_id": item.previous_version_id,
+        "rollback_steps": item.rollback_steps_json,
+        "verification_steps": item.verification_steps_json,
+        "owner": item.owner,
+        "created_at_ms": item.created_at_ms,
+    }
+
+
+def _promotion_decision_to_dict(item: PromotionDecisionRecord) -> dict[str, Any]:
+    return {
+        "decision_id": item.decision_id,
+        "proposal_id": item.proposal_id,
+        "reviewer": item.reviewer,
+        "decision": item.decision,
+        "rationale": item.rationale,
+        "evidence_reviewed": item.evidence_reviewed_json,
+        "tests_reviewed": item.tests_reviewed_json,
+        "proposer_actor": item.proposer_actor,
+        "approver_actor": item.approver_actor,
+        "change_control_id": item.change_control_id,
+        "approved_contexts": item.approved_contexts_json,
         "rollback_plan_id": item.rollback_plan_id,
         "created_at_ms": item.created_at_ms,
     }

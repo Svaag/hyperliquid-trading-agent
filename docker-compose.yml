@@ -1,6 +1,8 @@
 x-app-common: &app-common
   build: .
   restart: unless-stopped
+  volumes:
+    - ./.local/vault/app:/run/secrets/vault:ro
   env_file:
     - path: .env
       required: false
@@ -50,6 +52,8 @@ services:
   migrate:
     build: .
     restart: "no"
+    volumes:
+      - ./.local/vault/app:/run/secrets/vault:ro
     env_file:
       - path: .env
         required: false

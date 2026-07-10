@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from io import BytesIO
+from urllib.error import HTTPError
+
 import pytest
 
-from hyperliquid_trading_agent.app.vault import VaultConfigError, load_vault_environment
+from hyperliquid_trading_agent.app import vault
+from hyperliquid_trading_agent.app.vault import VaultConfigError, VaultLoadError, load_vault_environment
 
 
 def test_vault_loader_hydrates_missing_env_values() -> None:
@@ -100,3 +104,19 @@ def test_vault_loader_supports_token_file(tmp_path) -> None:
 def test_vault_loader_requires_token_when_enabled() -> None:
     with pytest.raises(VaultConfigError):
         load_vault_environment(environ={"VAULT_ENABLED": "true"}, fetch_json=lambda url, headers, timeout: {})
+
+
+def test_vault_loader_reports_sealed_state_with_recovery_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
+    def sealed(*args, **kwargs):
+        raise HTTPError(
+            "http://vault:8200/v1/kv/data/path",
+            503,
+            "service unavailable",
+            {},
+            BytesIO(b'{"errors":["Vault is sealed"]}'),
+        )
+
+    monkeypatch.setattr(vault, "urlopen", sealed)
+
+    with pytest.raises(VaultLoadError, match="approval-gated recovery"):
+        vault._fetch_json("http://vault:8200/v1/kv/data/path", {"X-Vault-Token": "token"}, 1.0)

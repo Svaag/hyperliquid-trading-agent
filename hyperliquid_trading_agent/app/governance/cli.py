@@ -25,10 +25,14 @@ def main() -> None:
     sub.add_parser("dashboard-url")
     show = sub.add_parser("show-proposal")
     show.add_argument("proposal_id")
+    export = sub.add_parser("export-review")
+    export.add_argument("proposal_id")
     replay = sub.add_parser("run-replay")
     replay.add_argument("proposal_id")
     shadow = sub.add_parser("run-shadow")
     shadow.add_argument("proposal_id")
+    packet = sub.add_parser("create-review-packet")
+    packet.add_argument("proposal_id")
     approve = sub.add_parser("approve-proposal")
     approve.add_argument("proposal_id")
     approve.add_argument("--reviewer", default="cli")
@@ -50,38 +54,42 @@ def main() -> None:
 
 def _dispatch(client: httpx.Client, args: argparse.Namespace) -> Any:
     if args.command == "list-proposals":
-        return client.get("/governance/proposals").raise_for_status_or_json()
+        return _response_json(client.get("/governance/proposals"))
     if args.command == "list-review-ready":
-        return client.get("/governance/proposals/review-ready").raise_for_status_or_json()
+        return _response_json(client.get("/governance/proposals/review-ready"))
     if args.command == "list-replays":
         params = {"proposal_id": args.proposal_id} if args.proposal_id else None
-        return client.get("/governance/replay-results", params=params).raise_for_status_or_json()
+        return _response_json(client.get("/governance/replay-results", params=params))
     if args.command == "list-shadows":
         params = {"proposal_id": args.proposal_id} if args.proposal_id else None
-        return client.get("/governance/shadow-comparisons", params=params).raise_for_status_or_json()
+        return _response_json(client.get("/governance/shadow-comparisons", params=params))
     if args.command == "list-review-packets":
         params = {"proposal_id": args.proposal_id} if args.proposal_id else None
-        return client.get("/governance/review-packets", params=params).raise_for_status_or_json()
+        return _response_json(client.get("/governance/review-packets", params=params))
     if args.command == "dashboard-data":
-        return client.get("/governance/dashboard/data").raise_for_status_or_json()
+        return _response_json(client.get("/governance/dashboard/data"))
     if args.command == "dashboard-url":
         return {"url": str(client.base_url).rstrip("/") + "/governance/dashboard"}
     if args.command == "show-proposal":
-        return client.get(f"/governance/proposals/{args.proposal_id}").raise_for_status_or_json()
+        return _response_json(client.get(f"/governance/proposals/{args.proposal_id}"))
+    if args.command == "export-review":
+        return _response_json(client.get(f"/governance/proposals/{args.proposal_id}/review-export"))
     if args.command == "run-replay":
-        return client.post(f"/governance/proposals/{args.proposal_id}/request-replay").raise_for_status_or_json()
+        return _response_json(client.post(f"/governance/proposals/{args.proposal_id}/request-replay"))
     if args.command == "run-shadow":
-        return client.post(f"/governance/proposals/{args.proposal_id}/request-shadow").raise_for_status_or_json()
+        return _response_json(client.post(f"/governance/proposals/{args.proposal_id}/request-shadow"))
+    if args.command == "create-review-packet":
+        return _response_json(client.post(f"/governance/proposals/{args.proposal_id}/review-packet"))
     if args.command == "approve-proposal":
         payload = {"reviewer": args.reviewer, "approver_actor": args.reviewer, "change_control_id": args.change_control, "rationale": args.rationale}
-        return client.post(f"/governance/proposals/{args.proposal_id}/approve", json=payload).raise_for_status_or_json()
+        return _response_json(client.post(f"/governance/proposals/{args.proposal_id}/approve", json=payload))
     if args.command == "reject-proposal":
         payload = {"reviewer": args.reviewer, "approver_actor": args.reviewer, "change_control_id": "reject-no-change", "rationale": args.rationale}
-        return client.post(f"/governance/proposals/{args.proposal_id}/reject", json=payload).raise_for_status_or_json()
+        return _response_json(client.post(f"/governance/proposals/{args.proposal_id}/reject", json=payload))
     if args.command == "show-active-config":
-        return client.get("/governance/config/active").raise_for_status_or_json()
+        return _response_json(client.get("/governance/config/active"))
     if args.command == "freeze-live":
-        return client.post("/governance/freeze-live").raise_for_status_or_json()
+        return _response_json(client.post("/governance/freeze-live"))
     raise SystemExit(f"unknown command: {args.command}")
 
 
@@ -89,12 +97,9 @@ def _headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
-def _raise_for_status_or_json(response: httpx.Response) -> Any:
+def _response_json(response: httpx.Response) -> Any:
     response.raise_for_status()
     return response.json()
-
-
-httpx.Response.raise_for_status_or_json = _raise_for_status_or_json  # type: ignore[attr-defined,method-assign]
 
 
 if __name__ == "__main__":
