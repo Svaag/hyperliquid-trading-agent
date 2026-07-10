@@ -39,6 +39,7 @@ from hyperliquid_trading_agent.app.discord_bot import DiscordTradingBot
 from hyperliquid_trading_agent.app.discord_publish import SendOnlyDiscordClient, SendOnlyDiscordSink
 from hyperliquid_trading_agent.app.engine.monitor import EngineValidationMonitorService
 from hyperliquid_trading_agent.app.engine.newswire_bridge import EngineNewsConsumer
+from hyperliquid_trading_agent.app.engine.operator_proposals import project_operator_proposal_to_trade_signal
 from hyperliquid_trading_agent.app.engine.pnl_loop import EnginePnLAttributionLoopService
 from hyperliquid_trading_agent.app.engine.routes import register_engine_routes
 from hyperliquid_trading_agent.app.engine.service import InstitutionalEngineService
@@ -374,7 +375,6 @@ async def lifespan(app: FastAPI):
             reason = "DISCORD_BOT_TOKEN-not-set"
         log.info("discord_bot_disabled", reason=reason)
     if not restricted_runtime:
-        await engine_validation_monitor.start()
         await engine_pnl_attribution.start()
     if settings.newswire_enabled and not dashboard_only:
         # Subscribe consumers before adapters start so no early events are missed.
@@ -415,7 +415,6 @@ async def lifespan(app: FastAPI):
                 await newswire_discord_client.stop()
         if not restricted_runtime:
             await engine_pnl_attribution.stop()
-            await engine_validation_monitor.stop()
             await hip4_service.stop()
             await autonomy_service.stop()
             await tracking_service.stop()
@@ -898,12 +897,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/autonomy/signals")
     async def autonomy_signals(status: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        items = [item.model_dump(mode="json") for item in app.state.autonomy_service.list_signals(status=status)]
-        return {"items": items, "count": len(items)}
+        await app.state.repository.expire_engine_operator_proposals(now_ms=int(time.time() * 1000))
+        proposals = await app.state.repository.list_engine_operator_proposals(limit=500)
+        projected = [project_operator_proposal_to_trade_signal(item) for item in proposals]
+        legacy = await app.state.repository.list_autonomy_trade_signals(status=status, limit=100)
+        items = [*projected, *legacy]
+        if status:
+            items = [item for item in items if str(item.get("status") or "") == status]
+        items.sort(key=lambda item: int(item.get("created_at_ms") or 0), reverse=True)
+        return {
+            "items": items,
+            "count": len(items),
+            "canonical_source": "institutional_engine_operator_proposals",
+            "legacy_history_read_only": True,
+        }
 
     @app.get("/autonomy/signals/{signal_id}")
     async def autonomy_signal(signal_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
+        if signal_id.startswith("sig_eng_"):
+            proposal = await app.state.repository.get_engine_operator_proposal(signal_id)
+            if proposal is None:
+                raise HTTPException(status_code=404, detail="signal not found")
+            return project_operator_proposal_to_trade_signal(proposal)
         signal = await app.state.autonomy_service._get_signal(signal_id)
         if signal is None:
             raise HTTPException(status_code=404, detail="signal not found")
@@ -912,20 +928,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/autonomy/signals/{signal_id}/approve")
     async def approve_autonomy_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        command = await app.state.repository.enqueue_worker_command(target_role="trader", command_type="autonomy_signal_approve", payload={"signal_id": signal_id, **(request.model_dump(mode="json") if request else {})}, requested_by="api")
-        return _accepted_command(command)
+        if not signal_id.startswith("sig_eng_"):
+            raise HTTPException(status_code=410, detail="legacy signal mutations are retired; historical signals are read-only")
+        if await app.state.repository.get_engine_operator_proposal(signal_id) is None:
+            raise HTTPException(status_code=404, detail="signal not found")
+        command = await app.state.repository.enqueue_worker_command(
+            target_role="trader",
+            command_type="engine_operator_proposal_ack",
+            payload={"proposal_id": signal_id, **(request.model_dump(mode="json") if request else {})},
+            requested_by="api",
+        )
+        return {**_accepted_command(command), "acknowledgment_only": True, "paper_order_created": False}
 
     @app.post("/autonomy/signals/{signal_id}/reject")
     async def reject_autonomy_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        command = await app.state.repository.enqueue_worker_command(target_role="trader", command_type="autonomy_signal_reject", payload={"signal_id": signal_id, **(request.model_dump(mode="json") if request else {})}, requested_by="api")
-        return _accepted_command(command)
+        if not signal_id.startswith("sig_eng_"):
+            raise HTTPException(status_code=410, detail="legacy signal mutations are retired; historical signals are read-only")
+        if await app.state.repository.get_engine_operator_proposal(signal_id) is None:
+            raise HTTPException(status_code=404, detail="signal not found")
+        command = await app.state.repository.enqueue_worker_command(
+            target_role="trader",
+            command_type="engine_operator_proposal_reject",
+            payload={"proposal_id": signal_id, **(request.model_dump(mode="json") if request else {})},
+            requested_by="api",
+        )
+        return {**_accepted_command(command), "paper_order_created": False}
 
     @app.post("/autonomy/signals/{signal_id}/expire")
     async def expire_autonomy_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        command = await app.state.repository.enqueue_worker_command(target_role="trader", command_type="autonomy_signal_expire", payload={"signal_id": signal_id, **(request.model_dump(mode="json") if request else {})}, requested_by="api")
-        return _accepted_command(command)
+        if not signal_id.startswith("sig_eng_"):
+            raise HTTPException(status_code=410, detail="legacy signal mutations are retired; historical signals are read-only")
+        if await app.state.repository.get_engine_operator_proposal(signal_id) is None:
+            raise HTTPException(status_code=404, detail="signal not found")
+        command = await app.state.repository.enqueue_worker_command(
+            target_role="trader",
+            command_type="engine_operator_proposal_expire",
+            payload={"proposal_id": signal_id, **(request.model_dump(mode="json") if request else {})},
+            requested_by="api",
+        )
+        return {**_accepted_command(command), "paper_order_created": False}
 
     @app.post("/admin/debug/seed-flip-demo")
     async def seed_flip_demo(request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:

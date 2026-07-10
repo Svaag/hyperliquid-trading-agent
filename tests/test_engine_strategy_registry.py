@@ -42,7 +42,7 @@ def test_shadow_full_catalog_registers_runtime_shadow_only_breadth_without_paper
     assert catalog["runtime_enabled"] == len(SHADOW_FULL_CATALOG_ACTIVE_IDS)
     assert catalog["paper_eligible"] == 0
     assert catalog["shadow_only"] == len(SHADOW_FULL_CATALOG_ACTIVE_IDS)
-    assert catalog["spec_only_ids"] == ["equity_options_flow_v1"]
+    assert catalog["spec_only_ids"] == ["equity_options_flow_v1", "legacy_signal_adapter_v1"]
     assert registry.require_spec("cross_venue_lead_lag_v1").enabled is True
     assert registry.require_spec("cross_venue_lead_lag_v1").counts_for_breadth is True
     assert registry.require_spec("cross_venue_lead_lag_v1").metadata["paper_eligible"] is False

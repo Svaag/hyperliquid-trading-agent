@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Callable
 
 from fastapi import FastAPI, Header, HTTPException
@@ -8,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.engine.alpha_graph import build_strategy_regime_alpha_graph
+from hyperliquid_trading_agent.app.engine.operator_proposals import project_operator_proposal_to_trade_signal
 from hyperliquid_trading_agent.app.engine.paper_signoff import build_paper_signoff_preflight
 from hyperliquid_trading_agent.app.engine.readiness import build_paper_readiness_scorecard
 from hyperliquid_trading_agent.app.engine.replay_compare import (
@@ -44,6 +46,10 @@ class EngineReplayComparisonRequest(BaseModel):
     baseline_config: dict[str, Any] = Field(default_factory=dict)
     candidate_config: dict[str, Any] = Field(default_factory=dict)
     variant_id: str | None = None
+
+
+class EngineOperatorProposalActionRequest(BaseModel):
+    reason: str = Field(default="", max_length=1000)
 
 
 async def _enqueue_command(repo: Any, *, target_role: str, command_type: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -100,7 +106,8 @@ def _strategy_catalog_from_specs(specs: list[dict[str, Any]], *, mode: str) -> d
 
 
 def _spec_metadata(spec: dict[str, Any]) -> dict[str, Any]:
-    return spec.get("metadata") if isinstance(spec.get("metadata"), dict) else {}
+    value = spec.get("metadata")
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def _spec_paper_eligible(spec: dict[str, Any]) -> bool:
@@ -139,6 +146,14 @@ async def _latest_trader_engine_loop(repository: Any) -> dict[str, Any]:
     return await _latest_trader_metadata(repository, "engine_loop")
 
 
+async def _latest_trader_operator_proposals(repository: Any) -> dict[str, Any]:
+    return await _latest_trader_metadata(repository, "engine_operator_proposals")
+
+
+async def _latest_trader_validation_monitor(repository: Any) -> dict[str, Any]:
+    return await _latest_trader_metadata(repository, "engine_validation_monitor")
+
+
 def register_engine_routes(app: FastAPI, settings: Settings, require_auth: RequireAuth) -> None:
     def _repo():
         repository = getattr(app.state, "repository", None)
@@ -163,6 +178,8 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
         news_status = news_consumer.status() if news_consumer is not None and callable(getattr(news_consumer, "status", None)) else {}
         news_runtime = {} if news_status.get("running") else await _latest_trader_engine_newsfeed(repository)
         engine_runtime = await _latest_trader_engine_loop(repository)
+        operator_proposals_runtime = await _latest_trader_operator_proposals(repository)
+        validation_monitor_runtime = await _latest_trader_validation_monitor(repository)
         return {
             "enabled": settings.engine_enabled,
             "mode": settings.engine_mode,
@@ -178,9 +195,11 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
             "repository_enabled": getattr(repository, "enabled", False),
             "service": service_status,
             "engine_runtime": engine_runtime,
+            "operator_proposals": operator_proposals_runtime,
             "newsfeed": news_status,
             "newsfeed_runtime": news_runtime,
-            "validation_monitor": monitor_status,
+            "validation_monitor": validation_monitor_runtime
+            or {**monitor_status, "running": False, "owner_role": "trader", "runtime_source": "awaiting_trader_heartbeat"},
             "pnl_attribution": pnl_status,
             "debate": {"enabled": settings.engine_debate_enabled, "max_per_day": settings.engine_debate_max_per_day, "priority_min": settings.engine_debate_priority_min},
             "retention": {
@@ -189,6 +208,82 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
                 "rollup_days": settings.engine_rollup_retention_days,
             },
         }
+
+    @app.get("/engine/operator-proposals")
+    async def engine_operator_proposals(
+        status: str | None = None,
+        asset: str | None = None,
+        limit: int = 100,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _auth(authorization)
+        repository = _repo()
+        await repository.expire_engine_operator_proposals(now_ms=int(time.time() * 1000))
+        items = await repository.list_engine_operator_proposals(
+            status=status,
+            asset=asset,
+            limit=max(1, min(1000, limit)),
+        )
+        return {
+            "items": items,
+            "count": len(items),
+            "execution_authority": "none",
+            "acknowledgment_only": True,
+        }
+
+    @app.get("/engine/operator-proposals/{proposal_id}")
+    async def engine_operator_proposal(
+        proposal_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _auth(authorization)
+        item = await _repo().get_engine_operator_proposal(proposal_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="engine operator proposal not found")
+        return {**item, "signal_projection": project_operator_proposal_to_trade_signal(item)}
+
+    @app.post("/engine/operator-proposals/{proposal_id}/acknowledge", status_code=202)
+    async def acknowledge_engine_operator_proposal(
+        proposal_id: str,
+        request: EngineOperatorProposalActionRequest | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _auth(authorization)
+        command = await _enqueue_command(
+            _repo(),
+            target_role="trader",
+            command_type="engine_operator_proposal_ack",
+            payload={"proposal_id": proposal_id, "reason": request.reason if request else ""},
+        )
+        return {**_accepted_command(command), "acknowledgment_only": True, "paper_order_created": False}
+
+    @app.post("/engine/operator-proposals/{proposal_id}/reject", status_code=202)
+    async def reject_engine_operator_proposal(
+        proposal_id: str,
+        request: EngineOperatorProposalActionRequest | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _auth(authorization)
+        command = await _enqueue_command(
+            _repo(),
+            target_role="trader",
+            command_type="engine_operator_proposal_reject",
+            payload={"proposal_id": proposal_id, "reason": request.reason if request else ""},
+        )
+        return {**_accepted_command(command), "paper_order_created": False}
+
+    @app.post("/engine/validation-monitor/run-once", status_code=202)
+    async def run_engine_validation_monitor_once(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _auth(authorization)
+        command = await _enqueue_command(
+            _repo(),
+            target_role="trader",
+            command_type="engine_validation_monitor_run_once",
+            payload={},
+        )
+        return _accepted_command(command)
 
     @app.get("/engine/events")
     async def engine_events(limit: int = 100, event_type: str | None = None, asset_class: str | None = None, authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:

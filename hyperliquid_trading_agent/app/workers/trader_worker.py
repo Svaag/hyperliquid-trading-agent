@@ -10,7 +10,9 @@ from hyperliquid_trading_agent.app.autonomy.service import AutonomousTradingLoop
 from hyperliquid_trading_agent.app.config import ServiceRole, Settings
 from hyperliquid_trading_agent.app.engine.bandit import OfflineContextualBanditReporter
 from hyperliquid_trading_agent.app.engine.evidence_loop import EngineEvidenceRefreshLoopService
+from hyperliquid_trading_agent.app.engine.monitor import EngineValidationMonitorService
 from hyperliquid_trading_agent.app.engine.newswire_bridge import EngineNewsConsumer
+from hyperliquid_trading_agent.app.engine.operator_proposals import EngineOperatorProposalService
 from hyperliquid_trading_agent.app.engine.pnl_loop import EnginePnLAttributionLoopService
 from hyperliquid_trading_agent.app.engine.replay_compare import EngineReplayComparisonService
 from hyperliquid_trading_agent.app.engine.service import InstitutionalEngineService
@@ -47,6 +49,8 @@ class TraderWorker(BaseWorker):
         self._autonomy_service: AutonomousTradingLoopService | None = None
         self._memory_service: MemoryService | None = None
         self._engine_service: InstitutionalEngineService | None = None
+        self._engine_operator_proposals: EngineOperatorProposalService | None = None
+        self._engine_validation_monitor: EngineValidationMonitorService | None = None
         self._engine_hyperliquid: HyperliquidClient | None = None
         self._engine_pnl_attribution: EnginePnLAttributionLoopService | None = None
         self._engine_evidence_refresh: EngineEvidenceRefreshLoopService | None = None
@@ -59,6 +63,7 @@ class TraderWorker(BaseWorker):
 
     async def run(self) -> None:
         await self._start_engine_loop()
+        await self._start_engine_validation_monitor()
         await self._start_engine_pnl_attribution()
         await self._start_engine_evidence_refresh()
         await self._start_engine_newsfeed()
@@ -88,6 +93,10 @@ class TraderWorker(BaseWorker):
             "engine_position_thesis_cleanup": self._handle_engine_position_thesis_cleanup,
             "engine_bandit_run": self._handle_engine_bandit_run,
             "engine_replay_comparison_run": self._handle_engine_replay_comparison_run,
+            "engine_operator_proposal_ack": self._handle_engine_operator_proposal_ack,
+            "engine_operator_proposal_reject": self._handle_engine_operator_proposal_reject,
+            "engine_operator_proposal_expire": self._handle_engine_operator_proposal_expire,
+            "engine_validation_monitor_run_once": self._handle_engine_validation_monitor_run_once,
             "hip4_loop_run_once": self._handle_hip4_loop_run_once,
             "hip4_scan_run": self._handle_hip4_scan_run,
             "hip4_paper_execute": self._handle_hip4_paper_execute,
@@ -151,6 +160,18 @@ class TraderWorker(BaseWorker):
             )
         await self._engine_pnl_attribution.start()
 
+    async def _start_engine_validation_monitor(self) -> None:
+        if not self.settings.engine_enabled:
+            return
+        if self._engine_validation_monitor is None:
+            self._engine_validation_monitor = EngineValidationMonitorService(
+                settings=self.settings,
+                repository=self.repository,
+                engine_service=self._ensure_engine_service(),
+                alert_sink=None,
+            )
+        await self._engine_validation_monitor.start()
+
     async def _start_engine_evidence_refresh(self) -> None:
         if not self.settings.engine_enabled:
             return
@@ -164,9 +185,20 @@ class TraderWorker(BaseWorker):
             try:
                 service = self._ensure_engine_service()
                 self._engine_loop_last_result = await service.run_once(symbols=self.settings.autonomy_core_symbols)
+                try:
+                    proposal_result = await self._get_engine_operator_proposal_service().process_candidate_book(
+                        self._engine_loop_last_result.get("candidate_book_id")
+                    )
+                    self._engine_loop_last_result["operator_proposals"] = proposal_result
+                except Exception as exc:
+                    log.warning("trader_engine_operator_proposals_failed", error=type(exc).__name__)
+                    self._engine_loop_last_result["operator_proposals"] = {
+                        "enabled": self.settings.engine_operator_proposals_enabled,
+                        "error": type(exc).__name__,
+                    }
                 self._engine_loop_last_error = None
                 stage_ms = self._engine_loop_last_result.get("stage_ms") or {}
-                slowest_stage = max(stage_ms, key=stage_ms.get) if stage_ms else None
+                slowest_stage = max(stage_ms, key=lambda name: float(stage_ms.get(name) or 0)) if stage_ms else None
                 log.info(
                     "trader_engine_loop_completed",
                     candidates=self._engine_loop_last_result.get("candidates"),
@@ -208,6 +240,9 @@ class TraderWorker(BaseWorker):
         return self._engine_service
 
     async def _shutdown_engine_runtime(self) -> None:
+        if self._engine_validation_monitor is not None:
+            await self._engine_validation_monitor.stop()
+            self._engine_validation_monitor = None
         if self._engine_evidence_refresh is not None:
             await self._engine_evidence_refresh.stop()
             self._engine_evidence_refresh = None
@@ -270,6 +305,54 @@ class TraderWorker(BaseWorker):
             variant_id=str(payload.get("variant_id") or "") or None,
         )
         return self._result(command, window_start_ms=start_ms, window_end_ms=end_ms, result=artifact)
+
+    async def _handle_engine_operator_proposal_ack(self, command: dict[str, Any]) -> dict[str, Any]:
+        self._record_command(command)
+        payload = self._payload(command)
+        proposal = await self._get_engine_operator_proposal_service().acknowledge(
+            self._required_str(payload, "proposal_id"),
+            actor=self._actor(command),
+        )
+        if proposal is None:
+            raise KeyError("engine operator proposal not found")
+        return self._result(
+            command,
+            proposal=proposal,
+            acknowledgment_only=True,
+            paper_order_created=False,
+        )
+
+    async def _handle_engine_operator_proposal_reject(self, command: dict[str, Any]) -> dict[str, Any]:
+        self._record_command(command)
+        payload = self._payload(command)
+        proposal = await self._get_engine_operator_proposal_service().reject(
+            self._required_str(payload, "proposal_id"),
+            actor=self._actor(command),
+            reason=str(payload.get("reason") or ""),
+        )
+        if proposal is None:
+            raise KeyError("engine operator proposal not found")
+        return self._result(command, proposal=proposal, paper_order_created=False)
+
+    async def _handle_engine_operator_proposal_expire(self, command: dict[str, Any]) -> dict[str, Any]:
+        self._record_command(command)
+        payload = self._payload(command)
+        proposal = await self._get_engine_operator_proposal_service().expire(
+            self._required_str(payload, "proposal_id"),
+            actor=self._actor(command),
+        )
+        if proposal is None:
+            raise KeyError("engine operator proposal not found")
+        return self._result(command, proposal=proposal, paper_order_created=False)
+
+    async def _handle_engine_validation_monitor_run_once(self, command: dict[str, Any]) -> dict[str, Any]:
+        self._record_command(command)
+        if self._engine_validation_monitor is None:
+            await self._start_engine_validation_monitor()
+        if self._engine_validation_monitor is None:
+            raise RuntimeError("engine_validation_monitor_disabled")
+        result = await self._engine_validation_monitor.run_once(post=True)
+        return self._result(command, result=result, report_only=True)
 
     async def _handle_hip4_loop_run_once(self, command: dict[str, Any]) -> dict[str, Any]:
         self._record_command(command)
@@ -604,6 +687,14 @@ class TraderWorker(BaseWorker):
             )
         return self._autonomy_service
 
+    def _get_engine_operator_proposal_service(self) -> EngineOperatorProposalService:
+        if self._engine_operator_proposals is None:
+            self._engine_operator_proposals = EngineOperatorProposalService(
+                settings=self.settings,
+                repository=self.repository,
+            )
+        return self._engine_operator_proposals
+
     def heartbeat_metadata(self) -> dict[str, Any]:
         return {
             "trader": {"command_count": self.command_count, "last_command_type": self.last_command_type, "execution_authority": "paper-only/settings-gated"},
@@ -611,6 +702,24 @@ class TraderWorker(BaseWorker):
             "engine_pnl_attribution": self._engine_pnl_attribution_metadata(),
             "engine_evidence_refresh": self._engine_evidence_refresh.status() if self._engine_evidence_refresh is not None else {"enabled": False, "running": False},
             "engine_newsfeed": self._engine_newsfeed_metadata(),
+            "engine_operator_proposals": (
+                self._engine_operator_proposals.status()
+                if self._engine_operator_proposals is not None
+                else {
+                    "enabled": self.settings.engine_operator_proposals_enabled,
+                    "execution_authority": "none",
+                    "acknowledgment_only": True,
+                }
+            ),
+            "engine_validation_monitor": (
+                self._engine_validation_monitor.status()
+                if self._engine_validation_monitor is not None
+                else {
+                    "enabled": bool(self.settings.engine_enabled and self.settings.engine_validation_digest_enabled),
+                    "running": False,
+                    "owner_role": "trader",
+                }
+            ),
         }
 
     def _engine_loop_metadata(self) -> dict[str, Any]:

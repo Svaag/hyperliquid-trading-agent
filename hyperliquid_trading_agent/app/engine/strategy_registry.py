@@ -43,7 +43,6 @@ WAVE_1A_NUCLEUS_IDS = {
     "liquidation_mean_revert_v1",
     "funding_carry_v1",
     "oi_breakout_v1",
-    "legacy_signal_adapter_v1",
     "regime_defensive_flat_v1",
 }
 

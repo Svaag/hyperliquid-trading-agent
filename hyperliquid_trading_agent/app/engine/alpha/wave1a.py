@@ -470,13 +470,24 @@ def wave_1a_strategy_instances() -> list[Any]:
         LiquidationMeanRevertStrategy(),
         FundingCarryStrategy(),
         OIBreakoutStrategy(),
-        LegacySignalAdapterStrategy(),
         RegimeDefensiveFlatStrategy(),
     ]
 
 
 def wave_1a_specs() -> list[StrategySpec]:
-    return [strategy.spec for strategy in wave_1a_strategy_instances()]
+    retired_legacy = LegacySignalAdapterStrategy.spec.model_copy(
+        update={
+            "enabled": False,
+            "counts_for_breadth": False,
+            "metadata": {
+                **LegacySignalAdapterStrategy.spec.metadata,
+                "retired": True,
+                "retired_reason": "institutional_engine_is_canonical_signal_source",
+                "read_only_history": True,
+            },
+        }
+    )
+    return [*[strategy.spec for strategy in wave_1a_strategy_instances()], retired_legacy]
 
 
 def _candidate(
