@@ -39,7 +39,7 @@ services:
       VAULT_API_ADDR: http://127.0.0.1:8200
     command: server
     ports:
-      - "${VAULT_HOST_PORT:-8200}:8200"
+      - "${VAULT_BIND:-127.0.0.1}:${VAULT_HOST_PORT:-8200}:8200"
     volumes:
       - vault_data:/vault/file
       - ./infra/vault/config.hcl:/vault/config/config.hcl:ro

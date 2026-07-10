@@ -1,0 +1,21 @@
+{
+  "event": "Consumer Inflation Expectations",
+  "country": "United States",
+  "category": "Inflation Expectations",
+  "ticker": "UNITEDSTAINFEXP",
+  "actual": "3.8%",
+  "previous": "4.1%",
+  "revised": "null",
+  "date": "2023-07-10T15:00:00",
+  "referenceDate": "2023-06-30T00:00:00",
+  "reference": "Jun",
+  "calendarId": "324314",
+  "unit": "%",
+  "currency": "null",
+  "importance": "1",
+  "teforecast": "3.9%",
+  "forecast ": "null",
+  "symbol": "UNITEDSTAINFEXP",
+  "source": "null",
+  "topic": "calendar"
+}

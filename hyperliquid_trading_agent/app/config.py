@@ -79,12 +79,15 @@ DEFAULT_RSS_FEEDS = (
     ",https://cointelegraph.com/rss"
     ",https://www.federalreserve.gov/feeds/press_all.xml"
 )
-# Newswire reliability layer: filings, halts, press releases, macro, crypto. All keyless.
-# GlobeNewswire / Business Wire / ECB feeds are easy to add via NEWSWIRE_RSS_FEEDS.
+# Newswire reliability layer: filings, halts, selected press releases, macro, crypto.
+# Business Wire provides custom/licensed RSS URLs, so operators can append one via
+# NEWSWIRE_RSS_FEEDS without making an unstable account-specific URL a default.
 DEFAULT_NEWSWIRE_RSS_FEEDS = (
     "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&count=40&output=atom"
     ",http://www.nasdaqtrader.com/rss.aspx?feed=tradehalts"
     ",https://www.federalreserve.gov/feeds/press_all.xml"
+    ",https://www.ecb.europa.eu/rss/press.html"
+    ",https://www.globenewswire.com/RssFeed/subjectcode/27-Mergers%20and%20Acquisitions/feedTitle/GlobeNewswire%20-%20Mergers%20and%20Acquisitions"
     ",https://www.coindesk.com/arc/outboundfeeds/rss/"
     ",https://cointelegraph.com/rss"
 )
@@ -471,6 +474,7 @@ class Settings(BaseSettings):
     engine_replay_comparison_interval_seconds: int = 86400
     engine_evidence_refresh_window_hours: int = 24
     engine_replay_min_sample_candidates: int = 50
+    engine_replay_min_shadow_intents: int = 50
 
     # Agentic wave orchestration. These flags enable observation/diagnosis,
     # report-only maintenance, trace emission, and bounded handoff escalation.

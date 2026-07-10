@@ -2,6 +2,10 @@
 
 Run after enabling `ALPACA_NEWS_ENABLED=true` with valid API keys.
 
+Optional Trading Economics, curated X, GlobeNewswire, Business Wire, and ECB contracts,
+fixtures, limitations, and dated live-smoke evidence are recorded in
+[Optional Newswire Adapter Contract](newswire-optional-adapters.md).
+
 ## Pre-flight
 
 - [ ] `ALPACA_API_KEY` and `ALPACA_API_SECRET` are set in `.env` (get from https://app.alpaca.markets/)
@@ -88,6 +92,12 @@ The `trader` worker consumes persisted canonical story revisions through `trader
 - [ ] Temporarily kill network: adapter should log `newswire_adapter_restart` and reconnect with backoff
 - [ ] After reconnect, adapter should re-authenticate and re-subscribe
 - [ ] `curl http://127.0.0.1:8081/newswire/status` reports degraded/latest state but the API remains healthy
+- [ ] RSS status contains redacted `feed_health`; one deliberately broken URL increments
+  only that feed's error count while healthy feeds keep ingesting
+- [ ] Trading Economics status exposes stable-calendar update counts without exposing
+  its `client` credential
+- [ ] Curated X status documents that Recent Search supports edit correlation but not
+  delete events without the separate compliance stream
 - [ ] `curl http://127.0.0.1:8081/newswire/sources` — `"alpaca"` shows `"transport":"websocket"` with correct source score
 
 ## Routing Reference

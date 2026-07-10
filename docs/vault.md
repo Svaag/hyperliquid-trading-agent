@@ -13,7 +13,9 @@ docker compose --profile vault up -d vault
 docker compose exec vault vault status
 ```
 
-The Compose Vault listener uses HTTP and `tls_disable=true` for local development only. Do not expose this port publicly.
+The Compose Vault listener uses HTTP and `tls_disable=true` for local development only.
+Its host port binds to `VAULT_BIND=127.0.0.1` by default; do not change that to a
+public interface.
 
 ## Safe Local Bootstrap
 

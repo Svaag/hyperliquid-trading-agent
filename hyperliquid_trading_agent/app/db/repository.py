@@ -1477,8 +1477,19 @@ class Repository:
             "allocation_id",
         )
 
-    async def list_allocation_decisions(self, *, candidate_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_allocation_decisions(
+        self,
+        *,
+        candidate_id: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
         filters = [AllocationDecisionRecord.candidate_id == candidate_id] if candidate_id else []
+        if since_ms is not None:
+            filters.append(AllocationDecisionRecord.created_at_ms >= int(since_ms))
+        if until_ms is not None:
+            filters.append(AllocationDecisionRecord.created_at_ms <= int(until_ms))
         return await self._list_engine_records(AllocationDecisionRecord, order_by=AllocationDecisionRecord.created_at_ms, limit=limit, filters=filters)
 
     async def record_allocation_diversity_event(self, event: dict[str, Any]) -> str | None:

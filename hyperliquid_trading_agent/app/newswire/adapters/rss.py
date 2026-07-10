@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from hyperliquid_trading_agent.app.logging import get_logger
-from hyperliquid_trading_agent.app.news.rss import fetch_rss_items
+from hyperliquid_trading_agent.app.news.rss import RssFetchResult, fetch_rss_feed
 from hyperliquid_trading_agent.app.newswire.adapters.base import NewswireAdapter, RawEmit
 from hyperliquid_trading_agent.app.newswire.normalize import created_at_ms_from
 from hyperliquid_trading_agent.app.newswire.schemas import EventType, RawNewsItem
@@ -46,6 +48,20 @@ class RssAdapter(NewswireAdapter):
         self.poll_seconds = max(15, poll_seconds)
         self.limit_per_feed = limit_per_feed
         self._stop = asyncio.Event()
+        self.poll_count = 0
+        self.items_emitted = 0
+        self.feed_health: dict[str, dict[str, Any]] = {
+            _feed_key(url): {
+                "ok": None,
+                "successes": 0,
+                "errors": 0,
+                "last_poll_at_ms": None,
+                "last_success_at_ms": None,
+                "last_error": None,
+                "last_item_count": 0,
+            }
+            for url in feed_urls
+        }
 
     async def run(self, emit: RawEmit) -> None:
         while not self._stop.is_set():
@@ -59,23 +75,87 @@ class RssAdapter(NewswireAdapter):
         self._stop.set()
 
     async def _poll_once(self, emit: RawEmit) -> None:
-        items = await fetch_rss_items(self.feed_urls, limit_per_feed=self.limit_per_feed)
-        for item in items:
-            source, event_type = feed_source(item.source)
-            await emit(
-                RawNewsItem(
-                    source=source,
-                    provider=source,
-                    transport="rss",
-                    external_id=item.link or None,
-                    headline=item.title,
-                    body=item.summary,
-                    url=item.link or None,
-                    published_at_ms=created_at_ms_from(item.published),
-                    event_type=event_type,
-                    raw={"feed": item.source, "published": item.published},
+        self.poll_count += 1
+        polled_at_ms = int(time.time() * 1000)
+        fetched = await asyncio.gather(
+            *(fetch_rss_feed(url, limit=self.limit_per_feed) for url in self.feed_urls),
+            return_exceptions=True,
+        )
+        successful_feeds = 0
+        for url, outcome in zip(self.feed_urls, fetched, strict=True):
+            key = _feed_key(url)
+            health = self.feed_health.setdefault(key, {})
+            health["last_poll_at_ms"] = polled_at_ms
+            if isinstance(outcome, BaseException):
+                outcome = RssFetchResult(
+                    feed_url=url,
+                    items=[],
+                    ok=False,
+                    error=f"fetch_exception:{type(outcome).__name__}",
                 )
-            )
+            health["last_item_count"] = len(outcome.items)
+            if not outcome.ok:
+                health["ok"] = False
+                health["errors"] = int(health.get("errors") or 0) + 1
+                health["last_error"] = {
+                    "error": outcome.error or "rss_feed_failed",
+                    "http_status": outcome.http_status,
+                    "at_ms": polled_at_ms,
+                }
+                log.warning(
+                    "newswire_rss_feed_failed",
+                    feed=key,
+                    error=outcome.error or "rss_feed_failed",
+                    http_status=outcome.http_status,
+                )
+                continue
+            successful_feeds += 1
+            health["ok"] = True
+            health["successes"] = int(health.get("successes") or 0) + 1
+            health["last_success_at_ms"] = polled_at_ms
+            health["last_error"] = None
+            health["warning"] = outcome.warning
+            for item in outcome.items:
+                source, event_type = feed_source(item.source)
+                await emit(
+                    RawNewsItem(
+                        source=source,
+                        provider=source,
+                        transport="rss",
+                        external_id=item.link or None,
+                        headline=item.title,
+                        body=item.summary,
+                        url=item.link or None,
+                        published_at_ms=created_at_ms_from(item.published),
+                        event_type=event_type,
+                        raw={"feed": _safe_feed_url(item.source), "published": item.published},
+                    )
+                )
+                self.items_emitted += 1
+        if self.feed_urls and successful_feeds == 0:
+            raise RuntimeError(f"all_{len(self.feed_urls)}_rss_feeds_failed")
 
     def status(self) -> dict[str, Any]:
-        return {"name": self.name, "feeds": len(self.feed_urls), "poll_seconds": self.poll_seconds}
+        return {
+            "name": self.name,
+            "feeds": len(self.feed_urls),
+            "poll_seconds": self.poll_seconds,
+            "poll_count": self.poll_count,
+            "items_emitted": self.items_emitted,
+            "feed_health": self.feed_health,
+        }
+
+
+def _safe_feed_url(url: str) -> str:
+    parsed = urlsplit(url)
+    host = parsed.hostname or "unknown"
+    netloc = f"{host}:{parsed.port}" if parsed.port else host
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def _feed_key(url: str) -> str:
+    parsed = urlsplit(url)
+    path = parsed.path.rstrip("/") or "/"
+    host = (parsed.hostname or "unknown").lower()
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"{host}{port}{path}"

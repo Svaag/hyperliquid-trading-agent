@@ -5,6 +5,9 @@ import time
 from collections import Counter, defaultdict
 from typing import Any
 
+from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.engine.signal_comparison import build_signal_path_comparison
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -29,7 +32,13 @@ def _strategy_of(item: dict[str, Any]) -> str:
     return str(item.get("strategy_id") or "unknown")
 
 
-async def build_engine_validation_report(repository: Any, *, limit: int = 500) -> dict[str, Any]:
+async def build_engine_validation_report(
+    repository: Any,
+    *,
+    limit: int = 500,
+    settings: Settings | None = None,
+    window_hours: int = 24,
+) -> dict[str, Any]:
     """Build an operator-facing validation summary from read-only engine ledgers."""
 
     candidates = await repository.list_alpha_candidates(limit=limit)
@@ -157,6 +166,12 @@ async def build_engine_validation_report(repository: Any, *, limit: int = 500) -
     total_shadow_intents = sum(1 for item in intents if item.get("execution_mode") == "shadow")
     total_paper_intents = sum(1 for item in intents if item.get("execution_mode") == "paper")
     total_live_intents = sum(1 for item in intents if item.get("execution_mode") == "live")
+    signal_path_comparison = await build_signal_path_comparison(
+        repository,
+        settings=settings,
+        window_hours=window_hours,
+        limit=max(limit, 500),
+    )
 
     return {
         "generated_at_ms": _now_ms(),
@@ -212,6 +227,7 @@ async def build_engine_validation_report(repository: Any, *, limit: int = 500) -
         },
         "by_strategy": dict(sorted(by_strategy.items())),
         "allocation_status_counts": dict(allocation_status),
+        "signal_path_comparison": signal_path_comparison,
     }
 
 

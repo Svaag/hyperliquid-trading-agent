@@ -108,6 +108,14 @@ Alert conditions include stale engine loop, engine runtime errors, paper intents
 
 The default gate requires 24h shadow observation, at least 100 engine runs, 250 candidates, 50 shadow intents, 95% EV/feature/regime coverage, 100% candidate strategy metadata coverage, 95%+ Council review coverage, 100% RiskGateway coverage, at least 5 paper-eligible non-legacy alpha strategies across 3 paper-eligible families, strategy/family/symbol-strategy concentration below 55%/60%/35%, a latest replay with `passed` or `advisory_pass`, strategy-regime evidence, no hard blocks, and score >=85. Shadow-only research breadth is reported separately and does not satisfy paper-promotion breadth gates.
 
+`GET /engine/signal-comparison` is the read-only unification report for the retired/
+optional legacy `TradeSignal` path and the canonical institutional path. The same report
+is embedded under `signal_path_comparison` in validation output and under
+`reports.legacy_engine_signal_comparison` in readiness output. It compares legacy hit
+rate/R multiples, engine candidate outcomes/shadow PnL/replay state, and same-symbol/
+side/time overlap. It has no execution authority; engine operator proposals remain
+acknowledgment-only and never create a paper or live order through this report.
+
 ## Strategy portfolio, Council, replay, and bandit reports
 
 Wave 1 is the **evidence-producing strategy base**. Wave 2 is the deferred **proprietary perp-DEX edge layer**.

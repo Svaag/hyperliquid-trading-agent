@@ -589,8 +589,9 @@ class AutonomousTradingLoopService:
 
     async def _run_iteration(self) -> None:
         ts = _now_ms()
-        if self.settings.engine_enabled and self.engine_service is not None:
-            await self.engine_service.run_once(symbols=self.settings.autonomy_core_symbols)
+        if self.settings.engine_enabled:
+            if self.engine_service is not None:
+                await self.engine_service.run_once(symbols=self.settings.autonomy_core_symbols)
             if not self.settings.autonomy_signals_run_with_engine_enabled:
                 self.last_iteration_at_ms = ts
                 AUTONOMY_LOOP_ITERATIONS.labels(result="ok").inc()
@@ -736,16 +737,28 @@ class AutonomousTradingLoopService:
         return False
 
     async def _post_equity_signal(self, signal: TradeSignal) -> None:
-        if not self.settings.autonomy_alert_channel_configured or self.alert_sink is None:
+        delivery_ref, transport = await self._deliver_signal_alert(signal, category="legacy_equity_trade_signal")
+        if not delivery_ref:
             return
-        message_id = await self.alert_sink.send(self.settings.autonomy_alert_channel_id, format_signal_alert(signal))
-        posted = signal.model_copy(update={"status": "posted", "discord_channel_id": self.settings.autonomy_alert_channel_id, "discord_message_id": message_id})
+        posted = signal.model_copy(
+            update={
+                "status": "posted",
+                "discord_channel_id": self.settings.autonomy_alert_channel_id,
+                "discord_message_id": delivery_ref if transport == "direct_discord" else None,
+                "metadata": {
+                    **(signal.metadata or {}),
+                    "source": "legacy_signal_engine",
+                    "delivery_transport": transport,
+                    "delivery_ref": delivery_ref,
+                },
+            }
+        )
         self.equity_signals[posted.id] = posted
         AUTONOMY_SIGNALS_POSTED.inc()
         await self._persist_signal(posted)
         if self.evaluation_service is not None:
             await self.evaluation_service.update_signal_status(posted)
-        await self._record_event("equity_signal_posted", symbol=posted.symbol, payload={"signal_id": posted.id, "discord_message_id": message_id, "exchange_actions": []})
+        await self._record_event("equity_signal_posted", symbol=posted.symbol, payload={"signal_id": posted.id, "delivery_ref": delivery_ref, "delivery_transport": transport, "exchange_actions": []})
 
     async def _persist_equity_flow_events(self, events: list[Any]) -> None:
         if self.repository is None or not getattr(self.repository, "enabled", False):
@@ -853,16 +866,57 @@ class AutonomousTradingLoopService:
         return len(self._model_call_timestamps) < self.settings.autonomy_model_max_calls_per_hour
 
     async def _post_signal(self, signal: TradeSignal) -> None:
-        if not self.settings.autonomy_alert_channel_configured or self.alert_sink is None:
+        delivery_ref, transport = await self._deliver_signal_alert(signal, category="legacy_trade_signal")
+        if not delivery_ref:
             return
-        message_id = await self.alert_sink.send(self.settings.autonomy_alert_channel_id, format_signal_alert(signal))
-        posted = signal.model_copy(update={"status": "posted", "discord_channel_id": self.settings.autonomy_alert_channel_id, "discord_message_id": message_id})
+        posted = signal.model_copy(
+            update={
+                "status": "posted",
+                "discord_channel_id": self.settings.autonomy_alert_channel_id,
+                "discord_message_id": delivery_ref if transport == "direct_discord" else None,
+                "metadata": {
+                    **(signal.metadata or {}),
+                    "source": "legacy_signal_engine",
+                    "delivery_transport": transport,
+                    "delivery_ref": delivery_ref,
+                },
+            }
+        )
         self.signals[posted.id] = posted
         AUTONOMY_SIGNALS_POSTED.inc()
         await self._persist_signal(posted)
         if self.evaluation_service is not None:
             await self.evaluation_service.update_signal_status(posted)
-        await self._record_event("signal_posted", symbol=posted.symbol, payload={"signal_id": posted.id, "discord_message_id": message_id, "exchange_actions": []})
+        await self._record_event("signal_posted", symbol=posted.symbol, payload={"signal_id": posted.id, "delivery_ref": delivery_ref, "delivery_transport": transport, "exchange_actions": []})
+
+    async def _deliver_signal_alert(self, signal: TradeSignal, *, category: str) -> tuple[str | None, str | None]:
+        channel_id = str(self.settings.autonomy_alert_channel_id or "").strip()
+        if not channel_id:
+            return None, None
+        content = format_signal_alert(signal)
+        if self.alert_sink is not None:
+            return await self.alert_sink.send(channel_id, content), "direct_discord"
+        enqueue = getattr(self.repository, "enqueue_operational_notification", None)
+        if not callable(enqueue):
+            return None, None
+        notification_id = await enqueue(
+            dedupe_key=f"{category}:{signal.id}",
+            category=category,
+            severity="info",
+            source_type="legacy_trade_signal",
+            source_id=signal.id,
+            channel_id=channel_id,
+            payload={
+                "content": content,
+                "metadata": {
+                    "signal_id": signal.id,
+                    "source": "legacy_signal_engine",
+                    "paper_only": True,
+                    "live_execution_allowed": False,
+                },
+            },
+        )
+        return (str(notification_id), "operational_outbox") if notification_id else (None, None)
 
     async def _on_all_mids(self, message: dict[str, Any]) -> None:
         data = message.get("data") if isinstance(message, dict) else {}

@@ -46,11 +46,13 @@ def _in_window(items: list[dict[str, Any]], start_ms: int, *timestamp_keys: str)
 
 
 def _metadata(item: dict[str, Any]) -> dict[str, Any]:
-    return item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    value = item.get("metadata")
+    return value if isinstance(value, dict) else {}
 
 
 def _source_integrity(item: dict[str, Any]) -> dict[str, Any]:
-    return item.get("source_integrity") if isinstance(item.get("source_integrity"), dict) else {}
+    value = item.get("source_integrity")
+    return value if isinstance(value, dict) else {}
 
 
 def _activation_scope(item: dict[str, Any]) -> str:
@@ -147,7 +149,12 @@ async def build_paper_readiness_scorecard(
     risk_limit = max(expanded_limit * 5, 5000)
     outcome_limit = max(expanded_limit * (len(OUTCOME_WINDOWS_MS) + 2), 10_000)
 
-    report = await build_engine_validation_report(repository, limit=expanded_limit)
+    report = await build_engine_validation_report(
+        repository,
+        limit=expanded_limit,
+        settings=settings,
+        window_hours=hours,
+    )
     candidates_all = await repository.list_alpha_candidates(limit=expanded_limit)
     ev_all = await repository.list_ev_estimates(limit=expanded_limit)
     allocations_all = await repository.list_allocation_decisions(limit=expanded_limit)
@@ -435,11 +442,11 @@ async def build_paper_readiness_scorecard(
         allocation_notional_by_family[family] += notional
         allocation_notional_by_symbol_strategy[f"{asset}:{strategy}"] += notional
         total_allocated_notional += notional
-    dominant_strategy = max(allocation_notional_by_strategy, key=allocation_notional_by_strategy.get) if allocation_notional_by_strategy else None
+    dominant_strategy = max(allocation_notional_by_strategy, key=lambda key: allocation_notional_by_strategy[key]) if allocation_notional_by_strategy else None
     dominant_share_pct = _pct(allocation_notional_by_strategy.get(dominant_strategy or "", 0.0), total_allocated_notional)
-    dominant_family = max(allocation_notional_by_family, key=allocation_notional_by_family.get) if allocation_notional_by_family else None
+    dominant_family = max(allocation_notional_by_family, key=lambda key: allocation_notional_by_family[key]) if allocation_notional_by_family else None
     dominant_family_share_pct = _pct(allocation_notional_by_family.get(dominant_family or "", 0.0), total_allocated_notional)
-    dominant_symbol_strategy = max(allocation_notional_by_symbol_strategy, key=allocation_notional_by_symbol_strategy.get) if allocation_notional_by_symbol_strategy else None
+    dominant_symbol_strategy = max(allocation_notional_by_symbol_strategy, key=lambda key: allocation_notional_by_symbol_strategy[key]) if allocation_notional_by_symbol_strategy else None
     dominant_symbol_strategy_share_pct = _pct(allocation_notional_by_symbol_strategy.get(dominant_symbol_strategy or "", 0.0), total_allocated_notional)
     if dominant_share_pct > 45:
         warnings.append(_issue("strategy_dominance", f"{dominant_strategy} produced {dominant_share_pct}% of allocation notional.", severity="warning"))
@@ -527,7 +534,7 @@ async def build_paper_readiness_scorecard(
     }
 
     # Replay comparison gate.
-    latest_replay = latest_replay_comparison
+    latest_replay: dict[str, Any] | None = latest_replay_comparison
     replay_required = bool(settings.engine_readiness_require_latest_replay)
     replay_ok = False
     replay_status = None
@@ -535,17 +542,27 @@ async def build_paper_readiness_scorecard(
     replay_sample_size = 0
     if latest_replay:
         replay_status = str(latest_replay.get("status") or "unknown")
-        metadata = latest_replay.get("metadata") if isinstance(latest_replay.get("metadata"), dict) else {}
-        data_window = metadata.get("data_window") if isinstance(metadata.get("data_window"), dict) else {}
+        metadata_value = latest_replay.get("metadata")
+        metadata = metadata_value if isinstance(metadata_value, dict) else {}
+        data_window_value = metadata.get("data_window")
+        data_window = data_window_value if isinstance(data_window_value, dict) else {}
         window_start = _i(data_window.get("start_ms"), 0)
         window_end = _i(data_window.get("end_ms"), 0)
         if window_start and window_end and window_end > window_start:
             replay_window_hours = round((window_end - window_start) / 3_600_000, 4)
-        candidate_metrics = latest_replay.get("candidate_metrics") if isinstance(latest_replay.get("candidate_metrics"), dict) else {}
+        candidate_metrics_value = latest_replay.get("candidate_metrics")
+        candidate_metrics = candidate_metrics_value if isinstance(candidate_metrics_value, dict) else {}
         replay_sample_size = _i(candidate_metrics.get("candidate_count"), 0)
         if replay_status in {"passed", "advisory_pass"}:
             replay_ok = True
-        if replay_status not in {"passed", "advisory_pass"}:
+        if replay_status == "insufficient_data":
+            hard_blocks.append(
+                _issue(
+                    "replay_comparison_insufficient_data",
+                    f"latest engine replay {latest_replay.get('replay_id')} has not met its sample requirements.",
+                )
+            )
+        elif replay_status not in {"passed", "advisory_pass"}:
             hard_blocks.append(_issue("replay_comparison_failed", f"latest engine replay {latest_replay.get('replay_id')} status={replay_status}."))
         if replay_window_hours and replay_window_hours < settings.engine_readiness_min_replay_window_hours:
             hard_blocks.append(_issue("replay_comparison_stale", f"Replay window {replay_window_hours}h below required {settings.engine_readiness_min_replay_window_hours}h."))
@@ -609,7 +626,7 @@ async def build_paper_readiness_scorecard(
 
     recommendation = _recommendation(hard_blocks, warnings, ready_for_paper)
     next_actions = _next_actions(hard_blocks, warnings, recommendation)
-    reports = _wave1d_reports(
+    wave_reports = _wave1d_reports(
         candidates=candidates,
         allocations=allocations,
         council_reviews=council_reviews,
@@ -619,6 +636,7 @@ async def build_paper_readiness_scorecard(
         portfolio_concentration_events=portfolio_concentration_events,
         latest_replay=latest_replay,
     )
+    wave_reports["legacy_engine_signal_comparison"] = report.get("signal_path_comparison") or {}
     metrics = {
         "candidate_count": len(candidates),
         "ev_estimate_count": len(ev_estimates),
@@ -666,7 +684,7 @@ async def build_paper_readiness_scorecard(
         "warnings": warnings,
         "checks": checks,
         "metrics": metrics,
-        "reports": reports,
+        "reports": wave_reports,
         "recommendation": recommendation,
         "next_actions": next_actions,
     }
@@ -764,6 +782,8 @@ def _next_actions(hard_blocks: list[dict[str, str]], warnings: list[dict[str, st
         actions.append("Verify every trade and no-trade candidate has candidate-level RiskGateway evidence before promotion.")
     if "strategy_dominance" in codes or "strategy_allocation_dominance" in codes or "strategy_family_allocation_dominance" in codes or "symbol_strategy_allocation_dominance" in codes:
         actions.append("Tighten or enable strategy/family/symbol diversity controls and continue shadow observation.")
+    if "replay_comparison_insufficient_data" in codes:
+        actions.append("Continue shadow collection until the replay candidate, approved-allocation, and shadow-intent samples mature.")
     if "replay_comparison_missing" in codes or "replay_comparison_stale" in codes or "replay_comparison_failed" in codes:
         actions.append("Run an engine shadow replay comparison artifact for the readiness window.")
     if "position_marking_unhealthy" in codes or "pnl_attribution_stale" in codes:

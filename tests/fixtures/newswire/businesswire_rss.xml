@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Business Wire custom headline feed</title>
+    <link>https://www.businesswire.com/</link>
+    <description>Redacted regression fixture for a customer-provided RSS headline feed.</description>
+    <item>
+      <title>Redacted company reports quarterly results</title>
+      <link>https://www.businesswire.com/news/home/redacted/en/</link>
+      <pubDate>Fri, 10 Jul 2026 05:00:00 GMT</pubDate>
+      <description>Redacted headline-feed summary.</description>
+    </item>
+  </channel>
+</rss>

@@ -170,13 +170,14 @@ class NewswireService:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - external source behavior
+                detail = adapter.safe_error_detail(exc)
                 self.adapter_errors += 1
                 self.adapter_errors_by_name[adapter.name] = self.adapter_errors_by_name.get(adapter.name, 0) + 1
                 self.adapter_reconnects_by_name[adapter.name] = self.adapter_reconnects_by_name.get(adapter.name, 0) + 1
-                self.adapter_last_error[adapter.name] = {"error": type(exc).__name__, "detail": str(exc)[:500], "at_ms": now_ms(), "next_backoff_seconds": backoff}
+                self.adapter_last_error[adapter.name] = {"error": type(exc).__name__, "detail": detail, "at_ms": now_ms(), "next_backoff_seconds": backoff}
                 NEWSWIRE_ADAPTER_UP.labels(adapter=adapter.name).set(0)
                 NEWSWIRE_ADAPTER_RECONNECTS.labels(adapter=adapter.name).inc()
-                log.warning("newswire_adapter_restart", adapter=adapter.name, error=type(exc).__name__, detail=str(exc)[:200], backoff_seconds=backoff)
+                log.warning("newswire_adapter_restart", adapter=adapter.name, error=type(exc).__name__, detail=detail[:200], backoff_seconds=backoff)
                 try:
                     await asyncio.sleep(backoff)
                 except asyncio.CancelledError:

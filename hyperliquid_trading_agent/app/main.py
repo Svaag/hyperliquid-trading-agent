@@ -962,7 +962,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/autonomy/status")
     async def autonomy_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        return app.state.autonomy_service.status()
+        local_status = app.state.autonomy_service.status()
+        list_heartbeats = getattr(app.state.repository, "list_service_heartbeats", None)
+        try:
+            heartbeats = await list_heartbeats(service_role="trader", limit=5) if callable(list_heartbeats) else []
+        except Exception:
+            heartbeats = []
+        for heartbeat in heartbeats:
+            metadata = heartbeat.get("metadata") if isinstance(heartbeat, dict) else None
+            runtime = metadata.get("autonomy_loop") if isinstance(metadata, dict) else None
+            if isinstance(runtime, dict):
+                return {
+                    **runtime,
+                    "owner_role": "trader",
+                    "runtime_source": "trader_heartbeat",
+                    "heartbeat_updated_at_ms": heartbeat.get("updated_at_ms"),
+                    "local_api_service": local_status,
+                }
+        return {**local_status, "owner_role": "trader", "runtime_source": "local_api_fallback"}
 
     @app.post("/autonomy/pause")
     async def pause_autonomy(request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -1001,7 +1018,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await app.state.repository.expire_engine_operator_proposals(now_ms=int(time.time() * 1000))
         proposals = await app.state.repository.list_engine_operator_proposals(limit=500)
         projected = [project_operator_proposal_to_trade_signal(item) for item in proposals]
-        legacy = await app.state.repository.list_autonomy_trade_signals(status=status, limit=100)
+        legacy_rows = await app.state.repository.list_autonomy_trade_signals(status=status, limit=100)
+        legacy = [
+            {
+                **item,
+                "metadata": {
+                    **(item.get("metadata") or {}),
+                    "source": "legacy_signal_engine",
+                },
+            }
+            for item in legacy_rows
+        ]
         items = [*projected, *legacy]
         if status:
             items = [item for item in items if str(item.get("status") or "") == status]
@@ -1010,7 +1037,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "items": items,
             "count": len(items),
             "canonical_source": "institutional_engine_operator_proposals",
-            "legacy_history_read_only": True,
+            "legacy_history_read_only": not settings.autonomy_signals_run_with_engine_enabled,
+            "legacy_mutations_enabled": settings.autonomy_signals_run_with_engine_enabled,
         }
 
     @app.get("/autonomy/signals/{signal_id}")
@@ -1030,7 +1058,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def approve_autonomy_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
         if not signal_id.startswith("sig_eng_"):
-            raise HTTPException(status_code=410, detail="legacy signal mutations are retired; historical signals are read-only")
+            if not settings.autonomy_signals_run_with_engine_enabled:
+                raise HTTPException(status_code=410, detail="legacy signal mutations are disabled; historical signals are read-only")
+            if await app.state.repository.get_autonomy_trade_signal(signal_id) is None:
+                raise HTTPException(status_code=404, detail="signal not found")
+            command = await app.state.repository.enqueue_worker_command(
+                target_role="trader",
+                command_type="autonomy_signal_approve",
+                payload={"signal_id": signal_id, **(request.model_dump(mode="json") if request else {})},
+                requested_by="api",
+            )
+            return {**_accepted_command(command), "source": "legacy_signal_engine", "paper_only": True}
         if await app.state.repository.get_engine_operator_proposal(signal_id) is None:
             raise HTTPException(status_code=404, detail="signal not found")
         command = await app.state.repository.enqueue_worker_command(
@@ -1045,7 +1083,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def reject_autonomy_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
         if not signal_id.startswith("sig_eng_"):
-            raise HTTPException(status_code=410, detail="legacy signal mutations are retired; historical signals are read-only")
+            if not settings.autonomy_signals_run_with_engine_enabled:
+                raise HTTPException(status_code=410, detail="legacy signal mutations are disabled; historical signals are read-only")
+            if await app.state.repository.get_autonomy_trade_signal(signal_id) is None:
+                raise HTTPException(status_code=404, detail="signal not found")
+            command = await app.state.repository.enqueue_worker_command(
+                target_role="trader",
+                command_type="autonomy_signal_reject",
+                payload={"signal_id": signal_id, **(request.model_dump(mode="json") if request else {})},
+                requested_by="api",
+            )
+            return {**_accepted_command(command), "source": "legacy_signal_engine", "paper_order_created": False}
         if await app.state.repository.get_engine_operator_proposal(signal_id) is None:
             raise HTTPException(status_code=404, detail="signal not found")
         command = await app.state.repository.enqueue_worker_command(
@@ -1060,7 +1108,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def expire_autonomy_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
         if not signal_id.startswith("sig_eng_"):
-            raise HTTPException(status_code=410, detail="legacy signal mutations are retired; historical signals are read-only")
+            if not settings.autonomy_signals_run_with_engine_enabled:
+                raise HTTPException(status_code=410, detail="legacy signal mutations are disabled; historical signals are read-only")
+            if await app.state.repository.get_autonomy_trade_signal(signal_id) is None:
+                raise HTTPException(status_code=404, detail="signal not found")
+            command = await app.state.repository.enqueue_worker_command(
+                target_role="trader",
+                command_type="autonomy_signal_expire",
+                payload={"signal_id": signal_id, **(request.model_dump(mode="json") if request else {})},
+                requested_by="api",
+            )
+            return {**_accepted_command(command), "source": "legacy_signal_engine", "paper_order_created": False}
         if await app.state.repository.get_engine_operator_proposal(signal_id) is None:
             raise HTTPException(status_code=404, detail="signal not found")
         command = await app.state.repository.enqueue_worker_command(

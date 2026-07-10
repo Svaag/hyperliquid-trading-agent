@@ -157,9 +157,9 @@ def format_signal_alert(signal: TradeSignal) -> str:
     if signal.model_insight:
         summary = str(signal.model_insight.get("summary") or signal.model_insight.get("status") or "attached")
         evidence_lines.append(f"- model insight: {summary[:180]}")
-    header = f"🚨 **AI Trading Signal — {signal.symbol} {signal.side.upper()}**"
+    header = f"🚨 **Legacy AI Trading Signal — {signal.symbol} {signal.side.upper()}**"
     if signal.status == "flip_requested":
-        header = f"🔁 **AI Trading Signal — {signal.symbol} {signal.side.upper()} (flip requested)**"
+        header = f"🔁 **Legacy AI Trading Signal — {signal.symbol} {signal.side.upper()} (flip requested)**"
     body = (
         f"Score: **{signal.score:.0f}/100** | Confidence: **{signal.confidence:.2f}** | Expires: **{_minutes_until_expiry(signal)}m**\n"
         f"Entry: `{signal.entry:.6g}`\n"

@@ -1,0 +1,32 @@
+{
+  "data": [
+    {
+      "id": "2000000000000000002",
+      "edit_history_tweet_ids": [
+        "2000000000000000001",
+        "2000000000000000002"
+      ],
+      "author_id": "1000000000000000000",
+      "created_at": "2026-07-10T06:00:00.000Z",
+      "text": "Redacted curated market update for $BTC",
+      "public_metrics": {
+        "like_count": 12,
+        "retweet_count": 3,
+        "reply_count": 1,
+        "quote_count": 1
+      }
+    }
+  ],
+  "includes": {
+    "users": [
+      {
+        "id": "1000000000000000000",
+        "username": "redacted_source",
+        "verified": true
+      }
+    ]
+  },
+  "meta": {
+    "result_count": 1
+  }
+}

@@ -17,6 +17,7 @@ from hyperliquid_trading_agent.app.engine.replay_compare import (
     list_engine_replay_comparisons,
 )
 from hyperliquid_trading_agent.app.engine.runtime import resolve_engine_runtime
+from hyperliquid_trading_agent.app.engine.signal_comparison import build_signal_path_comparison
 from hyperliquid_trading_agent.app.engine.validation_report import (
     build_engine_validation_report,
     render_engine_validation_dashboard,
@@ -547,7 +548,23 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
     @app.get("/engine/validation-report")
     async def engine_validation_report(limit: int = 500, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _auth(authorization)
-        return await build_engine_validation_report(_repo(), limit=limit)
+        return await build_engine_validation_report(_repo(), limit=limit, settings=settings)
+
+    @app.get("/engine/signal-comparison")
+    async def engine_signal_comparison(
+        window_hours: int = 24,
+        limit: int = 5000,
+        overlap_tolerance_minutes: int = 30,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _auth(authorization)
+        return await build_signal_path_comparison(
+            _repo(),
+            settings=settings,
+            window_hours=max(1, min(24 * 90, window_hours)),
+            limit=max(1, min(20_000, limit)),
+            overlap_tolerance_minutes=max(1, min(24 * 60, overlap_tolerance_minutes)),
+        )
 
     @app.get("/engine/readiness")
     async def engine_readiness(window_hours: int | None = None, limit: int = 1000, authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -584,7 +601,7 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
     @app.get("/engine/dashboard", response_class=HTMLResponse)
     async def engine_dashboard(limit: int = 500, authorization: str | None = Header(default=None)) -> HTMLResponse:
         _auth(authorization)
-        report = await build_engine_validation_report(_repo(), limit=limit)
+        report = await build_engine_validation_report(_repo(), limit=limit, settings=settings)
         return HTMLResponse(render_engine_validation_dashboard(report))
 
     @app.get("/engine/retention")
