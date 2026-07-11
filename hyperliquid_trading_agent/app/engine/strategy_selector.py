@@ -28,7 +28,14 @@ class ConservativeStrategySelector:
     changes paper/live execution settings.
     """
 
-    def select(self, strategies: list[Any], regime: RegimeVector) -> StrategySelection:
+    def select(
+        self,
+        strategies: list[Any],
+        regime: RegimeVector,
+        *,
+        asset: str | None = None,
+        venue: str | None = None,
+    ) -> StrategySelection:
         tier = _news_risk_tier(regime)
         selected: list[Any] = []
         skipped: list[dict[str, Any]] = []
@@ -37,6 +44,12 @@ class ConservativeStrategySelector:
             spec = strategy.spec
             if not spec.enabled:
                 skipped.append(_skip(spec, "strategy_disabled", tier))
+                continue
+            if asset and not _supports_asset(spec, asset):
+                skipped.append(_skip(spec, "unsupported_asset", tier))
+                continue
+            if venue and not _supports_venue(spec, venue):
+                skipped.append(_skip(spec, "unsupported_venue", tier))
                 continue
             if not _valid_for_regime(spec, labels):
                 skipped.append(_skip(spec, "regime_mismatch", tier))
@@ -47,6 +60,21 @@ class ConservativeStrategySelector:
                 continue
             selected.append(strategy)
         return StrategySelection(strategies=selected, skipped=skipped, news_risk_tier=tier)
+
+
+def _supports_asset(spec: StrategySpec, asset: str) -> bool:
+    supported = {item.upper() for item in spec.supported_assets}
+    return not supported or "*" in supported or asset.upper() in supported
+
+
+def _supports_venue(spec: StrategySpec, venue: str) -> bool:
+    supported = {_canonical_venue(item) for item in spec.supported_venues}
+    return not supported or "*" in supported or _canonical_venue(venue) in supported
+
+
+def _canonical_venue(venue: str) -> str:
+    value = venue.strip().lower()
+    return "hyperliquid:main" if value == "hyperliquid" else value
 
 
 def _skip(spec: StrategySpec, reason: str, news_risk_tier: str) -> dict[str, Any]:

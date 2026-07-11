@@ -75,6 +75,18 @@ class StrategyThrottleController:
         if not self.settings.engine_strategy_throttles_enabled:
             return True, [], {}
         strategy_id = candidate.strategy_id
+        if candidate.side == "flat" or not bool(candidate.portfolio_concentration_impact.get("opens_position", True)):
+            metadata = {"throttle_reason": "defensive_no_trade_control", "allocation_expected": False}
+            self._record_event(
+                {
+                    "type": "allocation_observed",
+                    "strategy_id": strategy_id,
+                    "reason": "defensive_no_trade_control",
+                    "timestamp_ms": timestamp_ms,
+                    **metadata,
+                }
+            )
+            return True, [], metadata
         shadow_observation = bool(self.settings.engine_shadow_enabled and not self.settings.engine_paper_enabled)
         current_count = sum(1 for item in current_loop_allocations if item.status in {"allocate", "reduce", "require_debate"} and _candidate_strategy_hint(item) == strategy_id)
         self.last_decision_at_ms = timestamp_ms

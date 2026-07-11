@@ -155,20 +155,20 @@ async def build_paper_readiness_scorecard(
         settings=settings,
         window_hours=hours,
     )
-    candidates_all = await repository.list_alpha_candidates(limit=expanded_limit)
-    ev_all = await repository.list_ev_estimates(limit=expanded_limit)
-    allocations_all = await repository.list_allocation_decisions(limit=expanded_limit)
-    intents_all = await repository.list_order_intents(limit=expanded_limit)
-    reports_all = await repository.list_execution_reports(limit=expanded_limit)
-    risk_all = await repository.list_risk_gateway_decisions(limit=risk_limit)
+    candidates_all = await repository.list_alpha_candidates(since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit)
+    ev_all = await repository.list_ev_estimates(since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit)
+    allocations_all = await repository.list_allocation_decisions(since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit)
+    intents_all = await repository.list_order_intents(since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit)
+    reports_all = await repository.list_execution_reports(since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit)
+    risk_all = await repository.list_risk_gateway_decisions(since_ms=start_ms, until_ms=generated_at_ms, limit=risk_limit)
     risk_rejects_all = [item for item in risk_all if item.get("decision") == "reject"]
     positions_all = await repository.list_position_theses(limit=expanded_limit)
-    pnl_all = await repository.list_pnl_attribution(limit=expanded_limit)
-    council_all = await _maybe_list(repository, "list_council_reviews", limit=evidence_limit)
-    candidate_evidence_links_all = await _maybe_list(repository, "list_candidate_evidence_links", limit=evidence_limit)
-    candidate_outcomes_all = await _maybe_list(repository, "list_candidate_outcome_attributions", limit=outcome_limit)
-    portfolio_concentration_events_all = await _maybe_list(repository, "list_portfolio_concentration_events", limit=evidence_limit)
-    strategy_regime_performance_all = await _maybe_list(repository, "list_strategy_regime_performance", limit=evidence_limit)
+    pnl_all = await repository.list_pnl_attribution(since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit)
+    council_all = await _maybe_list(repository, "list_council_reviews", since_ms=start_ms, until_ms=generated_at_ms, limit=evidence_limit)
+    candidate_evidence_links_all = await _maybe_list(repository, "list_candidate_evidence_links", since_ms=start_ms, until_ms=generated_at_ms, limit=evidence_limit)
+    candidate_outcomes_all = await _maybe_list(repository, "list_candidate_outcome_attributions", since_ms=start_ms, until_ms=generated_at_ms, limit=outcome_limit)
+    portfolio_concentration_events_all = await _maybe_list(repository, "list_portfolio_concentration_events", since_ms=start_ms, until_ms=generated_at_ms, limit=evidence_limit)
+    strategy_regime_performance_all = await _maybe_list(repository, "list_strategy_regime_performance", since_ms=start_ms, until_ms=generated_at_ms, limit=evidence_limit)
     latest_replay_comparison = await latest_engine_replay_comparison(repository)
 
     candidates = _in_window(candidates_all, start_ms, "created_at_ms")
@@ -405,6 +405,20 @@ async def build_paper_readiness_scorecard(
     paper_eligible_active_families: set[str] = set()
     shadow_research_strategies: set[str] = set()
     shadow_research_families: set[str] = set()
+    matured_outcome_candidate_ids_by_strategy: dict[str, set[str]] = defaultdict(set)
+    for outcome in candidate_outcomes:
+        if str(outcome.get("terminal_state") or "") != "matured":
+            continue
+        strategy_id = str(outcome.get("strategy_id") or "unknown")
+        candidate_id = str(outcome.get("candidate_id") or "")
+        if candidate_id:
+            matured_outcome_candidate_ids_by_strategy[strategy_id].add(candidate_id)
+    min_matured_per_strategy = max(
+        1,
+        int(getattr(settings, "engine_readiness_min_matured_outcomes_per_active_strategy", 20)),
+    )
+    raw_paper_eligible_strategies: set[str] = set()
+    raw_paper_eligible_families: set[str] = set()
     for candidate in candidates:
         metadata = _metadata(candidate)
         family = str(metadata.get("strategy_family") or candidate.get("strategy_family") or "unknown")
@@ -414,8 +428,11 @@ async def build_paper_readiness_scorecard(
             active_alpha_strategies.add(strategy_id)
             active_alpha_families.add(family)
             if _paper_eligible(candidate):
-                paper_eligible_active_strategies.add(strategy_id)
-                paper_eligible_active_families.add(family)
+                raw_paper_eligible_strategies.add(strategy_id)
+                raw_paper_eligible_families.add(family)
+                if len(matured_outcome_candidate_ids_by_strategy[strategy_id]) >= min_matured_per_strategy:
+                    paper_eligible_active_strategies.add(strategy_id)
+                    paper_eligible_active_families.add(family)
             if _shadow_research(candidate):
                 shadow_research_strategies.add(strategy_id)
                 shadow_research_families.add(family)
@@ -448,13 +465,24 @@ async def build_paper_readiness_scorecard(
     dominant_family_share_pct = _pct(allocation_notional_by_family.get(dominant_family or "", 0.0), total_allocated_notional)
     dominant_symbol_strategy = max(allocation_notional_by_symbol_strategy, key=lambda key: allocation_notional_by_symbol_strategy[key]) if allocation_notional_by_symbol_strategy else None
     dominant_symbol_strategy_share_pct = _pct(allocation_notional_by_symbol_strategy.get(dominant_symbol_strategy or "", 0.0), total_allocated_notional)
-    if dominant_share_pct > 45:
+    directional_shadow_intent_count = len([item for item in intents if item.get("execution_mode") == "shadow"])
+    concentration_min_samples = max(1, int(getattr(settings, "engine_readiness_concentration_min_samples", 50)))
+    concentration_gate_active = directional_shadow_intent_count >= concentration_min_samples
+    if dominant_share_pct > 45 and concentration_gate_active:
         warnings.append(_issue("strategy_dominance", f"{dominant_strategy} produced {dominant_share_pct}% of allocation notional.", severity="warning"))
-    if dominant_share_pct > settings.engine_readiness_max_strategy_allocation_share_pct:
+    elif dominant_share_pct > 45:
+        warnings.append(
+            _issue(
+                "strategy_concentration_observation",
+                f"{dominant_strategy} produced {dominant_share_pct}% of allocation notional, but concentration is report-only until {concentration_min_samples} shadow intents; observed {directional_shadow_intent_count}.",
+                severity="warning",
+            )
+        )
+    if concentration_gate_active and dominant_share_pct > settings.engine_readiness_max_strategy_allocation_share_pct:
         hard_blocks.append(_issue("strategy_allocation_dominance", f"{dominant_strategy} allocation share {dominant_share_pct}% exceeds {settings.engine_readiness_max_strategy_allocation_share_pct}%."))
-    if dominant_family_share_pct > settings.engine_readiness_max_strategy_family_allocation_share_pct:
+    if concentration_gate_active and dominant_family_share_pct > settings.engine_readiness_max_strategy_family_allocation_share_pct:
         hard_blocks.append(_issue("strategy_family_allocation_dominance", f"{dominant_family} family allocation share {dominant_family_share_pct}% exceeds {settings.engine_readiness_max_strategy_family_allocation_share_pct}%."))
-    if dominant_symbol_strategy_share_pct > settings.engine_readiness_max_symbol_strategy_allocation_share_pct:
+    if concentration_gate_active and dominant_symbol_strategy_share_pct > settings.engine_readiness_max_symbol_strategy_allocation_share_pct:
         hard_blocks.append(_issue("symbol_strategy_allocation_dominance", f"{dominant_symbol_strategy} share {dominant_symbol_strategy_share_pct}% exceeds {settings.engine_readiness_max_symbol_strategy_allocation_share_pct}%."))
     checks["strategy_diversity"] = {
         "candidate_counts": dict(candidate_strategy_counts),
@@ -468,6 +496,12 @@ async def build_paper_readiness_scorecard(
         "paper_eligible_active_family_count": len(paper_eligible_active_families),
         "paper_eligible_active_strategies": sorted(paper_eligible_active_strategies),
         "paper_eligible_active_families": sorted(paper_eligible_active_families),
+        "raw_paper_eligible_strategies": sorted(raw_paper_eligible_strategies),
+        "raw_paper_eligible_families": sorted(raw_paper_eligible_families),
+        "matured_outcome_candidate_count_by_strategy": {
+            key: len(value) for key, value in sorted(matured_outcome_candidate_ids_by_strategy.items())
+        },
+        "required_matured_outcomes_per_active_strategy": min_matured_per_strategy,
         "shadow_research_strategy_count": len(shadow_research_strategies),
         "shadow_research_family_count": len(shadow_research_families),
         "shadow_research_strategies": sorted(shadow_research_strategies),
@@ -482,6 +516,9 @@ async def build_paper_readiness_scorecard(
         "dominant_family_share_pct": dominant_family_share_pct,
         "dominant_symbol_strategy": dominant_symbol_strategy,
         "dominant_symbol_strategy_share_pct": dominant_symbol_strategy_share_pct,
+        "concentration_gate_active": concentration_gate_active,
+        "concentration_sample_count": directional_shadow_intent_count,
+        "concentration_min_samples": concentration_min_samples,
     }
 
     # Strategy-regime evidence.
@@ -495,7 +532,13 @@ async def build_paper_readiness_scorecard(
     strategy_regime_evidence_coverage_pct = _pct(len(paper_eligible_active_strategies & evidence_strategy_ids), len(paper_eligible_active_strategies))
     if strategy_regime_evidence_coverage_pct < settings.engine_readiness_min_strategy_regime_evidence_coverage_pct:
         hard_blocks.append(_issue("strategy_regime_evidence_coverage_low", f"Paper-eligible strategy-regime evidence coverage {strategy_regime_evidence_coverage_pct}% below {settings.engine_readiness_min_strategy_regime_evidence_coverage_pct}%. Shadow strategy-regime evidence coverage={shadow_strategy_regime_evidence_coverage_pct}%."))
-    low_score_rows = [row for row in strategy_regime_performance if _i(row.get("candidate_count"), 0) >= settings.engine_readiness_min_strategy_regime_sample_count and _f(row.get("score")) < settings.engine_readiness_min_strategy_regime_score]
+    low_score_rows = [
+        row
+        for row in strategy_regime_performance
+        if str(row.get("strategy_id") or "unknown") in paper_eligible_active_strategies
+        and _i(row.get("candidate_count"), 0) >= settings.engine_readiness_min_strategy_regime_sample_count
+        and _f(row.get("score")) < settings.engine_readiness_min_strategy_regime_score
+    ]
     if low_score_rows:
         hard_blocks.append(_issue("strategy_regime_score_low", f"{len(low_score_rows)} strategy-regime rows below minimum score {settings.engine_readiness_min_strategy_regime_score}."))
     checks["strategy_regime_evidence"] = {
@@ -586,11 +629,11 @@ async def build_paper_readiness_scorecard(
         score -= 10
     if allocation_rate_pct < settings.engine_readiness_min_allocation_rate_pct or allocation_rate_pct > settings.engine_readiness_max_allocation_rate_pct:
         score -= 8
-    if dominant_share_pct > settings.engine_readiness_max_strategy_allocation_share_pct:
+    if concentration_gate_active and dominant_share_pct > settings.engine_readiness_max_strategy_allocation_share_pct:
         score -= 10
-    if dominant_family_share_pct > settings.engine_readiness_max_strategy_family_allocation_share_pct:
+    if concentration_gate_active and dominant_family_share_pct > settings.engine_readiness_max_strategy_family_allocation_share_pct:
         score -= 10
-    if dominant_symbol_strategy_share_pct > settings.engine_readiness_max_symbol_strategy_allocation_share_pct:
+    if concentration_gate_active and dominant_symbol_strategy_share_pct > settings.engine_readiness_max_symbol_strategy_allocation_share_pct:
         score -= 10
     if council_review_coverage_pct < settings.engine_readiness_min_council_review_coverage_pct:
         score -= 10
@@ -758,8 +801,12 @@ def _recommendation(hard_blocks: list[dict[str, str]], warnings: list[dict[str, 
         return "rollback_to_shadow"
     if "missing_core_data" in codes or "engine_loop_stale" in codes:
         return "fix_data_quality"
+    if "insufficient_active_strategy_count" in codes or "insufficient_active_strategy_family_count" in codes:
+        return "expand_strategy_opportunity_coverage"
+    if "insufficient_sample_size" in codes or "strategy_concentration_observation" in codes:
+        return "collect_balanced_evidence"
     if "strategy_dominance" in codes or "strategy_allocation_dominance" in codes or "strategy_family_allocation_dominance" in codes or "symbol_strategy_allocation_dominance" in codes:
-        return "tighten_strategy_throttles"
+        return "balance_shadow_evidence"
     if "risk_reject_spike_critical" in codes or "risk_reject_rate_high" in codes:
         return "review_risk_rejects"
     if "replay_comparison_missing" in codes or "replay_comparison_failed" in codes or "replay_comparison_stale" in codes:
@@ -781,7 +828,9 @@ def _next_actions(hard_blocks: list[dict[str, str]], warnings: list[dict[str, st
     if "candidate_risk_gateway_coverage_low" in codes or "flat_no_trade_risk_evidence_coverage_low" in codes:
         actions.append("Verify every trade and no-trade candidate has candidate-level RiskGateway evidence before promotion.")
     if "strategy_dominance" in codes or "strategy_allocation_dominance" in codes or "strategy_family_allocation_dominance" in codes or "symbol_strategy_allocation_dominance" in codes:
-        actions.append("Tighten or enable strategy/family/symbol diversity controls and continue shadow observation.")
+        actions.append("Use the shadow evidence-admission quotas to balance strategy/family/symbol samples; retain the current paper hard caps.")
+    if "strategy_concentration_observation" in codes:
+        actions.append("Continue collecting directional shadow intents; concentration remains report-only until the minimum sample is met.")
     if "replay_comparison_insufficient_data" in codes:
         actions.append("Continue shadow collection until the replay candidate, approved-allocation, and shadow-intent samples mature.")
     if "replay_comparison_missing" in codes or "replay_comparison_stale" in codes or "replay_comparison_failed" in codes:

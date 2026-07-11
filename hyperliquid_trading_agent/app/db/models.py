@@ -1249,10 +1249,15 @@ class FeatureValueRecord(TimestampMixin, Base):
         Index("ix_feature_values_asset_computed", "asset", "computed_ts_ms"),
         Index("ix_feature_values_source_event", "source_event_id"),
         Index("ix_feature_values_group_computed", "feature_group", "computed_ts_ms"),
+        Index("ix_feature_values_instrument_computed", "instrument_id", "computed_ts_ms"),
     )
 
     feature_id: Mapped[str] = mapped_column(String(96), primary_key=True)
     asset: Mapped[str] = mapped_column(String(64), nullable=False)
+    instrument_id: Mapped[str | None] = mapped_column(String(64))
+    underlying_id: Mapped[str | None] = mapped_column(String(128))
+    venue_id: Mapped[str | None] = mapped_column(String(96))
+    provider_symbol: Mapped[str | None] = mapped_column(String(128))
     feature_group: Mapped[str] = mapped_column(String(64), nullable=False)
     feature_name: Mapped[str] = mapped_column(String(128), nullable=False)
     value_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -1356,6 +1361,10 @@ class EngineStrategyEvaluationRecord(TimestampMixin, Base):
     evaluated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     asset: Mapped[str] = mapped_column(String(64), nullable=False)
     venue: Mapped[str] = mapped_column(String(64), nullable=False, default="hyperliquid")
+    instrument_id: Mapped[str | None] = mapped_column(String(64))
+    underlying_id: Mapped[str | None] = mapped_column(String(128))
+    venue_id: Mapped[str | None] = mapped_column(String(96))
+    provider_symbol: Mapped[str | None] = mapped_column(String(128))
     strategy_id: Mapped[str] = mapped_column(String(96), nullable=False)
     strategy_version: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
     strategy_family: Mapped[str] = mapped_column(String(96), nullable=False, default="unknown")
@@ -1429,6 +1438,8 @@ class AlphaCandidateRecord(TimestampMixin, Base):
         Index("ix_alpha_candidates_status_created", "status", "created_at_ms"),
         Index("ix_alpha_candidates_asset_status", "asset", "status"),
         Index("ix_alpha_candidates_strategy_created", "strategy_id", "created_at_ms"),
+        Index("ix_alpha_candidates_instrument_created", "instrument_id", "created_at_ms"),
+        Index("ix_alpha_candidates_evidence_epoch", "evidence_epoch_id", "created_at_ms"),
     )
 
     candidate_id: Mapped[str] = mapped_column(String(96), primary_key=True)
@@ -1436,6 +1447,11 @@ class AlphaCandidateRecord(TimestampMixin, Base):
     asset: Mapped[str] = mapped_column(String(64), nullable=False)
     asset_class: Mapped[str] = mapped_column(String(32), nullable=False, default="crypto")
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    instrument_id: Mapped[str | None] = mapped_column(String(64))
+    underlying_id: Mapped[str | None] = mapped_column(String(128))
+    venue_id: Mapped[str | None] = mapped_column(String(96))
+    provider_symbol: Mapped[str | None] = mapped_column(String(128))
+    evidence_epoch_id: Mapped[str | None] = mapped_column(String(96))
     side: Mapped[str] = mapped_column(String(16), nullable=False)
     horizon: Mapped[str] = mapped_column(String(32), nullable=False)
     proposed_entry: Mapped[float] = mapped_column(Float, nullable=False)
@@ -1558,6 +1574,9 @@ class CandidateEvidenceLinkRecord(TimestampMixin, Base):
     strategy_family: Mapped[str] = mapped_column(String(96), nullable=False, default="unknown")
     asset: Mapped[str] = mapped_column(String(64), nullable=False)
     venue: Mapped[str] = mapped_column(String(64), nullable=False, default="hyperliquid")
+    instrument_id: Mapped[str | None] = mapped_column(String(64))
+    underlying_id: Mapped[str | None] = mapped_column(String(128))
+    venue_id: Mapped[str | None] = mapped_column(String(96))
     horizon: Mapped[str] = mapped_column(String(32), nullable=False)
     regime_snapshot_id: Mapped[str] = mapped_column(String(96), nullable=False)
     feature_snapshot_id: Mapped[str] = mapped_column(String(96), nullable=False)
@@ -1588,6 +1607,9 @@ class CandidateOutcomeAttributionRecord(TimestampMixin, Base):
     strategy_family: Mapped[str] = mapped_column(String(96), nullable=False, default="unknown")
     asset: Mapped[str] = mapped_column(String(64), nullable=False)
     venue: Mapped[str] = mapped_column(String(64), nullable=False, default="hyperliquid")
+    instrument_id: Mapped[str | None] = mapped_column(String(64))
+    underlying_id: Mapped[str | None] = mapped_column(String(128))
+    venue_id: Mapped[str | None] = mapped_column(String(96))
     side: Mapped[str] = mapped_column(String(16), nullable=False)
     candidate_horizon: Mapped[str] = mapped_column(String(32), nullable=False)
     regime_snapshot_id: Mapped[str] = mapped_column(String(96), nullable=False)
@@ -1822,6 +1844,7 @@ class OrderIntentRecord(TimestampMixin, Base):
         Index("ix_order_intents_candidate", "parent_candidate_id"),
         Index("ix_order_intents_created", "created_at_ms"),
         Index("ix_order_intents_mode", "execution_mode"),
+        Index("ix_order_intents_instrument_created", "instrument_id", "created_at_ms"),
     )
 
     intent_id: Mapped[str] = mapped_column(String(96), primary_key=True)
@@ -1830,6 +1853,10 @@ class OrderIntentRecord(TimestampMixin, Base):
     asset: Mapped[str] = mapped_column(String(64), nullable=False)
     asset_class: Mapped[str] = mapped_column(String(32), nullable=False, default="crypto")
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    instrument_id: Mapped[str | None] = mapped_column(String(64))
+    underlying_id: Mapped[str | None] = mapped_column(String(128))
+    venue_id: Mapped[str | None] = mapped_column(String(96))
+    provider_symbol: Mapped[str | None] = mapped_column(String(128))
     side: Mapped[str] = mapped_column(String(16), nullable=False)
     order_type: Mapped[str] = mapped_column(String(32), nullable=False)
     time_in_force: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -1900,6 +1927,138 @@ class PositionThesisRecord(TimestampMixin, Base):
     opened_at_ms: Mapped[int | None] = mapped_column(BigInteger)
     updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     closed_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class InstrumentRegistryRecord(TimestampMixin, Base):
+    __tablename__ = "instrument_registry"
+    __table_args__ = (
+        UniqueConstraint("venue_id", "provider_symbol", name="uq_instrument_registry_venue_symbol"),
+        Index("ix_instrument_registry_underlying", "underlying_id"),
+        Index("ix_instrument_registry_venue_status", "venue_id", "tradability_status"),
+    )
+
+    instrument_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    underlying_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    venue_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    provider_symbol: Mapped[str] = mapped_column(String(128), nullable=False)
+    display_symbol: Mapped[str] = mapped_column(String(128), nullable=False)
+    instrument_type: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    quote_currency: Mapped[str] = mapped_column(String(32), nullable=False, default="USD")
+    session_timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="UTC")
+    tradability_status: Mapped[str] = mapped_column(String(32), nullable=False, default="absent")
+    capabilities_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    mapping_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    first_observed_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_observed_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WatchlistMembershipRecord(TimestampMixin, Base):
+    __tablename__ = "watchlist_memberships"
+    __table_args__ = (
+        UniqueConstraint("instrument_id", name="uq_watchlist_memberships_instrument"),
+        Index("ix_watchlist_memberships_tier_enabled", "tier", "enabled"),
+    )
+
+    membership_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    tier: Mapped[str] = mapped_column(String(32), nullable=False, default="pinned")
+    desired: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False, default="admin")
+    created_by: Mapped[str] = mapped_column(String(128), nullable=False, default="system")
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WatchlistChangeEventRecord(TimestampMixin, Base):
+    __tablename__ = "watchlist_change_events"
+    __table_args__ = (
+        Index("ix_watchlist_change_events_status_created", "status", "created_at_ms"),
+        Index("ix_watchlist_change_events_actor_created", "actor", "created_at_ms"),
+    )
+
+    change_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    before_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    after_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    confirmed_by: Mapped[str | None] = mapped_column(String(128))
+    confirmed_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class UniverseSnapshotRecord(TimestampMixin, Base):
+    __tablename__ = "universe_snapshots"
+    __table_args__ = (Index("ix_universe_snapshots_version", "version"),)
+
+    snapshot_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    desired_instrument_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    active_instrument_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[str] = mapped_column(String(96), nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class VenueMarketSnapshotRecord(TimestampMixin, Base):
+    __tablename__ = "venue_market_snapshots"
+    __table_args__ = (
+        Index("ix_venue_market_snapshots_instrument_time", "instrument_id", "received_ts_ms"),
+        Index("ix_venue_market_snapshots_underlying_venue_time", "underlying_id", "venue_id", "received_ts_ms"),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    underlying_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    venue_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    provider_symbol: Mapped[str] = mapped_column(String(128), nullable=False)
+    bid_px: Mapped[float | None] = mapped_column(Float)
+    ask_px: Mapped[float | None] = mapped_column(Float)
+    mid_px: Mapped[float | None] = mapped_column(Float)
+    mark_px: Mapped[float | None] = mapped_column(Float)
+    index_px: Mapped[float | None] = mapped_column(Float)
+    last_trade_px: Mapped[float | None] = mapped_column(Float)
+    volume_24h: Mapped[float | None] = mapped_column(Float)
+    open_interest: Mapped[float | None] = mapped_column(Float)
+    funding_rate: Mapped[float | None] = mapped_column(Float)
+    depth_bands_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    exchange_ts_ms: Mapped[int | None] = mapped_column(BigInteger)
+    received_ts_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_integrity: Mapped[str] = mapped_column(String(32), nullable=False, default="confirmed")
+    staleness_ms: Mapped[int | None] = mapped_column(BigInteger)
+    sequence: Mapped[int | None] = mapped_column(BigInteger)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class CrossVenueFeatureSnapshotRecord(TimestampMixin, Base):
+    __tablename__ = "cross_venue_feature_snapshots"
+    __table_args__ = (
+        Index("ix_cross_venue_feature_snapshots_underlying_time", "underlying_id", "as_of_ms"),
+        Index("ix_cross_venue_feature_snapshots_pair_time", "reference_instrument_id", "comparison_instrument_id", "as_of_ms"),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    underlying_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    reference_instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    comparison_instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    reference_venue_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    comparison_venue_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    as_of_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    price_delta_bps: Mapped[float | None] = mapped_column(Float)
+    volume_imbalance: Mapped[float | None] = mapped_column(Float)
+    depth_divergence: Mapped[float | None] = mapped_column(Float)
+    liquidation_divergence: Mapped[float | None] = mapped_column(Float)
+    lead_lag_windows_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    max_clock_skew_ms: Mapped[int | None] = mapped_column(BigInteger)
+    quality_flags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 

@@ -4,6 +4,8 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from hyperliquid_trading_agent.app.markets.schemas import stable_instrument_id
+
 AssetClass = Literal["crypto", "equity", "macro", "fx", "commodity", "unknown"]
 ExecutionMode = Literal["paper", "shadow"]
 EngineSide = Literal["long", "short", "flat"]
@@ -54,6 +56,36 @@ KillSwitchAction = Literal["armed", "triggered", "released", "expired"]
 OutcomeWindow = Literal["5m", "15m", "1h", "4h", "24h"]
 
 
+def _instrument_identity(
+    *,
+    asset: str,
+    venue_id: str,
+    provider_symbol: str,
+    instrument_id: str,
+    underlying_id: str,
+    asset_class: str,
+) -> tuple[str, str, str, str]:
+    provider = (provider_symbol or asset).strip()
+    if provider.upper().startswith("XYZ:"):
+        provider = "xyz:" + provider.split(":", 1)[1].upper()
+    venue = venue_id.strip().lower()
+    if venue in {"hyperliquid", "hyperliquid:main", ""}:
+        venue = "hyperliquid:xyz" if provider.lower().startswith("xyz:") else "hyperliquid:main"
+    elif venue == "alpaca":
+        venue = "alpaca:paper"
+    display = provider.split(":", 1)[-1].upper()
+    prefix = {
+        "crypto": "CRYPTO",
+        "equity": "EQUITY",
+        "macro": "INDEX",
+        "fx": "FX",
+        "commodity": "COMMODITY",
+    }.get(asset_class, "UNKNOWN")
+    resolved_underlying = underlying_id.strip() or f"{prefix}:{display}"
+    resolved_instrument = instrument_id.strip() or stable_instrument_id(venue, provider)
+    return resolved_instrument, resolved_underlying, venue, provider
+
+
 class NormalizedEvent(BaseModel):
     """Append-only normalized input event used by the institutional engine.
 
@@ -98,6 +130,10 @@ class FeatureValue(BaseModel):
 
     feature_id: str
     asset: str
+    instrument_id: str = ""
+    underlying_id: str = ""
+    venue_id: str = "hyperliquid:main"
+    provider_symbol: str = ""
     feature_group: str
     feature_name: str
     value: dict[str, Any] = Field(default_factory=dict)
@@ -124,12 +160,24 @@ class FeatureValue(BaseModel):
     def _validate_timestamps(self) -> Self:
         if self.computed_ts_ms < self.received_ts_ms:
             raise ValueError("computed_ts_ms must be >= received_ts_ms")
+        self.instrument_id, self.underlying_id, self.venue_id, self.provider_symbol = _instrument_identity(
+            asset=self.asset,
+            venue_id=self.venue_id,
+            provider_symbol=self.provider_symbol,
+            instrument_id=self.instrument_id,
+            underlying_id=self.underlying_id,
+            asset_class="crypto",
+        )
         return self
 
 
 class FeatureSnapshot(BaseModel):
     snapshot_id: str
     asset: str
+    instrument_id: str = ""
+    underlying_id: str = ""
+    venue_id: str = "hyperliquid:main"
+    provider_symbol: str = ""
     as_of_ms: int
     feature_ids: list[str] = Field(default_factory=list)
     features: dict[str, Any] = Field(default_factory=dict)
@@ -141,6 +189,18 @@ class FeatureSnapshot(BaseModel):
     @classmethod
     def _uppercase_asset(cls, value: str) -> str:
         return value.upper().strip()
+
+    @model_validator(mode="after")
+    def _derive_instrument_identity(self) -> Self:
+        self.instrument_id, self.underlying_id, self.venue_id, self.provider_symbol = _instrument_identity(
+            asset=self.asset,
+            venue_id=self.venue_id,
+            provider_symbol=self.provider_symbol,
+            instrument_id=self.instrument_id,
+            underlying_id=self.underlying_id,
+            asset_class="crypto",
+        )
+        return self
 
 
 class StrategyPermissions(BaseModel):
@@ -269,6 +329,11 @@ class AlphaCandidate(BaseModel):
     asset: str
     asset_class: AssetClass = "crypto"
     venue: str
+    instrument_id: str = ""
+    underlying_id: str = ""
+    venue_id: str = ""
+    provider_symbol: str = ""
+    evidence_epoch_id: str = "legacy"
     side: EngineSide
     horizon: str
     proposed_entry: float = Field(gt=0)
@@ -304,6 +369,14 @@ class AlphaCandidate(BaseModel):
             raise ValueError("expires_at_ms must be > created_at_ms")
         if self.side != "flat" and not self.invalidation_conditions:
             raise ValueError("directional candidates require invalidation_conditions")
+        self.instrument_id, self.underlying_id, self.venue_id, self.provider_symbol = _instrument_identity(
+            asset=self.asset,
+            venue_id=self.venue_id or self.venue,
+            provider_symbol=self.provider_symbol,
+            instrument_id=self.instrument_id,
+            underlying_id=self.underlying_id,
+            asset_class=self.asset_class,
+        )
         return self
 
 
@@ -379,6 +452,9 @@ class CandidateEvidenceLink(BaseModel):
     strategy_family: str = "unknown"
     asset: str
     venue: str = "hyperliquid"
+    instrument_id: str = ""
+    underlying_id: str = ""
+    venue_id: str = ""
     horizon: str
     regime_snapshot_id: str
     feature_snapshot_id: str
@@ -396,6 +472,18 @@ class CandidateEvidenceLink(BaseModel):
     def _uppercase_asset(cls, value: str) -> str:
         return value.upper().strip()
 
+    @model_validator(mode="after")
+    def _derive_instrument_identity(self) -> Self:
+        self.instrument_id, self.underlying_id, self.venue_id, _ = _instrument_identity(
+            asset=self.asset,
+            venue_id=self.venue_id or self.venue,
+            provider_symbol="",
+            instrument_id=self.instrument_id,
+            underlying_id=self.underlying_id,
+            asset_class="crypto",
+        )
+        return self
+
 
 class CandidateOutcomeAttribution(BaseModel):
     attribution_id: str
@@ -405,6 +493,9 @@ class CandidateOutcomeAttribution(BaseModel):
     strategy_family: str = "unknown"
     asset: str
     venue: str = "hyperliquid"
+    instrument_id: str = ""
+    underlying_id: str = ""
+    venue_id: str = ""
     side: EngineSide
     candidate_horizon: str
     regime_snapshot_id: str
@@ -444,6 +535,14 @@ class CandidateOutcomeAttribution(BaseModel):
     def _validate_window(self) -> Self:
         if self.window_end_ms <= self.window_start_ms:
             raise ValueError("outcome window end must be after start")
+        self.instrument_id, self.underlying_id, self.venue_id, _ = _instrument_identity(
+            asset=self.asset,
+            venue_id=self.venue_id or self.venue,
+            provider_symbol="",
+            instrument_id=self.instrument_id,
+            underlying_id=self.underlying_id,
+            asset_class="crypto",
+        )
         return self
 
 
@@ -679,6 +778,10 @@ class OrderIntent(BaseModel):
     asset: str
     asset_class: AssetClass = "crypto"
     venue: str
+    instrument_id: str = ""
+    underlying_id: str = ""
+    venue_id: str = ""
+    provider_symbol: str = ""
     side: OrderSide
     order_type: OrderType
     time_in_force: str
@@ -710,6 +813,14 @@ class OrderIntent(BaseModel):
             raise ValueError("post_only order_type requires post_only=True")
         if self.execution_mode not in {"paper", "shadow"}:
             raise ValueError("only paper/shadow execution modes are supported")
+        self.instrument_id, self.underlying_id, self.venue_id, self.provider_symbol = _instrument_identity(
+            asset=self.asset,
+            venue_id=self.venue_id or self.venue,
+            provider_symbol=self.provider_symbol,
+            instrument_id=self.instrument_id,
+            underlying_id=self.underlying_id,
+            asset_class=self.asset_class,
+        )
         return self
 
 

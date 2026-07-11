@@ -343,6 +343,7 @@ def format_engine_validation_digest(
     summary = report.get("summary") or {}
     execution = report.get("execution_simulations") or {}
     by_strategy = report.get("by_strategy") or {}
+    defensive_no_trade = report.get("defensive_no_trade") or {}
     buckets = report.get("ev_calibration", {}).get("bucket_summary") or {}
     readiness = readiness or {}
     mode = "shadow-only" if settings.engine_shadow_enabled and not settings.engine_paper_enabled else "paper/shadow"
@@ -373,13 +374,28 @@ def format_engine_validation_digest(
     if controller:
         lines.append("**Throttles:**")
         reason_counts = controller.get("reason_counts") or {}
-        recent_share = controller.get("last_recent_share_pct") or {}
+        defensive_ids = set((defensive_no_trade.get("strategy_counts") or {}).keys())
+        recent_share = {
+            key: value
+            for key, value in (controller.get("last_recent_share_pct") or {}).items()
+            if key not in defensive_ids
+        }
         if reason_counts:
             lines.append("- Reasons: " + ", ".join(f"`{key}`={value}" for key, value in list(reason_counts.items())[:6]))
         if recent_share:
             lines.append("- Recent allocation share: " + ", ".join(f"`{key}`={value}%" for key, value in list(recent_share.items())[:6]))
         if not reason_counts and not recent_share:
             lines.append("- No throttle blocks observed in this process yet.")
+        lines.append("")
+    if defensive_no_trade.get("candidate_count"):
+        lines.append("**Defensive no-trade controls:**")
+        lines.append(
+            "- "
+            + ", ".join(
+                f"`{key}` candidates `{value}` | allocation expected `false`"
+                for key, value in (defensive_no_trade.get("strategy_counts") or {}).items()
+            )
+        )
         lines.append("")
     lines.append("**Top strategies:**")
     ranked = sorted(by_strategy.items(), key=lambda item: (item[1].get("allocated_count", 0), item[1].get("candidate_count", 0)), reverse=True)

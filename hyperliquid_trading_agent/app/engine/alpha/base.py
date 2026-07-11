@@ -5,8 +5,8 @@ from typing import Any, Literal, Protocol
 
 from hyperliquid_trading_agent.app.engine.schemas import AlphaCandidate, FeatureSnapshot, RegimeVector, StrategySpec
 
-CORE_CRYPTO_ASSETS = ["BTC", "ETH", "HYPE"]
-HYPERLIQUID_VENUES = ["hyperliquid"]
+CORE_CRYPTO_ASSETS = ["BTC", "ETH", "HYPE", "SOL", "ZEC", "LIT", "AAVE", "XMR", "AERO"]
+HYPERLIQUID_VENUES = ["hyperliquid", "hyperliquid:main"]
 
 
 class AlphaStrategy(Protocol):

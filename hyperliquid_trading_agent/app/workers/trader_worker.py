@@ -25,6 +25,8 @@ from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
 from hyperliquid_trading_agent.app.liquidations.signals import StoreBackedLiquidationSignalBridge
 from hyperliquid_trading_agent.app.liquidations.store import LiquidationStore
 from hyperliquid_trading_agent.app.logging import get_logger
+from hyperliquid_trading_agent.app.markets.lighter_adapter import LighterSDKMarketDataAdapter
+from hyperliquid_trading_agent.app.markets.sync import MarketUniverseSyncService, run_market_universe_sync_loop
 from hyperliquid_trading_agent.app.newswire.bus import InProcessNewswireBus
 from hyperliquid_trading_agent.app.paper.schemas import PaperTradeDraftRequest
 from hyperliquid_trading_agent.app.prediction_markets.paper import PredictionMarketPaperService
@@ -32,6 +34,7 @@ from hyperliquid_trading_agent.app.prediction_markets.schemas import (
     PredictionMarketBetDraftRequest,
     PredictionMarketSettlementRequest,
 )
+from hyperliquid_trading_agent.app.tradfi.alpaca_paper_execution import AlpacaPaperExecutionAdapter
 from hyperliquid_trading_agent.app.workers.base import BaseWorker
 from hyperliquid_trading_agent.app.workers.stored_newswire_story_pump import StoredNewswireStoryPump
 
@@ -62,8 +65,12 @@ class TraderWorker(BaseWorker):
         self._engine_news_bus: InProcessNewswireBus | None = None
         self._engine_news_consumer: EngineNewsConsumer | None = None
         self._engine_news_pump: StoredNewswireStoryPump | None = None
+        self._alpaca_paper_execution: AlpacaPaperExecutionAdapter | None = None
+        self._market_universe_sync: MarketUniverseSyncService | None = None
+        self._market_universe_sync_task: asyncio.Task | None = None
 
     async def run(self) -> None:
+        await self._start_market_universe_sync()
         await self._start_engine_loop()
         await self._start_engine_validation_monitor()
         await self._start_engine_pnl_attribution()
@@ -75,6 +82,8 @@ class TraderWorker(BaseWorker):
             tasks.append(self._engine_loop_task)
         if self._engine_news_pump is not None:
             tasks.append(asyncio.create_task(self._engine_news_pump.run_forever(), name="trader-engine-newswire-pump"))
+        if self._market_universe_sync_task is not None:
+            tasks.append(self._market_universe_sync_task)
         try:
             await self.wait_until_stopped()
         finally:
@@ -146,6 +155,40 @@ class TraderWorker(BaseWorker):
             bootstrap_metadata={"consumer": "engine_newsfeed", "owner_role": self.role.value},
         )
 
+    async def _start_market_universe_sync(self) -> None:
+        if not self.settings.market_universe_enabled or self._market_universe_sync_task is not None:
+            return
+        hyperliquid = self._get_hyperliquid_client()
+        lighter_adapter = None
+        if self.settings.lighter_enabled:
+            lighter_adapter = LighterSDKMarketDataAdapter(base_url=self.settings.lighter_base_url)
+        alpaca_adapter = None
+        if self.settings.alpaca_paper_trading_enabled:
+            if self._alpaca_paper_execution is None:
+                self._alpaca_paper_execution = AlpacaPaperExecutionAdapter(
+                    api_key=self.settings.alpaca_paper_api_key,
+                    api_secret=self.settings.alpaca_paper_api_secret,
+                    repository=self.repository,
+                    base_url=self.settings.alpaca_paper_base_url,
+                    data_feed=self.settings.alpaca_data_feed,
+                )
+            alpaca_adapter = self._alpaca_paper_execution
+        self._market_universe_sync = MarketUniverseSyncService(
+            settings=self.settings,
+            repository=self.repository,
+            hyperliquid=hyperliquid,
+            lighter_adapter=lighter_adapter,
+            alpaca_adapter=alpaca_adapter,
+        )
+        self._market_universe_sync_task = asyncio.create_task(
+            run_market_universe_sync_loop(
+                self._market_universe_sync,
+                self._stop,
+                interval_seconds=self.settings.market_universe_snapshot_refresh_seconds,
+            ),
+            name="trader-market-universe-sync",
+        )
+
     async def _start_autonomy_loop(self) -> None:
         if not self.settings.autonomy_enabled:
             return
@@ -193,7 +236,7 @@ class TraderWorker(BaseWorker):
         while not self._stop.is_set():
             try:
                 service = self._ensure_engine_service()
-                self._engine_loop_last_result = await service.run_once(symbols=self.settings.autonomy_core_symbols)
+                self._engine_loop_last_result = await service.run_once(symbols=await self._engine_symbols())
                 try:
                     proposal_result = await self._get_engine_operator_proposal_service().process_candidate_book(
                         self._engine_loop_last_result.get("candidate_book_id")
@@ -230,9 +273,46 @@ class TraderWorker(BaseWorker):
             except TimeoutError:
                 continue
 
+    async def _engine_symbols(self) -> list[str]:
+        """Use active canonical Hyperliquid pins, retaining config as fallback."""
+
+        symbols = list(self.settings.autonomy_core_symbols)
+        try:
+            memberships = await self.repository.list_watchlist_memberships(limit=20_000)
+            desired_ids = {
+                str(item.get("instrument_id"))
+                for item in memberships
+                if item.get("desired") and item.get("enabled")
+            }
+            instruments = await self.repository.list_instruments(
+                tradability_status="active",
+                limit=20_000,
+            )
+            symbols.extend(
+                str(
+                    item.get("display_symbol")
+                    or str(item.get("provider_symbol") or "").split(":", 1)[-1]
+                ).upper()
+                for item in instruments
+                if item.get("instrument_id") in desired_ids
+                and str(item.get("venue_id") or "").startswith("hyperliquid:")
+                and item.get("instrument_type")
+                in {
+                    "crypto_perp",
+                    "hip3_perp",
+                    "index_benchmark",
+                    "commodity_perp",
+                    "fx_perp",
+                    "synthetic_perp",
+                }
+            )
+        except Exception:
+            pass
+        return list(dict.fromkeys(symbol for symbol in symbols if symbol))[: self.settings.autonomy_max_tracked_assets]
+
     def _ensure_engine_service(self) -> InstitutionalEngineService:
         if self._engine_service is None:
-            self._engine_hyperliquid = HyperliquidClient(settings=self.settings)
+            self._engine_hyperliquid = self._get_hyperliquid_client()
             risk_gateway = RiskGateway(settings=self.settings, repository=self.repository)
             liquidation_bridge = None
             if bool(getattr(self.settings, "engine_liquidation_features_enabled", True)) and self.sessionmaker is not None:
@@ -261,6 +341,10 @@ class TraderWorker(BaseWorker):
         if self._engine_pnl_attribution is not None:
             await self._engine_pnl_attribution.stop()
             self._engine_pnl_attribution = None
+        if self._market_universe_sync is not None:
+            await self._market_universe_sync.close()
+            self._market_universe_sync = None
+        self._market_universe_sync_task = None
         if self._engine_hyperliquid is not None:
             await self._engine_hyperliquid.close()
             self._engine_hyperliquid = None
@@ -706,6 +790,14 @@ class TraderWorker(BaseWorker):
     def _get_autonomy_service(self) -> AutonomousTradingLoopService:
         if self._autonomy_service is None:
             memory = self._get_memory_service()
+            if self.settings.alpaca_paper_trading_enabled and self._alpaca_paper_execution is None:
+                self._alpaca_paper_execution = AlpacaPaperExecutionAdapter(
+                    api_key=self.settings.alpaca_paper_api_key,
+                    api_secret=self.settings.alpaca_paper_api_secret,
+                    repository=self.repository,
+                    base_url=self.settings.alpaca_paper_base_url,
+                    data_feed=self.settings.alpaca_data_feed,
+                )
             self._autonomy_service = AutonomousTradingLoopService(
                 settings=self.settings,
                 repository=self.repository,
@@ -715,6 +807,7 @@ class TraderWorker(BaseWorker):
                 alert_sink=None,
                 model_gateway=None,
                 risk_gateway=None,
+                equity_paper_execution=self._alpaca_paper_execution,
             )
         return self._autonomy_service
 
@@ -756,6 +849,22 @@ class TraderWorker(BaseWorker):
                     "execution_authority": "none",
                     "acknowledgment_only": True,
                 }
+            ),
+            "alpaca_paper": {
+                "enabled": self.settings.alpaca_paper_trading_enabled,
+                "configured": self._alpaca_paper_execution is not None,
+                "source_of_truth": "alpaca_paper" if self._alpaca_paper_execution is not None else None,
+                "live_capable": False,
+                "last_reconciliation": (
+                    self._alpaca_paper_execution.last_reconciliation
+                    if self._alpaca_paper_execution is not None
+                    else None
+                ),
+            },
+            "market_universe": (
+                self._market_universe_sync.status()
+                if self._market_universe_sync is not None
+                else {"enabled": self.settings.market_universe_enabled, "running": False}
             ),
             "engine_validation_monitor": (
                 self._engine_validation_monitor.status()

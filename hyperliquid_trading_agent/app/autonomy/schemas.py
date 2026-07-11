@@ -4,8 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-AssetSource = Literal["core", "top_volume", "hip3_alias"]
-AssetKind = Literal["perp", "spot", "hip3_index"]
+AssetSource = Literal["core", "top_volume", "hip3_alias", "watchlist"]
+AssetKind = Literal["perp", "spot", "hip3_index", "hip3_perp"]
 LevelKind = Literal[
     "support",
     "resistance",

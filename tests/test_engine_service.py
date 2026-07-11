@@ -76,6 +76,8 @@ def test_institutional_engine_run_once_is_paper_shadow_only():
         engine_debate_priority_min=0,
         engine_paper_enabled=True,
         engine_shadow_enabled=True,
+        engine_alpha_catalog_mode="wave1a_locked",
+        engine_wave2_enabled=False,
     )
     risk_gateway = RiskGateway(settings=settings)
     service = InstitutionalEngineService(settings=settings, repository=None, hyperliquid=FakeHyperliquidEngine(), risk_gateway=risk_gateway)

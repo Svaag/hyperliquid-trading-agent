@@ -415,8 +415,17 @@ def test_equity_portfolio_initial_state():
 
 async def test_equity_paper_place_order():
     simulator = EquityPaperSimulator(initial_equity_usd=100_000.0, risk_pct_per_trade=1.0, max_single_name_exposure_pct=0.5)
-    request = EquityTradeRequest(symbol="AAPL", side="long", entry=195.0, stop=190.0, take_profit=205.0, account_equity_usd=100_000.0, risk_pct=0.5, quantity=100)
+    request = EquityTradeRequest(
+        symbol="AAPL",
+        side="long",
+        entry=195.0,
+        stop=190.0,
+        take_profit=205.0,
+        account_equity_usd=100_000.0,
+        risk_pct=0.5,
+    )
     order = await simulator.place_order(request)
+    assert order.quantity == pytest.approx(100.0)  # 0.5% of $100k divided by the $5 stop distance
     assert order.status == "filled"
     assert order.filled_px == pytest.approx(195.0195)
     assert simulator.portfolio.cash_usd == pytest.approx(100_000.0 - (100 * order.filled_px * simulator.taker_fee_bps / 10_000))

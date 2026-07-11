@@ -59,13 +59,22 @@ ENGINE_EXECUTION_MODES=shadow
 ENGINE_SHADOW_ENABLED=true
 ENGINE_PAPER_ENABLED=false
 ENGINE_LIVE_ENABLED=false
-ENGINE_ALPHA_CATALOG_MODE=wave1a_locked
-ENGINE_CROSS_VENUE_DEXES=
+ENGINE_ALPHA_CATALOG_MODE=wave2_early_shadow
+ENGINE_CROSS_VENUE_DEXES=lighter,xyz,alpaca:paper
+ENGINE_WAVE1C_ENABLED=true
+ENGINE_WAVE2_ENABLED=true
+AUTONOMY_CORE_UNIVERSE=BTC,ETH,HYPE,SOL,ZEC,LIT,AAVE,XMR,AERO
+AUTONOMY_HIP3_DEXS=xyz
 ENGINE_VALIDATION_DIGEST_ENABLED=true
 ENGINE_VALIDATION_DIGEST_INTERVAL_SECONDS=3600
 ENGINE_VALIDATION_ALERT_STALE_LOOP_SECONDS=180
 ENGINE_VALIDATION_RISK_REJECT_SPIKE_COUNT=5
 ENGINE_VALIDATION_MISSING_DATA_SECONDS=300
+
+MARKET_UNIVERSE_ENABLED=true
+LIGHTER_ENABLED=true
+LIGHTER_READ_ONLY=true
+ALPACA_PAPER_TRADING_ENABLED=false
 
 NEWSWIRE_GATEWAY_ENABLED=true
 AUTONOMY_LEGACY_NEWS_POLL_ENABLED=false
@@ -106,7 +115,9 @@ Alert conditions include stale engine loop, engine runtime errors, paper intents
 
 `GET /engine/readiness` returns a deterministic conservative promotion scorecard. Paper readiness is blocked by live flags, paper leakage during shadow-only mode, stale engine loops, runtime errors, insufficient shadow observation/sample size, missing core feature/regime data, critical risk-reject spikes, failed replay comparisons, and unhealthy PnL marking.
 
-The default gate requires 24h shadow observation, at least 100 engine runs, 250 candidates, 50 shadow intents, 95% EV/feature/regime coverage, 100% candidate strategy metadata coverage, 95%+ Council review coverage, 100% RiskGateway coverage, at least 5 paper-eligible non-legacy alpha strategies across 3 paper-eligible families, strategy/family/symbol-strategy concentration below 55%/60%/35%, a latest replay with `passed` or `advisory_pass`, strategy-regime evidence, no hard blocks, and score >=85. Shadow-only research breadth is reported separately and does not satisfy paper-promotion breadth gates.
+The default gate requires 24h shadow observation, at least 100 engine runs, 250 candidates, 50 shadow intents, 95% EV/feature/regime coverage, 100% candidate strategy metadata coverage, 95%+ Council review coverage, 100% RiskGateway coverage, at least 5 paper-eligible non-legacy alpha strategies across 3 paper-eligible families, at least 20 matured candidate outcomes for each active paper-eligible strategy, strategy/family/symbol-strategy concentration below 55%/60%/35%, a latest replay with `passed` or `advisory_pass`, strategy-regime evidence, no hard blocks, and score >=85. Concentration is report-only before 50 directional shadow intents. Shadow-only research breadth is reported separately and does not satisfy paper-promotion breadth gates.
+
+`regime_defensive_flat_v1` is an explicit no-trade control. Its candidates receive RiskGateway/Council evidence, but never enter allocation-share denominators and never create an order intent. Directional shadow sampling uses separate evidence-admission quotas (45% strategy target, 60% family cap, 35% symbol-strategy cap) after raw candidates and governance evidence are persisted. This balances learnable evidence without deleting candidates or weakening the paper gate.
 
 `GET /engine/signal-comparison` is the read-only unification report for the retired/
 optional legacy `TradeSignal` path and the canonical institutional path. The same report
@@ -118,7 +129,7 @@ acknowledgment-only and never create a paper or live order through this report.
 
 ## Strategy portfolio, Council, replay, and bandit reports
 
-Wave 1 is the **evidence-producing strategy base**. Wave 2 is the deferred **proprietary perp-DEX edge layer**.
+Wave 1 is the **evidence-producing strategy base**. Wave 2 is the early, shadow-only **proprietary perp-DEX edge layer**; it remains ineligible for paper/live promotion.
 
 Wave 1A locks the strategy-regime candidate nucleus:
 
@@ -136,18 +147,40 @@ Wave 1B adds the evidence spine: every candidate receives candidate evidence lin
 
 `ENGINE_ALPHA_CATALOG_MODE` controls runtime strategy breadth:
 
-- `wave1a_locked` — default Wave 1A nucleus only; pre-Wave1A, Wave1C, and Wave2 remain specs/comparison-only.
+- `wave1a_locked` — baseline Wave 1A nucleus only; pre-Wave1A, Wave1C, and Wave2 remain specs/comparison-only.
 - `wave1c` — Wave 1A plus deterministic Wave 1C strategies.
+- `wave2_early_shadow` — Wave 1A + Wave 1C plus all Wave 2A/2B/2C strategies as shadow-only research.
 - `specs_only` — expose planned specs while keeping runtime emissions locked to Wave 1A.
 - `shadow_full_catalog` — activates the full shadow catalog while requiring `ENGINE_SHADOW_ENABLED=true`, `ENGINE_PAPER_ENABLED=false`, `ENGINE_EXECUTION_MODES=shadow`, and `ENGINE_LIVE_ENABLED=false`.
 
-Wave 1C deterministic strategies are implemented but gated by catalog mode / `ENGINE_WAVE1C_ENABLED=false` by default until Wave 1B outcome evidence is reliable. The deterministic set is `microstructure_absorption_v1`, `funding_squeeze_v1`, `basis_reversion_v1`, and `news_impulse_v1`; optional `range_rotation_v1` and `volatility_compression_breakout_v1` emit only when the full shadow catalog enables their specs.
+Wave 1C deterministic strategies are enabled in the default `wave2_early_shadow` research catalog. The deterministic set is `microstructure_absorption_v1`, `funding_squeeze_v1`, `basis_reversion_v1`, and `news_impulse_v1`; `range_rotation_v1` and `volatility_compression_breakout_v1` are also active but remain data-gated and replayable.
 
 Canonical Newswire story revisions can be bridged into the engine with `ENGINE_NEWSFEED_ENABLED=true`. V2 routes stories explicitly as `ignore`, `ledger_only`, `risk_only`, `directional_feature`, or `macro_proxy`; consumers no longer depend on one scalar threshold. Routed stories derive catalyst/impact/source-consensus features and feed a persisted, decaying `neutral|risk_on|risk_off|shock` state machine with evidence story IDs. `ENGINE_NEWS_RISK_OVERLAY_MODE=shadow` records counterfactual blocks/sizing without applying them; `active` lets shocks block new risk and reduces risk-off long sizing. `news_event_alpha_v2` is independently controlled by `ENGINE_NEWS_ALPHA_MODE=off|shadow|paper` and requires trusted or corroborated news plus market confirmation. Neither path creates live authority or bypasses RiskGateway/Council. See [Newswire V2](newswire-v2.md).
 
 Every candidate builds a `CandidateTradePacket`, receives a deterministic role-based Council review, and must pass RiskGateway plus Council before a paper/shadow execution report can exist. The offline contextual-bandit endpoint is report-only: it writes recommendations with `auto_apply_allowed=false` and never mutates config, risk limits, or orders.
 
-Wave 2 remains paper/live deferred. `ENGINE_WAVE2_ENABLED=true` is rejected until Wave 1 outcome attribution, replay grouping, and readiness gates are reliable. In `shadow_full_catalog`, the Wave 2 research strategies can emit shadow candidates with `activation_scope=shadow_only`, `paper_eligible=false`, and `operator_promotion_required=true`; they still cannot bypass RiskGateway/Council or create paper/live authority. Wave 2 is not “more simple strategies”; it is reserved for DEX-native, cross-venue, regime-aware proprietary strategies. The planned Wave 2 specs cover: 2A lead/lag, liquidity vacuum, stop-cluster, and liquidation divergence; 2B crowded long/short unwind and liquidation-cluster followthrough/exhaustion; 2C perp-basis momentum/reversion, funding-curve dislocation, and carry-risk-off. Wave 2D remains constrained report-only policy recommendation metadata and may not place orders, raise leverage, bypass RiskGateway/Council, or auto-apply production config.
+All twelve Wave 2A/2B/2C strategies now run early in `wave2_early_shadow` with `activation_scope=shadow_only`, `paper_eligible=false`, and `operator_promotion_required=true`. Settings reject this catalog if paper/live is enabled or execution modes contain anything other than `shadow`. The strategies cover: 2A lead/lag, liquidity vacuum, stop-cluster, and liquidation divergence; 2B crowded long/short unwind and liquidation-cluster followthrough/exhaustion; 2C perp-basis momentum/reversion, funding-curve dislocation, and carry-risk-off. Wave 2D remains constrained report-only policy recommendation metadata and may not place orders, raise leverage, bypass RiskGateway/Council, or auto-apply production config.
+
+## Canonical watchlist and provider identities
+
+Migration `0030` adds a provider-specific instrument registry, persistent pinned/broad memberships, immutable universe snapshots, venue market snapshots, and pairwise cross-venue feature snapshots. The bootstrap set contains 85 provider instruments representing 62 requested underlyings: 9 Hyperliquid main crypto perps, 53 TradeXYZ HIP-3 instruments, and 23 Alpaca Paper equities/ETFs. Read-only Lighter discovery adds provider identities for matching core perps after the first successful sync without inflating the underlying count. Eight requested HIP-3 symbols remain visible as `delisted` or `absent` until provider metadata proves otherwise; they are never silently enabled. Duplicate names such as IBM are deduplicated per provider; an MSFT HIP-3 perp and Alpaca MSFT have different `instrument_id` values but share `underlying_id=EQUITY:MSFT`.
+
+Discord admins can use:
+
+```text
+watchlist list [tier=pinned|broad] [venue=hyperliquid:xyz]
+watchlist add NVDA,AAPL,MSFT venue=alpaca:paper tier=broad
+watchlist move <instrument_id> tier=pinned|broad
+watchlist remove <instrument_id>
+watchlist unresolved
+watchlist history
+watchlist import us-large-cap
+watchlist confirm <change_id>
+```
+
+Remove and official SPY daily-holdings imports require a second confirmation. Imported holdings remain data-only until Alpaca metadata verifies the exact tradable asset. Every applied change republishes an atomic versioned snapshot.
+
+Lighter market data uses the official [`elliottech/lighter-python`](https://github.com/elliottech/lighter-python) SDK pinned to v1.1.0. The adapter constructs only public REST/WebSocket clients, has no signer or transaction interface, accepts market ID zero, detects exposed sequence/nonce regressions, and feeds a local depth-walking paper simulator. Because the SDK currently declares an obsolete upper bound for `urllib3`, the lockfile explicitly overrides that transitive constraint to a maintained release; adapter tests run against the resolved override. Alpaca uses separate Paper credentials, accepts only `https://paper-api.alpaca.markets`, submits broker-hosted bracket orders, and mirrors broker account/order/fill/position state as the source of truth. HIP-3/Alpaca and Hyperliquid/Lighter features are stored pairwise with explicit clock-skew/staleness flags; venue prices are never averaged. A bounded rotating HIP-3 depth scan feeds canonical spread/depth/funding/OI/basis features into the shadow strategy loop, so Wave 2 can evaluate requested HIP-3 equities, indices, FX, and commodities without expanding Wave 1's crypto scope.
 
 ## Shadow replay, diagnostics, and PnL marking
 
@@ -165,7 +198,7 @@ See `docs/engine-paper-readiness-runbook.md` for promotion and rollback steps.
 
 ## Agentic wave orchestration
 
-The optional Wave Supervisor automates observation, diagnosis, report-only maintenance, bounded blocker escalation, and verification prep without directly mutating config. It may refresh strategy-regime performance, run current-config replay comparisons, emit `agent-core` traces, and render LHP-compatible handoff payloads for Engineering Loop/NOC review. Actual Wave 1C enablement, paper promotion, deploys, and any Wave 2 work still require a draft PR or signed operator change; the supervisor never flips `ENGINE_WAVE1C_ENABLED`, `ENGINE_WAVE2_ENABLED`, paper, or live flags by itself.
+The optional Wave Supervisor automates observation, diagnosis, report-only maintenance, bounded blocker escalation, and verification prep without directly mutating config. It may refresh strategy-regime performance, run current-config replay comparisons, emit `agent-core` traces, and render LHP-compatible handoff payloads for Engineering Loop/NOC review. Actual paper promotion, deploys, and any change to Wave 2's shadow-only activation scope still require a draft PR or signed operator change; the supervisor never flips `ENGINE_WAVE1C_ENABLED`, `ENGINE_WAVE2_ENABLED`, paper, or live flags by itself.
 
 Key flags:
 
@@ -196,6 +229,11 @@ Protected by the existing agent API token outside dev/test/local:
 
 ```http
 GET /engine/status
+GET /engine/universe
+GET /engine/universe/unresolved
+GET /engine/universe/history
+GET /engine/venue-market-snapshots
+GET /engine/cross-venue-feature-snapshots
 GET /engine/events
 GET /engine/events/{event_id}
 GET /engine/features?asset=BTC
@@ -232,6 +270,13 @@ GET /engine/risk-rejects
 GET /engine/pnl-attribution
 GET /engine/validation-report
 GET /engine/readiness
+GET /engine/universe
+GET /engine/universe/unresolved
+GET /engine/universe/history
+POST /engine/admin/watchlist/changes
+POST /engine/admin/watchlist/changes/{change_id}/confirm
+GET /engine/venue-market-snapshots
+GET /engine/cross-venue-feature-snapshots
 GET /engine/candidate-funnel
 GET /engine/strategy-funnel
 GET /engine/signal-quality

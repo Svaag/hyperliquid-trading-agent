@@ -58,6 +58,8 @@ from hyperliquid_trading_agent.app.liquidations.routes import register_liquidati
 from hyperliquid_trading_agent.app.liquidations.service import LiquidationService
 from hyperliquid_trading_agent.app.liquidations.signals import LiquidationSignalBridge
 from hyperliquid_trading_agent.app.logging import configure_logging, get_logger
+from hyperliquid_trading_agent.app.markets.routes import register_market_universe_routes
+from hyperliquid_trading_agent.app.markets.universe import WatchlistService
 from hyperliquid_trading_agent.app.metrics import SERVICE_INFO, UP
 from hyperliquid_trading_agent.app.news.service import NewsService
 from hyperliquid_trading_agent.app.newswire.consumers.agent_feed import AgentNewsConsumer
@@ -139,6 +141,7 @@ async def lifespan(app: FastAPI):
     engine = create_engine(settings)
     sessionmaker = create_sessionmaker(engine)
     repository = Repository(sessionmaker)
+    watchlist_service = WatchlistService(repository)
     # Liquidation flow monitor: independent of the trading runtime profiles — it is
     # a public observability surface, gated only by its own feature flag.
     liquidation_service = LiquidationService(settings, sessionmaker) if settings.liquidations_enabled else None
@@ -275,6 +278,7 @@ async def lifespan(app: FastAPI):
         tracking_service=tracking_service,
         autonomy_service=autonomy_service,
         charting_service=charting_service,
+        watchlist_service=watchlist_service,
     )
     tracking_service.alert_sink = DiscordAlertSink(bot)
     autonomy_alert_sink = DiscordAutonomyAlertSink(bot)
@@ -312,6 +316,7 @@ async def lifespan(app: FastAPI):
 
     app.state.engine = engine
     app.state.repository = repository
+    app.state.watchlist_service = watchlist_service
     app.state.liquidation_service = liquidation_service
     app.state.decision_context_recorder = decision_context_recorder
     app.state.hyperliquid = hyperliquid
@@ -1595,6 +1600,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     register_engine_routes(app, settings, _require_agent_api)
+    register_market_universe_routes(app, settings, _require_agent_api)
     register_orchestration_routes(app, settings, _require_agent_api)
     register_hip4_routes(app, settings, _require_agent_api)
     register_prediction_market_routes(app, settings, _require_agent_api)

@@ -17,6 +17,8 @@ from hyperliquid_trading_agent.app.charting import (
 )
 from hyperliquid_trading_agent.app.config import ServiceRole, Settings
 from hyperliquid_trading_agent.app.logging import get_logger
+from hyperliquid_trading_agent.app.markets.discord import handle_watchlist_discord_command, parse_watchlist_command
+from hyperliquid_trading_agent.app.markets.universe import WatchlistService
 from hyperliquid_trading_agent.app.metrics import DISCORD_MESSAGES
 from hyperliquid_trading_agent.app.paper.discord import (
     PaperDiscordCommand,
@@ -137,6 +139,7 @@ class DiscordTradingBot:
         autonomy_service: Any | None = None,
         charting_service: ChartingService | None = None,
         hyperliquid: Any | None = None,
+        watchlist_service: WatchlistService | None = None,
         diagnostics: DiscordMentionPathDiagnostics | None = None,
     ):
         self.settings = settings
@@ -145,6 +148,7 @@ class DiscordTradingBot:
         self.autonomy_service = autonomy_service
         self.charting_service = charting_service
         self.hyperliquid = hyperliquid
+        self.watchlist_service = watchlist_service
         self.diagnostics = diagnostics or DiscordMentionPathDiagnostics()
         self.client = None
         if discord is not None:
@@ -222,15 +226,17 @@ class DiscordTradingBot:
             prompt = _message_prompt_without_mentions(message.content)
             referenced_message = await _resolve_referenced_message(message)
             autonomy_command = parse_autonomy_command(prompt, referenced_message=referenced_message) if (prompt or referenced_message is not None) else None
+            watchlist_command = parse_watchlist_command(prompt) if prompt else None
             prediction_market_command = parse_prediction_market_discord_command(prompt, referenced_message=referenced_message) if prompt else None
             paper_command = parse_paper_discord_command(prompt, referenced_message=referenced_message) if prompt else None
             autonomy_alert_channel = bool(self.settings.autonomy_alert_channel_id and str(channel_id) == str(self.settings.autonomy_alert_channel_id))
+            watchlist_context = watchlist_command is not None and autonomy_alert_channel
             prediction_market_context_reply = (
                 prediction_market_command is not None
                 and prediction_market_command.action in {"confirm", "cancel"}
                 and _is_message_from_bot(referenced_message, self.client.user)
             )
-            if not mentioned and not thread_continuation and not prediction_market_context_reply and not (autonomy_command is not None and autonomy_alert_channel):
+            if not mentioned and not thread_continuation and not prediction_market_context_reply and not (autonomy_command is not None and autonomy_alert_channel) and not watchlist_context:
                 return
             if not self.is_authorized(context, role_ids=role_ids) and not (autonomy_command is not None and autonomy_alert_channel):
                 self.diagnostics.auth_rejected()
@@ -249,6 +255,27 @@ class DiscordTradingBot:
             tracking_command = parse_tracking_command(prompt)
             try:
                 async with message.channel.typing():
+                    if watchlist_command is not None:
+                        if watchlist_command.mutating and not self._is_admin(
+                            _maybe_str(getattr(message.author, "id", None)), role_ids
+                        ):
+                            content = "Not authorized for watchlist administration commands."
+                        else:
+                            repository = self._repository()
+                            if repository is None:
+                                content = "Watchlist persistence is unavailable in this Discord worker."
+                            else:
+                                service = self.watchlist_service or WatchlistService(repository)
+                                content = await handle_watchlist_discord_command(
+                                    watchlist_command,
+                                    service=service,
+                                    repository=repository,
+                                    actor=_maybe_str(getattr(message.author, "id", None)) or "discord",
+                                )
+                        for chunk in _chunk(content, self.settings.discord_max_response_chars):
+                            await message.reply(chunk, mention_author=False)
+                        DISCORD_MESSAGES.labels(result="watchlist_command").inc()
+                        return
                     if prediction_market_command is not None:
                         content = await self._handle_prediction_market_command(
                             prediction_market_command,

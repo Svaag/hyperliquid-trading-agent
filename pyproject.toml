@@ -30,6 +30,7 @@ dependencies = [
     "mplfinance>=0.12.10b0",
     "pandas>=2.2",
     "scikit-learn>=1.5",
+    "lighter-sdk",
 ]
 
 [project.optional-dependencies]
@@ -86,3 +87,12 @@ follow_imports = "skip"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.uv.sources]
+lighter-sdk = { git = "https://github.com/elliottech/lighter-python.git", rev = "v1.1.0" }
+
+[tool.uv]
+# The official SDK currently constrains urllib3 below 2.1 even though its async
+# client does not import urllib3 directly. Keep the SDK pin, but require a
+# maintained urllib3 release for the rest of this network-facing service.
+override-dependencies = ["urllib3>=2.6.3"]

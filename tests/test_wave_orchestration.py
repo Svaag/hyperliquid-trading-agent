@@ -22,11 +22,20 @@ from hyperliquid_trading_agent.app.orchestration.wave_supervisor import (
 from tests.test_engine_readiness import FakeReadinessRepository, FakeReadinessService, readiness_settings
 
 
+def wave1a_readiness_settings(**overrides) -> Settings:
+    return readiness_settings(
+        engine_alpha_catalog_mode="wave1a_locked",
+        engine_wave1c_enabled=False,
+        engine_wave2_enabled=False,
+        **overrides,
+    )
+
+
 def test_wave_supervisor_classifies_clean_wave1a_as_wave1c_candidate() -> None:
     now_ms = int(time.time() * 1000)
     repo = FakeReadinessRepository(now_ms=now_ms)
     service = FakeReadinessService(now_ms=now_ms)
-    settings = readiness_settings(_env_file=None)
+    settings = wave1a_readiness_settings(_env_file=None)
 
     async def run() -> dict:
         supervisor = WaveSupervisor(settings=settings, repository=repo, engine_service=service)
@@ -48,7 +57,7 @@ def test_wave_supervisor_classifies_spine_blocker_for_escalation() -> None:
     repo = FakeReadinessRepository(now_ms=now_ms)
     repo.replay_results = []
     repo.council_reviews = []
-    settings = readiness_settings(_env_file=None)
+    settings = wave1a_readiness_settings(_env_file=None)
 
     async def run() -> dict:
         readiness = await __import__("hyperliquid_trading_agent.app.engine.readiness", fromlist=["build_paper_readiness_scorecard"]).build_paper_readiness_scorecard(
@@ -69,7 +78,12 @@ def test_wave_supervisor_classifies_spine_blocker_for_escalation() -> None:
 
 
 def test_wave1c_stays_enabled_as_blocked_shadow_canary() -> None:
-    settings = readiness_settings(_env_file=None, engine_wave1c_enabled=True)
+    settings = readiness_settings(
+        _env_file=None,
+        engine_alpha_catalog_mode="wave1c",
+        engine_wave1c_enabled=True,
+        engine_wave2_enabled=False,
+    )
     classification = classify_wave_state(
         settings,
         {
@@ -115,7 +129,7 @@ def test_wave_supervisor_persists_running_and_completed_run_states() -> None:
             return str(run["run_id"])
 
     repo = RecordingRepository()
-    settings = readiness_settings(_env_file=None)
+    settings = wave1a_readiness_settings(_env_file=None)
 
     async def run():
         supervisor = WaveSupervisor(
@@ -137,7 +151,7 @@ def test_wave_supervisor_persists_running_and_completed_run_states() -> None:
 
 def test_wave_orchestration_routes_are_registered() -> None:
     now_ms = int(time.time() * 1000)
-    settings = readiness_settings(_env_file=None)
+    settings = wave1a_readiness_settings(_env_file=None)
     app = create_app(settings)
     app.state.repository = FakeReadinessRepository(now_ms=now_ms)
     app.state.engine_service = FakeReadinessService(now_ms=now_ms)

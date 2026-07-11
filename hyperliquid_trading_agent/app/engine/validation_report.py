@@ -41,14 +41,34 @@ async def build_engine_validation_report(
 ) -> dict[str, Any]:
     """Build an operator-facing validation summary from read-only engine ledgers."""
 
-    candidates = await repository.list_alpha_candidates(limit=limit)
-    ev_estimates = await repository.list_ev_estimates(limit=limit)
-    allocations = await repository.list_allocation_decisions(limit=limit)
-    intents = await repository.list_order_intents(limit=limit)
-    reports = await repository.list_execution_reports(limit=limit)
+    generated_at_ms = _now_ms()
+    start_ms = generated_at_ms - max(1, int(window_hours)) * 60 * 60 * 1000
+    if settings is not None:
+        start_ms = max(start_ms, int(getattr(settings, "engine_readiness_clean_window_start_ms", 0) or 0))
+    cohort = {"start_ms": start_ms, "end_ms": generated_at_ms, "semantics": "[start_ms,end_ms)"}
+
+    async def cohort_list(method_name: str, **kwargs: Any) -> list[dict[str, Any]]:
+        method = getattr(repository, method_name)
+        try:
+            return await method(since_ms=start_ms, until_ms=generated_at_ms, limit=limit, **kwargs)
+        except TypeError:
+            # Compatibility for read-only test doubles and pre-migration adapters.
+            return await method(limit=limit, **kwargs)
+
+    candidates = await cohort_list("list_alpha_candidates")
+    ev_estimates = await cohort_list("list_ev_estimates")
+    allocations = await cohort_list("list_allocation_decisions")
+    intents = await cohort_list("list_order_intents")
+    reports = await cohort_list("list_execution_reports")
     positions = await repository.list_position_theses(limit=limit)
-    risk_rejects = await repository.list_risk_gateway_decisions(limit=limit, decision="reject")
-    pnl_records = await repository.list_pnl_attribution(limit=limit)
+    risk_decisions = await cohort_list("list_risk_gateway_decisions")
+    risk_rejects = [item for item in risk_decisions if item.get("decision") == "reject"]
+    pnl_records = await cohort_list("list_pnl_attribution")
+
+    count_method = getattr(repository, "get_engine_validation_counts", None)
+    headline_counts: dict[str, int] = {}
+    if callable(count_method):
+        headline_counts = await count_method(start_ms=start_ms, end_ms=generated_at_ms)
 
     candidates_by_id = {str(item.get("candidate_id")): item for item in candidates if item.get("candidate_id")}
     intents_by_id = {str(item.get("intent_id")): item for item in intents if item.get("intent_id")}
@@ -161,11 +181,12 @@ async def build_engine_validation_report(
         for violation in reject.get("violations") or []:
             risk_violation_counts[str(violation)] += 1
 
-    total_candidates = len(candidates)
-    total_allocated = sum(1 for item in allocations if item.get("status") in {"allocate", "reduce", "require_debate"})
-    total_shadow_intents = sum(1 for item in intents if item.get("execution_mode") == "shadow")
-    total_paper_intents = sum(1 for item in intents if item.get("execution_mode") == "paper")
-    total_live_intents = sum(1 for item in intents if item.get("execution_mode") == "live")
+    total_candidates = int(headline_counts.get("candidate_count", len(candidates)))
+    total_allocations = int(headline_counts.get("allocation_count", len(allocations)))
+    total_allocated = int(headline_counts.get("allocated_count", sum(1 for item in allocations if item.get("status") in {"allocate", "reduce", "require_debate"})))
+    total_shadow_intents = int(headline_counts.get("shadow_intent_count", sum(1 for item in intents if item.get("execution_mode") == "shadow")))
+    total_paper_intents = int(headline_counts.get("paper_intent_count", sum(1 for item in intents if item.get("execution_mode") == "paper")))
+    total_live_intents = int(headline_counts.get("live_intent_count", sum(1 for item in intents if item.get("execution_mode") == "live")))
     signal_path_comparison = await build_signal_path_comparison(
         repository,
         settings=settings,
@@ -174,21 +195,24 @@ async def build_engine_validation_report(
     )
 
     return {
-        "generated_at_ms": _now_ms(),
+        "generated_at_ms": generated_at_ms,
         "sample_limit": limit,
+        "cohort": cohort,
+        "detail_rows_are_sampled": True,
         "summary": {
             "candidate_count": total_candidates,
-            "ev_estimate_count": len(ev_estimates),
-            "allocation_count": len(allocations),
+            "ev_estimate_count": int(headline_counts.get("ev_estimate_count", len(ev_estimates))),
+            "allocation_count": total_allocations,
             "allocated_count": total_allocated,
-            "allocation_rate_pct": _pct(total_allocated, len(allocations)),
+            "allocation_rate_pct": _pct(total_allocated, total_allocations),
             "shadow_intent_count": total_shadow_intents,
             "paper_intent_count": total_paper_intents,
             "live_intent_count": total_live_intents,
-            "execution_report_count": len(reports),
-            "open_position_count": sum(1 for item in positions if item.get("position_state") == "open"),
-            "risk_reject_count": len(risk_rejects),
-            "pnl_attribution_count": len(pnl_records),
+            "execution_report_count": int(headline_counts.get("execution_report_count", len(reports))),
+            "open_position_count": int(headline_counts.get("open_position_count", sum(1 for item in positions if item.get("position_state") == "open"))),
+            "risk_decision_count": int(headline_counts.get("risk_decision_count", len(risk_decisions))),
+            "risk_reject_count": int(headline_counts.get("risk_reject_count", len(risk_rejects))),
+            "pnl_attribution_count": int(headline_counts.get("pnl_attribution_count", len(pnl_records))),
         },
         "shadow_candidates": {
             "status_counts": dict(candidate_status),
@@ -198,16 +222,17 @@ async def build_engine_validation_report(
         },
         "ev_calibration": {
             "bucket_summary": dict(calibration_buckets),
-            "candidate_estimate_coverage_pct": _pct(len(ev_by_candidate), total_candidates),
+            "candidate_estimate_coverage_pct": _pct(len(ev_by_candidate), len(candidates)),
+            "coverage_scope": "detail_sample_within_cohort",
         },
         "risk_rejects": {
-            "count": len(risk_rejects),
+            "count": int(headline_counts.get("risk_reject_count", len(risk_rejects))),
             "violation_counts": dict(risk_violation_counts),
             "latest": risk_rejects[:10],
         },
         "execution_simulations": {
-            "intent_count": len(intents),
-            "report_count": len(reports),
+            "intent_count": total_shadow_intents + total_paper_intents + total_live_intents,
+            "report_count": int(headline_counts.get("execution_report_count", len(reports))),
             "shadow_intent_count": total_shadow_intents,
             "paper_intent_count": total_paper_intents,
             "live_intent_count": total_live_intents,
@@ -226,6 +251,11 @@ async def build_engine_validation_report(
             for strategy, values in by_strategy.items()
         },
         "by_strategy": dict(sorted(by_strategy.items())),
+        "defensive_no_trade": {
+            "candidate_count": sum(1 for item in candidates if item.get("side") == "flat"),
+            "strategy_counts": dict(Counter(_strategy_of(item) for item in candidates if item.get("side") == "flat")),
+            "allocation_expected": False,
+        },
         "allocation_status_counts": dict(allocation_status),
         "signal_path_comparison": signal_path_comparison,
     }

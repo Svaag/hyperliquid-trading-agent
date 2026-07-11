@@ -44,7 +44,8 @@ design.
 - Semantic tool gathering for market snapshots, funding, candles, account public state, fills, docs, news, and paper trades.
 - PostgreSQL persistence for audit events, tool calls, conversations, cache, news, paper trades, debate runs, role outputs, state snapshots, trade proposals, autonomous market state, signals, paper orders/fills/positions, and portfolio snapshots.
 - Paper/shadow-only institutional engine scaffolding: normalized event ledger, point-in-time feature store, regime vector, alpha candidates, EV estimates, allocation decisions, EvidencePacks, debate decisions, OrderIntents, execution reports, position theses, reconciliation/attribution/model registry tables, and read-only `/engine/*` inspection endpoints.
-- Alembic migrations through `0026_newswire_v2`.
+- Canonical multi-provider market universe with 85 seeded provider instruments / 62 requested underlyings, Discord-admin watchlist edits, TradeXYZ HIP-3 snapshots, official Lighter SDK market data, Alpaca-hosted Paper execution, and pairwise cross-venue features.
+- Alembic migrations through `0030_canonical_market_universe`.
 - Dockerfile and Docker Compose with Postgres.
 
 ## Quick start
@@ -177,9 +178,9 @@ AUTONOMY_ENABLED=false
 AUTONOMY_MODE=paper_signoff
 AUTONOMY_ALERT_CHANNEL_ID=
 AUTONOMY_REQUIRE_HUMAN_SIGNOFF=true
-AUTONOMY_CORE_UNIVERSE=BTC,ETH,HYPE
+AUTONOMY_CORE_UNIVERSE=BTC,ETH,HYPE,SOL,ZEC,LIT,AAVE,XMR,AERO
 AUTONOMY_UNIVERSE_TOP_N_PERPS=20
-AUTONOMY_MAX_TRACKED_ASSETS=40
+AUTONOMY_MAX_TRACKED_ASSETS=100
 AUTONOMY_MAX_HOT_L2_ASSETS=5
 AUTONOMY_MAX_SIGNALS_PER_DAY=10
 AUTONOMY_MIN_SIGNAL_SCORE=75
@@ -280,6 +281,8 @@ AUTONOMY_EQUITY_MAX_SIGNALS_PER_DAY=3
 When `DISCORD_CHART_COMMAND_ENABLED=true`, authorized Discord users can request a deterministic chart without mentioning the bot: `;;TSLA h`, `;;TSLA d`, `;;TSLA m`, or `;;TSLA y`. The bot fetches normalized candles from the configured TradFi stack, falls back to Hyperliquid for crypto/namespaced symbols, renders a PNG candlestick chart, and includes simple technical-analysis labels. The command is informational only and never creates a trade or paper position.
 
 When `AUTONOMY_ENABLED=true`, the service watches the configured universe, builds a deterministic market mental map, generates scored signals, posts qualifying alerts to `AUTONOMY_ALERT_CHANNEL_ID`, and waits for human signoff. Discord alert-channel commands: `approve signal <id>`, `reject signal <id>`, `signal <id>`, `signals`, `portfolio`, `positions`, `orders`, `market map`, `pause autonomy`, `resume autonomy`, `daily report`, `weekly report`, `token capital`, `signal outcome <id>`, `event outcome <event_id>`, `mark signal <id> good|bad|unclear|too_noisy|useful|wrong`, `memories [role]`, and `tuning proposals`. Approvals create paper orders/fills/positions only; no live trade is placed. If an approved signal opposes an existing open position (single-name exposure cap exhausted), the bot **autonomously closes the opposing paper position** and posts a flip-request alert: confirm with `approve flip <id>` (or `cancel flip <id>` to reject and keep the original position). The new side opens only on the second human approval. The persistent memory/evaluation knobs are shadow-safe: they evaluate and recommend, but never auto-apply strategy, risk, execution, or sizing changes. High-signal newswire catalysts are evaluated as first-class alpha events and linked to signals when they become evidence. See [docs/autonomy-memory.md](docs/autonomy-memory.md).
+
+The institutional engine now uses a persistent provider-specific watchlist rather than treating ticker text as identity. Discord admins can list, add or bulk-add, move, remove, inspect unresolved instruments, review history, and stage an official SPY large-cap holdings import with `watchlist ...` commands; destructive/bulk changes require confirmation. The pinned seed maps 85 provider instruments to 62 requested underlyings across Hyperliquid main, TradeXYZ HIP-3, and Alpaca Paper. Lighter is available as a read-only cross-venue source through the official SDK. See [docs/institutional-engine.md](docs/institutional-engine.md#canonical-watchlist-and-provider-identities).
 
 `/ready` reports autonomy degraded when enabled without an alert channel, when market data is stale, or when persistence is unavailable.
 

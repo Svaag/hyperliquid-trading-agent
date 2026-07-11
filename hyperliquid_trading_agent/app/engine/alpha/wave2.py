@@ -3,10 +3,21 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-from hyperliquid_trading_agent.app.engine.alpha.base import CORE_CRYPTO_ASSETS, candidate_contract_fields
+from hyperliquid_trading_agent.app.engine.alpha.base import candidate_contract_fields
 from hyperliquid_trading_agent.app.engine.schemas import AlphaCandidate, FeatureSnapshot, RegimeVector, StrategySpec
 
-PERP_DEX_VENUES = ["hyperliquid", "lighter", "aster", "dydx", "drift", "gmx", "orderly"]
+PERP_DEX_VENUES = [
+    "hyperliquid",
+    "hyperliquid:main",
+    "hyperliquid:xyz",
+    "lighter",
+    "aster",
+    "dydx",
+    "drift",
+    "gmx",
+    "orderly",
+    "alpaca:paper",
+]
 WAVE_2_DISABLED_REASON = "deferred_until_wave1d_real_evidence"
 
 WAVE_2A_IDS = {
@@ -48,7 +59,7 @@ def _spec(
         strategy_id=strategy_id,
         version=version,
         family=family,
-        supported_assets=CORE_CRYPTO_ASSETS,
+        supported_assets=["*"],
         supported_venues=PERP_DEX_VENUES,
         supported_horizons=horizons,
         required_features=features,
@@ -267,8 +278,12 @@ def _wave2_shadow_candidate(spec: StrategySpec, snapshot: FeatureSnapshot, regim
             strategy_id=spec.strategy_id,
             **candidate_contract_fields(spec, snapshot, expected_edge_bps=expected_edge_bps),
             asset=snapshot.asset,
-            asset_class="crypto",
-            venue="hyperliquid",
+            asset_class=_asset_class(snapshot.underlying_id),
+            venue=snapshot.venue_id,
+            instrument_id=snapshot.instrument_id,
+            underlying_id=snapshot.underlying_id,
+            venue_id=snapshot.venue_id,
+            provider_symbol=snapshot.provider_symbol,
             side=side,  # type: ignore[arg-type]
             horizon=horizon,
             proposed_entry=mid,
@@ -450,6 +465,17 @@ def _horizon_ms(horizon: str) -> int:
     if text.endswith("h"):
         return int(float(text[:-1]) * 3_600_000)
     return 30 * 60_000
+
+
+def _asset_class(underlying_id: str) -> str:
+    return {
+        "CRYPTO": "crypto",
+        "EQUITY": "equity",
+        "ETF": "equity",
+        "INDEX": "macro",
+        "FX": "fx",
+        "COMMODITY": "commodity",
+    }.get(underlying_id.split(":", 1)[0].upper(), "unknown")
 
 
 def _float(value: Any) -> float | None:

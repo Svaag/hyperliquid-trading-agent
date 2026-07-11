@@ -80,6 +80,8 @@ async def test_strategy_throttle_blocks_recent_dominance_with_minimum_samples() 
     settings = Settings(
         environment="test",
         engine_paper_enabled=True,
+        engine_alpha_catalog_mode="wave1a_locked",
+        engine_wave2_enabled=False,
         engine_strategy_throttle_lookback_hours=24,
         engine_strategy_max_allocation_share_pct=55,
         engine_strategy_max_allocations_per_loop=3,

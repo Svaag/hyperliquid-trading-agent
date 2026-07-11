@@ -5,6 +5,7 @@ from typing import Any
 from hyperliquid_trading_agent.app.autonomy.schemas import MarketAsset
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.logging import get_logger
+from hyperliquid_trading_agent.app.markets.universe import WatchlistService
 
 log = get_logger(__name__)
 
@@ -16,9 +17,10 @@ class MarketUniverseResolver:
     endpoints and reports unresolved configured aliases as warnings.
     """
 
-    def __init__(self, settings: Settings, hyperliquid: Any):
+    def __init__(self, settings: Settings, hyperliquid: Any, repository: Any | None = None):
         self.settings = settings
         self.hyperliquid = hyperliquid
+        self.repository = repository
         self.warnings: list[str] = []
         self.last_assets: list[MarketAsset] = []
 
@@ -33,8 +35,9 @@ class MarketUniverseResolver:
         for asset in self._resolve_main_perps(main_meta_and_ctxs):
             assets[asset.symbol] = asset
 
+        requested_by_dex = await self._canonical_hip3_requests()
         if self.settings.autonomy_hip3_dex_names:
-            await self._resolve_hip3_assets(assets)
+            await self._resolve_hip3_assets(assets, requested_by_dex=requested_by_dex)
 
         ordered = sorted(
             assets.values(),
@@ -83,7 +86,31 @@ class MarketUniverseResolver:
                 break
         return list(assets.values())
 
-    async def _resolve_hip3_assets(self, assets: dict[str, MarketAsset]) -> None:
+    async def _canonical_hip3_requests(self) -> dict[str, dict[str, dict[str, Any]]]:
+        if self.repository is None:
+            return {}
+        try:
+            service = WatchlistService(self.repository)
+            await service.seed_if_empty(actor="autonomy_universe")
+            rows = await service.list(status="active", limit=20_000)
+        except Exception as exc:
+            self.warnings.append(f"canonical watchlist unavailable: {type(exc).__name__}")
+            return {}
+        requested: dict[str, dict[str, dict[str, Any]]] = {}
+        for item in rows:
+            venue_id = str(item.get("venue_id") or "")
+            if not venue_id.startswith("hyperliquid:") or venue_id == "hyperliquid:main":
+                continue
+            dex = venue_id.split(":", 1)[1]
+            requested.setdefault(dex, {})[str(item.get("provider_symbol") or "").upper()] = item
+        return requested
+
+    async def _resolve_hip3_assets(
+        self,
+        assets: dict[str, MarketAsset],
+        *,
+        requested_by_dex: dict[str, dict[str, dict[str, Any]]],
+    ) -> None:
         alias_map = self.settings.autonomy_index_aliases
         for dex in self.settings.autonomy_hip3_dex_names:
             try:
@@ -104,6 +131,33 @@ class MarketUniverseResolver:
                 ctx = ctx_by_symbol.get(matched_symbol, {})
                 asset = _asset_from_raw(matched_symbol, raw, ctx, source="hip3_alias", dex=dex, kind="hip3_index")
                 asset = asset.model_copy(update={"display_name": canonical, "metadata": {**asset.metadata, "aliases": aliases}})
+                assets[asset.symbol] = asset
+            for requested_symbol, registry_row in requested_by_dex.get(dex, {}).items():
+                matched_symbol = searchable.get(requested_symbol)
+                if matched_symbol is None:
+                    self.warnings.append(f"watchlist instrument unresolved on {dex}: {requested_symbol}")
+                    continue
+                raw = dex_symbols[matched_symbol]
+                ctx = ctx_by_symbol.get(matched_symbol, {})
+                asset = _asset_from_raw(
+                    matched_symbol,
+                    raw,
+                    ctx,
+                    source="watchlist",
+                    dex=dex,
+                    kind="hip3_perp",
+                )
+                asset = asset.model_copy(
+                    update={
+                        "display_name": str(registry_row.get("display_symbol") or matched_symbol).upper(),
+                        "metadata": {
+                            **asset.metadata,
+                            "instrument_id": registry_row.get("instrument_id"),
+                            "underlying_id": registry_row.get("underlying_id"),
+                            "instrument_type": registry_row.get("instrument_type"),
+                        },
+                    }
+                )
                 assets[asset.symbol] = asset
 
 

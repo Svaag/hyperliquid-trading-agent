@@ -44,7 +44,7 @@ class EquityPaperSimulator:
             initial_equity_usd=initial_equity_usd,
             cash_usd=initial_equity_usd,
         )
-        self.risk_pct_per_trade = risk_pct_per_trade / 100.0 if risk_pct_per_trade > 1 else risk_pct_per_trade
+        self.risk_pct_per_trade = risk_pct_per_trade / 100.0
         self.max_gross_leverage = max_gross_leverage
         self.max_single_name_exposure_pct = max_single_name_exposure_pct / 100.0 if max_single_name_exposure_pct > 1 else max_single_name_exposure_pct
         self.taker_fee_bps = taker_fee_bps
@@ -87,7 +87,7 @@ class EquityPaperSimulator:
 
         # Size the order
         equity = request.account_equity_usd or self.portfolio.equity_usd
-        risk_amount = equity * (request.risk_pct / 100.0 if request.risk_pct > 1 else request.risk_pct)
+        risk_amount = equity * request.risk_pct / 100.0
         stop_distance = abs(price - (request.stop or price * 0.95))
 
         if request.quantity is not None:

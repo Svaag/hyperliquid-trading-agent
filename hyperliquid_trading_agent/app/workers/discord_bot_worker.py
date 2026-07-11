@@ -12,6 +12,7 @@ from hyperliquid_trading_agent.app.db.repository import Repository
 from hyperliquid_trading_agent.app.discord_bot import DiscordMentionPathDiagnostics, DiscordTradingBot
 from hyperliquid_trading_agent.app.hyperliquid.client import HyperliquidClient
 from hyperliquid_trading_agent.app.logging import get_logger
+from hyperliquid_trading_agent.app.markets.universe import WatchlistService
 from hyperliquid_trading_agent.app.tradfi.client import TradFiClient
 from hyperliquid_trading_agent.app.tradfi.factory import build_tradfi_client
 from hyperliquid_trading_agent.app.workers.base import BaseWorker
@@ -127,6 +128,7 @@ class DiscordBotWorker(BaseWorker):
             runner=self.runner,
             charting_service=charting_service,
             hyperliquid=self.hyperliquid,
+            watchlist_service=WatchlistService(self.repository),
             diagnostics=self.diagnostics,
         )
         self._bot_task = asyncio.create_task(self.bot.start(), name="discord-command-bot")

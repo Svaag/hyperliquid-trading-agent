@@ -12,9 +12,17 @@ from hyperliquid_trading_agent.app.engine.strategy_registry import (
 )
 
 
-def test_wave2_flag_remains_rejected_until_wave1d_real_evidence():
-    with pytest.raises(ValueError, match="ENGINE_WAVE2_ENABLED"):
-        Settings(environment="test", engine_wave2_enabled=True)
+def test_wave2_flag_is_accepted_only_as_shadow_research():
+    settings = Settings(environment="test", engine_wave2_enabled=True, _env_file=None)
+    assert settings.engine_alpha_catalog_mode == "wave2_early_shadow"
+
+    with pytest.raises(ValueError, match="Wave 2 research catalogs require"):
+        Settings(
+            environment="test",
+            engine_wave2_enabled=True,
+            engine_paper_enabled=True,
+            _env_file=None,
+        )
 
 
 def test_wave2_specs_are_registered_disabled_and_do_not_count_for_breadth():
@@ -74,3 +82,40 @@ def test_wave2d_policy_action_space_is_constrained_report_only():
     ]
     assert "place_orders" in WAVE2_FORBIDDEN_ACTIONS
     assert "bypass_RiskGateway" in WAVE2_FORBIDDEN_ACTIONS
+
+
+def test_wave2_shadow_candidate_preserves_hip3_equity_identity():
+    registry = create_default_strategy_registry(catalog_mode="wave2_early_shadow")
+    strategy = registry.get("cross_venue_lead_lag_v1")
+    snapshot = FeatureSnapshot(
+        snapshot_id="fs_wave2_msft",
+        asset="MSFT",
+        instrument_id="ins_hip3_msft",
+        underlying_id="EQUITY:MSFT",
+        venue_id="hyperliquid:xyz",
+        provider_symbol="xyz:MSFT",
+        as_of_ms=1_000,
+        features={
+            "mid": 500.0,
+            "cross_venue_mid_delta_bps": 8.0,
+            "cross_venue_volume_imbalance": 0.25,
+            "spread_bps": 4.0,
+            "top_depth_usd": 750_000.0,
+        },
+        metadata={"asset_class": "equity"},
+    )
+    regime = RegimeVector(
+        regime_snapshot_id="reg_wave2_msft",
+        primary_asset="MSFT",
+        created_at_ms=1_000,
+        as_of_ms=1_000,
+        regime_label="test=wave2",
+    )
+
+    candidate = strategy.generate(snapshot, regime, timestamp_ms=10_000)[0]
+
+    assert strategy.spec.supported_assets == ["*"]
+    assert candidate.asset_class == "equity"
+    assert candidate.instrument_id == "ins_hip3_msft"
+    assert candidate.venue_id == "hyperliquid:xyz"
+    assert candidate.provider_symbol == "xyz:MSFT"

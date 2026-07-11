@@ -141,7 +141,17 @@ def test_autonomy_settings_defaults_and_alias_parsing():
 
     assert settings.autonomy_enabled is False
     assert settings.autonomy_mode == "paper_signoff"
-    assert settings.autonomy_core_symbols == ["BTC", "ETH", "HYPE"]
+    assert settings.autonomy_core_symbols == [
+        "BTC",
+        "ETH",
+        "HYPE",
+        "SOL",
+        "ZEC",
+        "LIT",
+        "AAVE",
+        "XMR",
+        "AERO",
+    ]
     assert settings.autonomy_index_aliases["SP500"] == ["SP500", "SPX", "SPY"]
     assert settings.autonomy_index_aliases["NASDAQ100"] == ["NASDAQ100", "NDX", "QQQ"]
     assert settings.autonomy_admin_users == {1, 2}

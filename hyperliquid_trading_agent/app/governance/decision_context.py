@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -71,20 +72,24 @@ class DecisionContextRecorder:
 
         if self.repository is not None and getattr(self.repository, "enabled", False):
             try:
-                upsert_config = getattr(self.repository, "upsert_config_version", None)
-                upsert_prompt = getattr(self.repository, "upsert_prompt_version", None)
-                if callable(upsert_config):
-                    persisted = await upsert_config(self.config_version.model_dump(mode="json"))
-                    if persisted is None:
-                        return self.active_refs()
-                    await upsert_config(self.risk_config_version.model_dump(mode="json"))
-                    await upsert_config(self.model_route_version.model_dump(mode="json"))
-                if callable(upsert_prompt):
-                    for prompt in self.prompt_versions.values():
-                        await upsert_prompt(prompt.model_dump(mode="json"))
-                record_audit = getattr(self.repository, "record_audit_event", None)
-                if callable(record_audit):
-                    await record_audit("governance_version_snapshot", actor="system", payload=self.active_refs())
+                # Startup audit persistence is best-effort. An unavailable
+                # database must not hold the public API lifespan open for the
+                # driver's much longer default connection timeout.
+                async with asyncio.timeout(2.0):
+                    upsert_config = getattr(self.repository, "upsert_config_version", None)
+                    upsert_prompt = getattr(self.repository, "upsert_prompt_version", None)
+                    if callable(upsert_config):
+                        persisted = await upsert_config(self.config_version.model_dump(mode="json"))
+                        if persisted is None:
+                            return self.active_refs()
+                        await upsert_config(self.risk_config_version.model_dump(mode="json"))
+                        await upsert_config(self.model_route_version.model_dump(mode="json"))
+                    if callable(upsert_prompt):
+                        for prompt in self.prompt_versions.values():
+                            await upsert_prompt(prompt.model_dump(mode="json"))
+                    record_audit = getattr(self.repository, "record_audit_event", None)
+                    if callable(record_audit):
+                        await record_audit("governance_version_snapshot", actor="system", payload=self.active_refs())
             except Exception as exc:  # pragma: no cover - audit persistence must never block startup
                 log.warning("governance_version_snapshot_failed", error=type(exc).__name__)
         return self.active_refs()

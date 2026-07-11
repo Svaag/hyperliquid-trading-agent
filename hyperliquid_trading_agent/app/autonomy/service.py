@@ -78,6 +78,7 @@ class AutonomousTradingLoopService:
         tuning_service: Any | None = None,
         tradfi: Any | None = None,
         equity_portfolio: Any | None = None,
+        equity_paper_execution: Any | None = None,
         equity_signal_generator: Any | None = None,
         options_flow: Any | None = None,
         flow_enricher: Any | None = None,
@@ -100,6 +101,7 @@ class AutonomousTradingLoopService:
         self.tuning_service = tuning_service
         self.tradfi = tradfi
         self.equity_portfolio = equity_portfolio
+        self.equity_paper_execution = equity_paper_execution
         self.equity_signal_generator = equity_signal_generator
         self.options_flow = options_flow
         self.flow_enricher = flow_enricher
@@ -107,7 +109,7 @@ class AutonomousTradingLoopService:
         self.risk_gateway = risk_gateway or RiskGateway(settings=settings, repository=repository, decision_context_recorder=decision_context_recorder)
         self.engine_service = engine_service
         self.world_model_service = world_model_service
-        self.universe_resolver = MarketUniverseResolver(settings, hyperliquid)
+        self.universe_resolver = MarketUniverseResolver(settings, hyperliquid, repository)
         self.reducer = MarketMapReducer()
         self.newswire = AutonomyNewswire(settings, news)
         self.signal_engine = SignalEngine(settings)
@@ -510,7 +512,7 @@ class AutonomousTradingLoopService:
         signal = self.equity_signals.get(signal_id)
         if signal is None:
             raise KeyError("equity signal not found")
-        if self.equity_portfolio is None:
+        if self.equity_portfolio is None and self.equity_paper_execution is None:
             raise EquityRiskControlError("equity paper portfolio is not configured")
         if signal.status not in {"candidate", "posted"}:
             raise EquityRiskControlError(f"equity signal status {signal.status} cannot be approved")
@@ -522,13 +524,19 @@ class AutonomousTradingLoopService:
             if self.evaluation_service is not None:
                 await self.evaluation_service.update_signal_status(updated_expired)
             raise EquityRiskControlError("equity signal is expired")
+        broker_state: dict[str, Any] | None = None
+        if self.equity_paper_execution is not None:
+            broker_state = await self.equity_paper_execution.reconcile()
+            account_equity = _float((broker_state.get("account") or {}).get("equity")) or self.settings.autonomy_equity_paper_initial_equity_usd
+        else:
+            account_equity = self.equity_portfolio.snapshots[-1].equity_usd if self.equity_portfolio.snapshots else self.equity_portfolio.portfolio.equity_usd
         request = EquityTradeRequest(
             symbol=signal.symbol,
             side=signal.side,
             entry=signal.entry,
             stop=signal.stop,
             take_profit=signal.take_profit,
-            account_equity_usd=(self.equity_portfolio.snapshots[-1].equity_usd if self.equity_portfolio.snapshots else self.equity_portfolio.portfolio.equity_usd),
+            account_equity_usd=account_equity,
             risk_pct=self.settings.autonomy_equity_paper_risk_pct_per_trade,
             signal_id=signal.id,
             thesis=signal.thesis,
@@ -536,6 +544,72 @@ class AutonomousTradingLoopService:
         risk_decision = await self._check_risk_gateway(signal, ref_px=signal.entry, asset_class="equity")
         if not risk_decision.allowed:
             raise EquityRiskControlError(f"risk gateway rejected equity signal: {risk_decision.violations}")
+        if self.equity_paper_execution is not None:
+            stop_distance = abs(signal.entry - signal.stop)
+            risk_fraction = self.settings.autonomy_equity_paper_risk_pct_per_trade / 100.0
+            risk_sized_quantity = account_equity * risk_fraction / stop_distance if stop_distance > 0 else 0.0
+            broker_positions = (broker_state or {}).get("positions") or []
+            gross_exposure = sum(abs(_float(item.get("market_value")) or 0.0) for item in broker_positions)
+            symbol_exposure = sum(
+                abs(_float(item.get("market_value")) or 0.0)
+                for item in broker_positions
+                if str(item.get("symbol") or "").upper() == signal.symbol.upper()
+            )
+            single_name_cap = account_equity * self.settings.autonomy_equity_paper_max_single_name_exposure_pct / 100.0
+            gross_cap = account_equity * self.settings.autonomy_equity_paper_max_gross_leverage
+            single_name_quantity = max(0.0, single_name_cap - symbol_exposure) / signal.entry
+            gross_quantity = max(0.0, gross_cap - gross_exposure) / signal.entry
+            quantity = round(min(risk_sized_quantity, single_name_quantity, gross_quantity), 6)
+            if quantity <= 0:
+                raise EquityRiskControlError(
+                    "hosted Alpaca Paper exposure or risk limits produced zero quantity"
+                )
+            request = request.model_copy(update={"quantity": quantity})
+            order = await self.equity_paper_execution.submit_equity_trade(request)
+            reconciled = await self.equity_paper_execution.reconcile()
+            position = next(
+                (
+                    item
+                    for item in reconciled.get("positions") or []
+                    if str(item.get("symbol") or "").upper() == signal.symbol.upper()
+                ),
+                None,
+            ) or {"id": f"broker_pending_{order.get('id') or ''!s}", "symbol": signal.symbol, "status": "pending"}
+            updated = signal.model_copy(
+                update={
+                    "status": "paper_ordered",
+                    "metadata": {
+                        **(signal.metadata or {}),
+                        "approved_by": actor,
+                        "asset_class": "equity",
+                        "source_of_truth": "alpaca_paper",
+                    },
+                }
+            )
+            self.equity_signals[updated.id] = updated
+            await self._persist_signal(updated, approved_by=actor)
+            if self.evaluation_service is not None:
+                await self.evaluation_service.update_signal_status(updated, paper_position_id=str(position.get("id") or "") or None)
+            await self._record_event(
+                "equity_signal_approved_alpaca_paper",
+                actor=actor,
+                symbol=signal.symbol,
+                payload={
+                    "signal_id": signal.id,
+                    "order_id": str(order.get("id") or ""),
+                    "position_id": position.get("id"),
+                    "risk_gateway_decision_id": risk_decision.decision_id,
+                    "source_of_truth": "alpaca_paper",
+                    "exchange_actions": ["alpaca_paper_order"],
+                },
+            )
+            return {
+                "signal": updated.model_dump(mode="json"),
+                "order": order,
+                "fill": None,
+                "position": position,
+                "snapshot": reconciled.get("account") or {},
+            }
         order = await self.equity_portfolio.place_order(request)
         fill = next((item for item in self.equity_portfolio.fills.values() if item.order_id == order.id), None)
         position = next((item for item in self.equity_portfolio.positions.values() if item.signal_id == signal.id and item.status == "open"), None)

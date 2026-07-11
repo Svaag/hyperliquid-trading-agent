@@ -39,6 +39,26 @@ def test_engine_candidate_outcome_evidence_spine_migration_declares_tables():
     assert "strategy_regime_performance" in text
 
 
+def test_canonical_market_universe_migration_declares_identity_and_backfill():
+    text = Path("alembic/versions/0030_canonical_market_universe.py").read_text()
+
+    assert 'revision = "0030_canonical_market_universe"' in text
+    assert 'down_revision = "0029_engine_strategy_evaluations"' in text
+    for table in [
+        "instrument_registry",
+        "watchlist_memberships",
+        "watchlist_change_events",
+        "universe_snapshots",
+        "venue_market_snapshots",
+        "cross_venue_feature_snapshots",
+    ]:
+        assert f'"{table}"' in text
+    for identity_column in ["instrument_id", "underlying_id", "venue_id", "provider_symbol"]:
+        assert identity_column in text
+    assert "_backfill_legacy_instrument_identity" in text
+    assert "pre_0030" in text
+
+
 def test_bandit_recommendations_are_report_only_contracts():
     recommendation = BanditRecommendation(
         recommendation_id="rec_1",

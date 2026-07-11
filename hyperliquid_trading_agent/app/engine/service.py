@@ -20,13 +20,14 @@ from hyperliquid_trading_agent.app.engine.debate_adjudicator import (
 )
 from hyperliquid_trading_agent.app.engine.diversity import PortfolioDiversityController
 from hyperliquid_trading_agent.app.engine.event_ledger import EventLedger, now_ms
+from hyperliquid_trading_agent.app.engine.evidence_admission import ShadowEvidenceAdmissionController
 from hyperliquid_trading_agent.app.engine.execution import ExecutionGateway
 from hyperliquid_trading_agent.app.engine.feature_store import FeatureStore
 from hyperliquid_trading_agent.app.engine.portfolio_allocator import PortfolioAllocator
 from hyperliquid_trading_agent.app.engine.position_manager import PositionManager
 from hyperliquid_trading_agent.app.engine.regime import RegimeEngine
 from hyperliquid_trading_agent.app.engine.replay_compare import latest_engine_replay_comparison
-from hyperliquid_trading_agent.app.engine.schemas import AlphaCandidate, OrderIntent
+from hyperliquid_trading_agent.app.engine.schemas import AlphaCandidate, AssetClass, OrderIntent
 from hyperliquid_trading_agent.app.engine.scorer import EVScorerService
 from hyperliquid_trading_agent.app.engine.strategy_registry import create_default_strategy_registry
 from hyperliquid_trading_agent.app.engine.strategy_selector import ConservativeStrategySelector
@@ -92,6 +93,7 @@ class InstitutionalEngineService:
         self.candidate_outcomes = CandidateOutcomeAttributionService(repository)
         self.diversity = PortfolioDiversityController(settings)
         self.throttles = StrategyThrottleController(settings)
+        self.evidence_admission = ShadowEvidenceAdmissionController(settings)
         self.strategy_selector = ConservativeStrategySelector()
         self.strategy_registry = create_default_strategy_registry(
             catalog_mode=getattr(settings, "engine_alpha_catalog_mode", "wave1a_locked"),
@@ -139,6 +141,7 @@ class InstitutionalEngineService:
             "last_strategy_selection_summary": self.last_strategy_selection_summary,
             "throttles": self.throttles.status(),
             "diversity": {**self.diversity.status(), "last_summary": self.last_diversity_summary},
+            "shadow_evidence_admission": self.evidence_admission.status(),
             "strategy_registry": self.strategy_registry.metadata(),
             "strategy_catalog": self.strategy_registry.catalog_summary(),
             "strategy_specs_persisted": self.strategy_specs_persisted,
@@ -146,7 +149,11 @@ class InstitutionalEngineService:
             "wave_policy": {
                 "wave1c_enabled": bool(getattr(self.settings, "engine_wave1c_enabled", False)),
                 "wave2_enabled": bool(getattr(self.settings, "engine_wave2_enabled", False)),
-                "wave2_status": "deferred_until_wave1_evidence_replay_readiness",
+                "wave2_status": (
+                    "early_shadow_only"
+                    if self.strategy_registry.catalog_mode in {"wave2_early_shadow", "shadow_full_catalog"}
+                    else "deferred_until_operator_enablement"
+                ),
             },
         }
 
@@ -182,6 +189,12 @@ class InstitutionalEngineService:
             stage_started = time.perf_counter()
             await self._record_meta_and_asset_ctx_features(symbols=symbols, received_ts_ms=ts)
             _stage_done("meta_asset_ctxs", stage_started)
+            stage_started = time.perf_counter()
+            await self._record_persisted_venue_market_features(symbols=symbols, received_ts_ms=ts)
+            _stage_done("venue_market", stage_started)
+            stage_started = time.perf_counter()
+            await self._record_persisted_cross_venue_features(symbols=symbols, received_ts_ms=ts)
+            _stage_done("cross_venue", stage_started)
             # Add L2 for a bounded hot set to produce execution/microstructure features.
             stage_started = time.perf_counter()
             for symbol in symbols[: max(1, self.settings.autonomy_max_hot_l2_assets)]:
@@ -233,7 +246,12 @@ class InstitutionalEngineService:
                 _stage_done("regime", stage_started)
                 stage_started = time.perf_counter()
                 symbol_candidates = []
-                selection = self.strategy_selector.select(self.strategies, regime)
+                selection = self.strategy_selector.select(
+                    self.strategies,
+                    regime,
+                    asset=snapshot.asset,
+                    venue=snapshot.venue_id,
+                )
                 strategy_selection_summaries[symbol] = selection.summary()
                 selected_ids = {strategy.spec.strategy_id for strategy in selection.strategies}
                 skipped_by_id = {
@@ -256,6 +274,27 @@ class InstitutionalEngineService:
                         skipped=skipped_by_id.get(strategy.spec.strategy_id),
                         news_risk_tier=selection.news_risk_tier,
                     )
+                evidence_epoch_id = str(getattr(self.settings, "engine_evidence_epoch_id", "") or "runtime")
+                symbol_candidates = [
+                    candidate.model_copy(
+                        update={
+                            "instrument_id": snapshot.instrument_id,
+                            "underlying_id": snapshot.underlying_id,
+                            "venue_id": snapshot.venue_id,
+                            "provider_symbol": snapshot.provider_symbol,
+                            "venue": snapshot.venue_id,
+                            "evidence_epoch_id": evidence_epoch_id,
+                            "metadata": {
+                                **candidate.metadata,
+                                "evidence_epoch_id": evidence_epoch_id,
+                                "instrument_id": snapshot.instrument_id,
+                                "underlying_id": snapshot.underlying_id,
+                                "venue_id": snapshot.venue_id,
+                            },
+                        }
+                    )
+                    for candidate in symbol_candidates
+                ]
                 symbol_candidates = symbol_candidates[: self.settings.engine_max_candidates_per_loop]
                 symbol_candidates, symbol_throttle_events = await self.throttles.filter_candidates(symbol_candidates, repository=self.repository, timestamp_ms=ts)
                 throttle_events.extend(symbol_throttle_events)
@@ -263,6 +302,8 @@ class InstitutionalEngineService:
                 await self.candidate_book.add_many(symbol_candidates)
                 _stage_done("strategy_generate", stage_started)
                 stage_started = time.perf_counter()
+                directional_strategy_ids = {item.strategy_id for item in symbol_candidates if item.side != "flat"}
+                directional_family_ids = {item.strategy_family for item in symbol_candidates if item.side != "flat"}
                 for candidate in symbol_candidates:
                     ev = await self.scorer.score(candidate, regime)
                     estimates[candidate.candidate_id] = ev
@@ -322,6 +363,33 @@ class InstitutionalEngineService:
                         )
                         if not order_risk.allowed:
                             allocation = allocation.model_copy(update={"status": "risk_rejected", "allocated_size": 0.0, "allocated_notional_usd": 0.0, "risk_usd": 0.0, "reason_codes": [*allocation.reason_codes, "risk_gateway_reject"]})
+                            allocation = self._enrich_allocation_metadata(allocation, candidate)
+                            allocations[candidate.candidate_id] = allocation
+                            await self._persist_allocation(allocation)
+                    if (
+                        allocation.status in {"allocate", "reduce", "require_debate"}
+                        and intent is not None
+                        and intent.execution_mode == "shadow"
+                        and (order_risk is None or order_risk.allowed)
+                    ):
+                        admitted, admission = await self.evidence_admission.admit(
+                            candidate,
+                            repository=self.repository,
+                            timestamp_ms=ts,
+                            alternative_strategy_available=len(directional_strategy_ids - {candidate.strategy_id}) > 0,
+                            alternative_family_available=len(directional_family_ids - {candidate.strategy_family}) > 0,
+                        )
+                        if not admitted:
+                            allocation = allocation.model_copy(
+                                update={
+                                    "status": "skip",
+                                    "allocated_size": 0.0,
+                                    "allocated_notional_usd": 0.0,
+                                    "risk_usd": 0.0,
+                                    "reason_codes": [*allocation.reason_codes, "shadow_evidence_deferred"],
+                                    "metadata": {**allocation.metadata, "evidence_admission": admission},
+                                }
+                            )
                             allocation = self._enrich_allocation_metadata(allocation, candidate)
                             allocations[candidate.candidate_id] = allocation
                             await self._persist_allocation(allocation)
@@ -540,6 +608,14 @@ class InstitutionalEngineService:
                 "stale_threshold_ms": stale_threshold_ms,
                 "report_only_freshness": True,
             },
+        )
+        payload.update(
+            {
+                "instrument_id": getattr(snapshot, "instrument_id", None),
+                "underlying_id": getattr(snapshot, "underlying_id", None),
+                "venue_id": getattr(snapshot, "venue_id", None),
+                "provider_symbol": getattr(snapshot, "provider_symbol", None),
+            }
         )
         await self._persist_strategy_evaluation(payload)
 
@@ -823,6 +899,139 @@ class InstitutionalEngineService:
         )
         await self.feature_store.features_for_event(event)
 
+    async def _record_persisted_cross_venue_features(self, *, symbols: list[str], received_ts_ms: int) -> None:
+        if self.repository is None or not getattr(self.repository, "enabled", False):
+            return
+        method = getattr(self.repository, "list_cross_venue_feature_snapshots", None)
+        if not callable(method):
+            return
+        rows = await method(since_ms=received_ts_ms - 5 * 60 * 1000, limit=1000)
+        wanted = {symbol.upper() for symbol in symbols}
+        latest_by_pair: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in rows:
+            underlying_id = str(row.get("underlying_id") or "")
+            display = underlying_id.split(":", 1)[-1].upper()
+            if display not in wanted:
+                continue
+            key = (display, str(row.get("comparison_instrument_id") or ""))
+            if key not in latest_by_pair or int(row.get("as_of_ms") or 0) > int(latest_by_pair[key].get("as_of_ms") or 0):
+                latest_by_pair[key] = row
+        for (symbol, _), row in latest_by_pair.items():
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            underlying_id = str(row.get("underlying_id") or f"UNKNOWN:{symbol}")
+            asset_class = _asset_class_from_underlying(underlying_id)
+            reference_identity = {
+                "instrument_id": str(row.get("reference_instrument_id") or ""),
+                "underlying_id": underlying_id,
+                "venue_id": str(row.get("reference_venue_id") or "hyperliquid:main"),
+                "provider_symbol": str(metadata.get("reference_provider_symbol") or symbol),
+            }
+            payload = {
+                "symbol": symbol,
+                "underlying_id": underlying_id,
+                "reference_instrument_id": row.get("reference_instrument_id"),
+                "comparison_instrument_id": row.get("comparison_instrument_id"),
+                "reference_venue_id": row.get("reference_venue_id"),
+                "comparison_venue_id": row.get("comparison_venue_id"),
+                "price_delta_bps": row.get("price_delta_bps"),
+                "volume_imbalance": row.get("volume_imbalance"),
+                "liquidation_divergence": row.get("liquidation_divergence"),
+                "max_clock_skew_ms": row.get("max_clock_skew_ms"),
+                "quality_flags": row.get("quality_flags") or [],
+                "pairwise_not_averaged": True,
+                **metadata,
+            }
+            event = await self.ledger.normalize_and_record(
+                event_type="cross_venue_market",
+                source="canonical_market_universe",
+                provider=str(row.get("comparison_venue_id") or "unknown"),
+                payload=payload,
+                asset_class=asset_class,
+                symbols=[symbol],
+                event_ts_ms=int(row.get("as_of_ms") or received_ts_ms),
+                received_ts_ms=received_ts_ms,
+                metadata={
+                    "read_only": True,
+                    "pairwise_not_averaged": True,
+                    "asset_class": asset_class,
+                    "instrument_identity": reference_identity,
+                },
+            )
+            await self.feature_store.features_for_event(event)
+
+    async def _record_persisted_venue_market_features(
+        self,
+        *,
+        symbols: list[str],
+        received_ts_ms: int,
+    ) -> None:
+        """Ingest the latest canonical Hyperliquid reference for each underlying."""
+
+        if self.repository is None or not getattr(self.repository, "enabled", False):
+            return
+        method = getattr(self.repository, "list_venue_market_snapshots", None)
+        if not callable(method):
+            return
+        rows = await method(since_ms=received_ts_ms - 5 * 60 * 1000, limit=5000)
+        wanted = {symbol.upper() for symbol in symbols}
+        priority = {"hyperliquid:main": 0, "hyperliquid:xyz": 1, "lighter": 2, "alpaca:paper": 3}
+        selected: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            underlying_id = str(row.get("underlying_id") or "")
+            display = underlying_id.split(":", 1)[-1].upper()
+            venue_id = str(row.get("venue_id") or "")
+            if display not in wanted or venue_id not in priority:
+                continue
+            current = selected.get(display)
+            row_key = (priority[venue_id], -int(row.get("received_ts_ms") or 0))
+            current_key = (
+                priority.get(str((current or {}).get("venue_id") or ""), 99),
+                -int((current or {}).get("received_ts_ms") or 0),
+            )
+            if current is None or row_key < current_key:
+                selected[display] = row
+        for symbol, row in selected.items():
+            underlying_id = str(row.get("underlying_id") or f"UNKNOWN:{symbol}")
+            asset_class = _asset_class_from_underlying(underlying_id)
+            provider_symbol = str(row.get("provider_symbol") or symbol)
+            identity = {
+                "instrument_id": str(row.get("instrument_id") or ""),
+                "underlying_id": underlying_id,
+                "venue_id": str(row.get("venue_id") or "hyperliquid:main"),
+                "provider_symbol": provider_symbol,
+            }
+            event = await self.ledger.normalize_and_record(
+                event_type="venue_market_snapshot",
+                source="canonical_market_universe",
+                provider=identity["venue_id"],
+                payload={
+                    "display_symbol": symbol,
+                    "provider_symbol": provider_symbol,
+                    "bid_px": row.get("bid_px"),
+                    "ask_px": row.get("ask_px"),
+                    "mid_px": row.get("mid_px"),
+                    "mark_px": row.get("mark_px"),
+                    "index_px": row.get("index_px"),
+                    "last_trade_px": row.get("last_trade_px"),
+                    "volume_24h": row.get("volume_24h"),
+                    "open_interest": row.get("open_interest"),
+                    "funding_rate": row.get("funding_rate"),
+                    "depth_bands": row.get("depth_bands") or {},
+                    "source_integrity": row.get("source_integrity"),
+                },
+                asset_class=asset_class,
+                symbols=[symbol],
+                event_ts_ms=int(row.get("exchange_ts_ms") or row.get("received_ts_ms") or received_ts_ms),
+                received_ts_ms=received_ts_ms,
+                metadata={
+                    "read_only": True,
+                    "asset_class": asset_class,
+                    "instrument_identity": identity,
+                    "venue_snapshot_id": row.get("snapshot_id"),
+                },
+            )
+            await self.feature_store.features_for_event(event)
+
     async def _record_liquidation_features(self, symbol: str) -> None:
         if self.liquidation_bridge is None:
             return
@@ -886,6 +1095,10 @@ class InstitutionalEngineService:
             asset=candidate.asset,
             asset_class=candidate.asset_class,
             venue=candidate.venue,
+            instrument_id=candidate.instrument_id,
+            underlying_id=candidate.underlying_id,
+            venue_id=candidate.venue_id,
+            provider_symbol=candidate.provider_symbol,
             side=side,  # type: ignore[arg-type]
             order_type="marketable_limit",
             time_in_force="ioc",
@@ -902,6 +1115,13 @@ class InstitutionalEngineService:
             risk_budget_id="default",
             execution_mode=mode,  # type: ignore[arg-type]
             created_at_ms=ts,
+            metadata={
+                "evidence_epoch_id": candidate.evidence_epoch_id,
+                "strategy_family": candidate.strategy_family,
+                "instrument_id": candidate.instrument_id,
+                "underlying_id": candidate.underlying_id,
+                "venue_id": candidate.venue_id,
+            },
         )
 
     async def _persist_regime(self, regime) -> None:
@@ -963,6 +1183,19 @@ def _int_or_none(value: Any) -> int | None:
         return None if value is None else int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _asset_class_from_underlying(underlying_id: str) -> AssetClass:
+    prefix = underlying_id.split(":", 1)[0].upper()
+    return {
+        "CRYPTO": "crypto",
+        "EQUITY": "equity",
+        "ETF": "equity",
+        "INDEX": "macro",
+        "FX": "fx",
+        "COMMODITY": "commodity",
+        "SYNTHETIC": "unknown",
+    }.get(prefix, "unknown")  # type: ignore[return-value]
 
 
 def _spread_bps_from_l2_book(book: Any) -> float | None:

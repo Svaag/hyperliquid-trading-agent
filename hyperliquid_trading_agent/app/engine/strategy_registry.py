@@ -71,13 +71,14 @@ WAVE_2B_IDS = _WAVE_2B_IDS
 WAVE_2C_IDS = _WAVE_2C_IDS
 WAVE_2_DEFERRED_IDS = _WAVE_2_DEFERRED_IDS
 
-CatalogMode = Literal["wave1a_locked", "wave1c", "shadow_full_catalog", "specs_only"]
-ALPHA_CATALOG_MODES = {"wave1a_locked", "wave1c", "shadow_full_catalog", "specs_only"}
+CatalogMode = Literal["wave1a_locked", "wave1c", "wave2_early_shadow", "shadow_full_catalog", "specs_only"]
+ALPHA_CATALOG_MODES = {"wave1a_locked", "wave1c", "wave2_early_shadow", "shadow_full_catalog", "specs_only"}
 PRE_WAVE1A_RUNTIME_IDS = PRE_WAVE1A_COMPARISON_IDS - {"equity_options_flow_v1"}
 WAVE_1C_FULL_IDS = WAVE_1C_DETERMINISTIC_IDS | WAVE_1C_OPTIONAL_IDS
 SHADOW_FULL_CATALOG_ACTIVE_IDS = (
     WAVE_1A_NUCLEUS_IDS | PRE_WAVE1A_RUNTIME_IDS | WAVE_1C_FULL_IDS | WAVE_2_DEFERRED_IDS
 )
+WAVE2_EARLY_SHADOW_ACTIVE_IDS = WAVE_1A_NUCLEUS_IDS | WAVE_1C_FULL_IDS | WAVE_2_DEFERRED_IDS
 
 
 @dataclass
@@ -276,7 +277,7 @@ def create_default_strategy_registry(
             news_event_alpha_mode=news_event_alpha_mode,
         )
     )
-    wave_1c_enabled = mode == "wave1c"
+    wave_1c_enabled = mode in {"wave1c", "wave2_early_shadow"}
     if include_planned_wave_1a_specs:
         for spec in planned_wave_1a_specs():
             if registry.spec(spec.strategy_id) is None:
@@ -308,8 +309,8 @@ def runtime_strategy_instances(
     if effective_news_mode is None:
         # Preserve the historical direct-factory catalog shape. EngineService always
         # supplies the explicit operator setting, including "off".
-        effective_news_mode = "shadow" if mode == "shadow_full_catalog" else "off"
-    news = _news_event_instances(effective_news_mode, shadow_only=mode == "shadow_full_catalog")
+        effective_news_mode = "shadow" if mode in {"shadow_full_catalog", "wave2_early_shadow"} else "off"
+    news = _news_event_instances(effective_news_mode, shadow_only=mode in {"shadow_full_catalog", "wave2_early_shadow"})
     if mode in {"wave1a_locked", "specs_only"}:
         return [*default_strategy_instances(), *news]
     if mode == "wave1c":
@@ -317,6 +318,17 @@ def runtime_strategy_instances(
             *default_strategy_instances(),
             *news,
             *[_active_instance(strategy, reason="wave1c_enabled") for strategy in wave_1c_strategy_instances()],
+        ]
+    if mode == "wave2_early_shadow":
+        return [
+            *[_active_instance(strategy, reason="wave2_early_shadow_wave1a") for strategy in default_strategy_instances()],
+            *news,
+            *[_active_instance(strategy, reason="wave2_early_shadow_wave1c") for strategy in wave_1c_full_strategy_instances()],
+            *_shadow_only_instances(
+                wave_2_strategy_instances(),
+                reason="wave2_early_shadow_wave2",
+                force_breadth=True,
+            ),
         ]
     if mode == "shadow_full_catalog":
         strategies: list[AlphaStrategy] = []
@@ -394,6 +406,7 @@ def _shadow_only_instances(
 
 
 def _shadow_only_spec(spec: StrategySpec, *, reason: str, force_breadth: bool = False) -> StrategySpec:
+    catalog_mode = "wave2_early_shadow" if reason.startswith("wave2_early_shadow") else "shadow_full_catalog"
     updates: dict[str, Any] = {
         "enabled": True,
         "counts_for_breadth": bool(spec.counts_for_breadth or force_breadth),
@@ -403,7 +416,7 @@ def _shadow_only_spec(spec: StrategySpec, *, reason: str, force_breadth: bool = 
             "paper_eligible": False,
             "operator_promotion_required": True,
             "runtime_enabled_reason": reason,
-            "catalog_mode": "shadow_full_catalog",
+            "catalog_mode": catalog_mode,
         },
     }
     if spec.max_candidates_per_run <= 0:

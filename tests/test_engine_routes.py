@@ -110,7 +110,15 @@ class FakeEngineRepository:
 
 
 def test_engine_readonly_routes_are_registered_and_auth_protected_in_dev():
-    app = create_app(Settings(environment="test", engine_execution_modes="paper,shadow"))
+    app = create_app(
+        Settings(
+            environment="test",
+            engine_execution_modes="paper,shadow",
+            engine_alpha_catalog_mode="wave1a_locked",
+            engine_wave1c_enabled=False,
+            engine_wave2_enabled=False,
+        )
+    )
     app.state.repository = FakeEngineRepository()
     client = TestClient(app)
 

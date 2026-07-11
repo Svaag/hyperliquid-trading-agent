@@ -34,6 +34,7 @@ from hyperliquid_trading_agent.app.db.models import (
     ConversationThread,
     CouncilReviewRecord,
     CouncilVoteRecord,
+    CrossVenueFeatureSnapshotRecord,
     DailyReportRecord,
     DebateDecisionRecord,
     DecisionContextRecord,
@@ -66,6 +67,7 @@ from hyperliquid_trading_agent.app.db.models import (
     Hip4RawPayloadRecord,
     Hip4ReconciliationRunRecord,
     Hip4SettlementRecord,
+    InstrumentRegistryRecord,
     KillSwitchEventRecord,
     MarketAssetRecord,
     MarketBeliefRecord,
@@ -137,6 +139,10 @@ from hyperliquid_trading_agent.app.db.models import (
     TradeProposalRecord,
     TradeSignalRecord,
     TuningProposalRecord,
+    UniverseSnapshotRecord,
+    VenueMarketSnapshotRecord,
+    WatchlistChangeEventRecord,
+    WatchlistMembershipRecord,
     WaveSupervisorRunRecord,
     WeeklyReportRecord,
     WorkerCommandRecord,
@@ -1198,6 +1204,10 @@ class Repository:
             FeatureValueRecord(
                 feature_id=str(feature["feature_id"]),
                 asset=str(feature.get("asset") or "").upper(),
+                instrument_id=feature.get("instrument_id"),
+                underlying_id=feature.get("underlying_id"),
+                venue_id=feature.get("venue_id"),
+                provider_symbol=feature.get("provider_symbol"),
                 feature_group=str(feature.get("feature_group") or "unknown"),
                 feature_name=str(feature.get("feature_name") or "unknown"),
                 value_json=redact_secrets(dict(feature.get("value") or {})),
@@ -1306,6 +1316,10 @@ class Repository:
                 evaluated_at_ms=int(evaluation.get("evaluated_at_ms") or 0),
                 asset=str(evaluation.get("asset") or "UNKNOWN").upper(),
                 venue=str(evaluation.get("venue") or "hyperliquid"),
+                instrument_id=evaluation.get("instrument_id"),
+                underlying_id=evaluation.get("underlying_id"),
+                venue_id=evaluation.get("venue_id"),
+                provider_symbol=evaluation.get("provider_symbol"),
                 strategy_id=str(evaluation.get("strategy_id") or "unknown"),
                 strategy_version=str(evaluation.get("strategy_version") or "unknown"),
                 strategy_family=str(evaluation.get("strategy_family") or "unknown"),
@@ -1432,6 +1446,11 @@ class Repository:
                 asset=str(candidate.get("asset") or "").upper(),
                 asset_class=str(candidate.get("asset_class") or "unknown"),
                 venue=str(candidate.get("venue") or "unknown"),
+                instrument_id=candidate.get("instrument_id"),
+                underlying_id=candidate.get("underlying_id"),
+                venue_id=candidate.get("venue_id"),
+                provider_symbol=candidate.get("provider_symbol"),
+                evidence_epoch_id=candidate.get("evidence_epoch_id") or metadata.get("evidence_epoch_id"),
                 side=str(candidate.get("side") or "flat"),
                 horizon=str(candidate.get("horizon") or "unknown"),
                 proposed_entry=float(candidate.get("proposed_entry") or 0),
@@ -1632,12 +1651,16 @@ class Repository:
             "event_id",
         )
 
-    async def list_portfolio_concentration_events(self, *, strategy_id: str | None = None, decision: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_portfolio_concentration_events(self, *, strategy_id: str | None = None, decision: str | None = None, since_ms: int | None = None, until_ms: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
         filters = []
         if strategy_id:
             filters.append(PortfolioConcentrationEventRecord.strategy_id == strategy_id)
         if decision:
             filters.append(PortfolioConcentrationEventRecord.decision == decision)
+        if since_ms is not None:
+            filters.append(PortfolioConcentrationEventRecord.created_at_ms >= int(since_ms))
+        if until_ms is not None:
+            filters.append(PortfolioConcentrationEventRecord.created_at_ms < int(until_ms))
         return await self._list_engine_records(PortfolioConcentrationEventRecord, order_by=PortfolioConcentrationEventRecord.created_at_ms, limit=limit, filters=filters)
 
     async def upsert_candidate_evidence_link(self, link: dict[str, Any]) -> str | None:
@@ -1650,6 +1673,9 @@ class Repository:
                 strategy_family=str(link.get("strategy_family") or "unknown"),
                 asset=str(link.get("asset") or "").upper(),
                 venue=str(link.get("venue") or "unknown"),
+                instrument_id=link.get("instrument_id"),
+                underlying_id=link.get("underlying_id"),
+                venue_id=link.get("venue_id"),
                 horizon=str(link.get("horizon") or ""),
                 regime_snapshot_id=str(link.get("regime_snapshot_id") or ""),
                 feature_snapshot_id=str(link.get("feature_snapshot_id") or ""),
@@ -1665,12 +1691,16 @@ class Repository:
             "link_id",
         )
 
-    async def list_candidate_evidence_links(self, *, candidate_id: str | None = None, strategy_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_candidate_evidence_links(self, *, candidate_id: str | None = None, strategy_id: str | None = None, since_ms: int | None = None, until_ms: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
         filters = []
         if candidate_id:
             filters.append(CandidateEvidenceLinkRecord.candidate_id == candidate_id)
         if strategy_id:
             filters.append(CandidateEvidenceLinkRecord.strategy_id == strategy_id)
+        if since_ms is not None:
+            filters.append(CandidateEvidenceLinkRecord.created_at_ms >= int(since_ms))
+        if until_ms is not None:
+            filters.append(CandidateEvidenceLinkRecord.created_at_ms < int(until_ms))
         return await self._list_engine_records(CandidateEvidenceLinkRecord, order_by=CandidateEvidenceLinkRecord.created_at_ms, limit=limit, filters=filters)
 
     async def upsert_candidate_outcome_attribution(self, item: dict[str, Any]) -> str | None:
@@ -1683,6 +1713,9 @@ class Repository:
                 strategy_family=str(item.get("strategy_family") or "unknown"),
                 asset=str(item.get("asset") or "").upper(),
                 venue=str(item.get("venue") or "unknown"),
+                instrument_id=item.get("instrument_id"),
+                underlying_id=item.get("underlying_id"),
+                venue_id=item.get("venue_id"),
                 side=str(item.get("side") or ""),
                 candidate_horizon=str(item.get("candidate_horizon") or item.get("horizon") or ""),
                 regime_snapshot_id=str(item.get("regime_snapshot_id") or ""),
@@ -1846,7 +1879,7 @@ class Repository:
             await self.record_council_vote(vote)
         return review_id
 
-    async def list_council_reviews(self, *, candidate_id: str | None = None, strategy_id: str | None = None, decision: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_council_reviews(self, *, candidate_id: str | None = None, strategy_id: str | None = None, decision: str | None = None, since_ms: int | None = None, until_ms: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
         filters = []
         if candidate_id:
             filters.append(CouncilReviewRecord.candidate_id == candidate_id)
@@ -1854,6 +1887,10 @@ class Repository:
             filters.append(CouncilReviewRecord.strategy_id == strategy_id)
         if decision:
             filters.append(CouncilReviewRecord.decision == decision)
+        if since_ms is not None:
+            filters.append(CouncilReviewRecord.created_at_ms >= int(since_ms))
+        if until_ms is not None:
+            filters.append(CouncilReviewRecord.created_at_ms < int(until_ms))
         return await self._list_engine_records(CouncilReviewRecord, order_by=CouncilReviewRecord.created_at_ms, limit=limit, filters=filters)
 
     async def record_council_vote(self, vote: dict[str, Any]) -> str | None:
@@ -1915,12 +1952,16 @@ class Repository:
             "performance_id",
         )
 
-    async def list_strategy_regime_performance(self, *, strategy_id: str | None = None, regime_label: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_strategy_regime_performance(self, *, strategy_id: str | None = None, regime_label: str | None = None, since_ms: int | None = None, until_ms: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
         filters = []
         if strategy_id:
             filters.append(StrategyRegimePerformanceRecord.strategy_id == strategy_id)
         if regime_label:
             filters.append(StrategyRegimePerformanceRecord.regime_label == regime_label)
+        if since_ms is not None:
+            filters.append(StrategyRegimePerformanceRecord.window_end_ms >= int(since_ms))
+        if until_ms is not None:
+            filters.append(StrategyRegimePerformanceRecord.window_end_ms < int(until_ms))
         return await self._list_engine_records(StrategyRegimePerformanceRecord, order_by=StrategyRegimePerformanceRecord.window_end_ms, limit=limit, filters=filters)
 
     async def upsert_bandit_policy_snapshot(self, snapshot: dict[str, Any]) -> str | None:
@@ -2019,6 +2060,10 @@ class Repository:
                 asset=str(intent.get("asset") or "").upper(),
                 asset_class=str(intent.get("asset_class") or "unknown"),
                 venue=str(intent.get("venue") or "unknown"),
+                instrument_id=intent.get("instrument_id"),
+                underlying_id=intent.get("underlying_id"),
+                venue_id=intent.get("venue_id"),
+                provider_symbol=intent.get("provider_symbol"),
                 side=str(intent.get("side") or "buy"),
                 order_type=str(intent.get("order_type") or "marketable_limit"),
                 time_in_force=str(intent.get("time_in_force") or "ioc"),
@@ -2040,8 +2085,12 @@ class Repository:
             "intent_id",
         )
 
-    async def list_order_intents(self, *, execution_mode: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_order_intents(self, *, execution_mode: str | None = None, since_ms: int | None = None, until_ms: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
         filters = [OrderIntentRecord.execution_mode == execution_mode] if execution_mode else []
+        if since_ms is not None:
+            filters.append(OrderIntentRecord.created_at_ms >= int(since_ms))
+        if until_ms is not None:
+            filters.append(OrderIntentRecord.created_at_ms < int(until_ms))
         return await self._list_engine_records(OrderIntentRecord, order_by=OrderIntentRecord.created_at_ms, limit=limit, filters=filters)
 
     async def record_execution_report(self, report: dict[str, Any]) -> str | None:
@@ -2108,12 +2157,16 @@ class Repository:
             "position_id",
         )
 
-    async def list_position_theses(self, *, state: str | None = None, asset: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_position_theses(self, *, state: str | None = None, asset: str | None = None, since_ms: int | None = None, until_ms: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
         filters = []
         if state:
             filters.append(PositionThesisRecord.position_state == state)
         if asset:
             filters.append(PositionThesisRecord.asset == asset.upper())
+        if since_ms is not None:
+            filters.append(PositionThesisRecord.updated_at_ms >= int(since_ms))
+        if until_ms is not None:
+            filters.append(PositionThesisRecord.updated_at_ms < int(until_ms))
         return await self._list_engine_records(PositionThesisRecord, order_by=PositionThesisRecord.updated_at_ms, limit=limit, filters=filters)
 
     async def close_stale_position_theses(
@@ -2312,6 +2365,327 @@ class Repository:
 
     async def list_retention_runs(self, *, limit: int = 100) -> list[dict[str, Any]]:
         return await self._list_engine_records(RetentionRunRecord, order_by=RetentionRunRecord.started_at_ms, limit=limit)
+
+    async def upsert_instrument(self, instrument: dict[str, Any], *, observed_at_ms: int) -> str | None:
+        if self.sessionmaker is None:
+            return None
+
+        def apply(item: InstrumentRegistryRecord) -> None:
+            item.underlying_id = str(instrument.get("underlying_id") or item.underlying_id)
+            item.venue_id = str(instrument.get("venue_id") or item.venue_id)
+            item.provider_symbol = str(instrument.get("provider_symbol") or item.provider_symbol)
+            item.display_symbol = str(instrument.get("display_symbol") or item.display_symbol)
+            item.instrument_type = str(instrument.get("instrument_type") or item.instrument_type)
+            item.quote_currency = str(instrument.get("quote_currency") or item.quote_currency)
+            item.session_timezone = str(instrument.get("session_timezone") or item.session_timezone)
+            item.tradability_status = str(instrument.get("tradability_status") or item.tradability_status)
+            item.capabilities_json = redact_secrets(
+                dict(instrument.get("capabilities") or item.capabilities_json or {})
+            )
+            item.mapping_version = int(instrument.get("mapping_version") or item.mapping_version)
+            item.last_observed_at_ms = int(observed_at_ms)
+            item.metadata_json = redact_secrets(
+                {**dict(item.metadata_json or {}), **dict(instrument.get("metadata") or {})}
+            )
+
+        async with self.sessionmaker() as session:
+            instrument_id = str(instrument["instrument_id"])
+            item = await session.get(InstrumentRegistryRecord, instrument_id)
+            if item is None:
+                item = InstrumentRegistryRecord(
+                    instrument_id=instrument_id,
+                    underlying_id=str(instrument.get("underlying_id") or "UNKNOWN"),
+                    venue_id=str(instrument.get("venue_id") or "unknown"),
+                    provider_symbol=str(instrument.get("provider_symbol") or ""),
+                    display_symbol=str(instrument.get("display_symbol") or instrument.get("provider_symbol") or ""),
+                    instrument_type=str(instrument.get("instrument_type") or "unknown"),
+                    quote_currency=str(instrument.get("quote_currency") or "USD"),
+                    session_timezone=str(instrument.get("session_timezone") or "UTC"),
+                    tradability_status=str(instrument.get("tradability_status") or "absent"),
+                    capabilities_json=redact_secrets(dict(instrument.get("capabilities") or {})),
+                    mapping_version=int(instrument.get("mapping_version") or 1),
+                    first_observed_at_ms=int(observed_at_ms),
+                    last_observed_at_ms=int(observed_at_ms),
+                    metadata_json=redact_secrets(dict(instrument.get("metadata") or {})),
+                )
+                session.add(item)
+            else:
+                apply(item)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                item = await session.get(InstrumentRegistryRecord, instrument_id)
+                if item is None:
+                    raise
+                apply(item)
+                await session.commit()
+            return instrument_id
+
+    async def get_instrument(self, instrument_id: str) -> dict[str, Any] | None:
+        return await self._get_engine_record(InstrumentRegistryRecord, instrument_id)
+
+    async def list_instruments(
+        self,
+        *,
+        venue_id: str | None = None,
+        underlying_id: str | None = None,
+        tradability_status: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        filters = []
+        if venue_id:
+            filters.append(InstrumentRegistryRecord.venue_id == venue_id)
+        if underlying_id:
+            filters.append(InstrumentRegistryRecord.underlying_id == underlying_id)
+        if tradability_status:
+            filters.append(InstrumentRegistryRecord.tradability_status == tradability_status)
+        return await self._list_engine_records(
+            InstrumentRegistryRecord,
+            order_by=InstrumentRegistryRecord.last_observed_at_ms,
+            limit=limit,
+            filters=filters,
+        )
+
+    async def upsert_watchlist_membership(self, membership: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            WatchlistMembershipRecord(
+                membership_id=str(membership["membership_id"]),
+                instrument_id=str(membership.get("instrument_id") or ""),
+                tier=str(membership.get("tier") or "pinned"),
+                desired=bool(membership.get("desired", True)),
+                enabled=bool(membership.get("enabled", False)),
+                source=str(membership.get("source") or "admin"),
+                created_by=str(membership.get("created_by") or "system"),
+                created_at_ms=int(membership.get("created_at_ms") or 0),
+                updated_at_ms=int(membership.get("updated_at_ms") or membership.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(membership.get("metadata") or {})),
+            ),
+            "membership_id",
+        )
+
+    async def get_watchlist_membership_by_instrument(self, instrument_id: str) -> dict[str, Any] | None:
+        items = await self._list_engine_records(
+            WatchlistMembershipRecord,
+            order_by=WatchlistMembershipRecord.updated_at_ms,
+            limit=1,
+            filters=[WatchlistMembershipRecord.instrument_id == instrument_id],
+        )
+        return items[0] if items else None
+
+    async def list_watchlist_memberships(self, *, tier: str | None = None, enabled: bool | None = None, limit: int = 1000) -> list[dict[str, Any]]:
+        filters = []
+        if tier:
+            filters.append(WatchlistMembershipRecord.tier == tier)
+        if enabled is not None:
+            filters.append(WatchlistMembershipRecord.enabled == enabled)
+        return await self._list_engine_records(
+            WatchlistMembershipRecord,
+            order_by=WatchlistMembershipRecord.updated_at_ms,
+            limit=limit,
+            filters=filters,
+        )
+
+    async def record_watchlist_change_event(self, event: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            WatchlistChangeEventRecord(
+                change_id=str(event["change_id"]),
+                action=str(event.get("action") or "unknown"),
+                status=str(event.get("status") or "pending_confirmation"),
+                actor=str(event.get("actor") or "unknown"),
+                request_json=redact_secrets(dict(event.get("request") or {})),
+                before_json=redact_secrets(dict(event.get("before") or {})),
+                after_json=redact_secrets(dict(event.get("after") or {})),
+                result_json=redact_secrets(dict(event.get("result") or {})),
+                created_at_ms=int(event.get("created_at_ms") or 0),
+                confirmed_by=event.get("confirmed_by"),
+                confirmed_at_ms=event.get("confirmed_at_ms"),
+                metadata_json=redact_secrets(dict(event.get("metadata") or {})),
+            ),
+            "change_id",
+        )
+
+    async def get_watchlist_change_event(self, change_id: str) -> dict[str, Any] | None:
+        return await self._get_engine_record(WatchlistChangeEventRecord, change_id)
+
+    async def update_watchlist_change_event(
+        self,
+        change_id: str,
+        *,
+        status: str,
+        confirmed_by: str | None = None,
+        confirmed_at_ms: int | None = None,
+        result: dict[str, Any] | None = None,
+    ) -> bool:
+        if self.sessionmaker is None:
+            return False
+        async with self.sessionmaker() as session:
+            item = await session.get(WatchlistChangeEventRecord, change_id)
+            if item is None:
+                return False
+            item.status = status
+            item.confirmed_by = confirmed_by
+            item.confirmed_at_ms = confirmed_at_ms
+            if result is not None:
+                item.result_json = redact_secrets(result)
+            await session.commit()
+            return True
+
+    async def list_watchlist_change_events(self, *, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        filters = [WatchlistChangeEventRecord.status == status] if status else []
+        return await self._list_engine_records(
+            WatchlistChangeEventRecord,
+            order_by=WatchlistChangeEventRecord.created_at_ms,
+            limit=limit,
+            filters=filters,
+        )
+
+    async def record_universe_snapshot(self, snapshot: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            UniverseSnapshotRecord(
+                snapshot_id=str(snapshot["snapshot_id"]),
+                version=int(snapshot.get("version") or 0),
+                desired_instrument_ids_json=list(snapshot.get("desired_instrument_ids") or []),
+                active_instrument_ids_json=list(snapshot.get("active_instrument_ids") or []),
+                created_at_ms=int(snapshot.get("created_at_ms") or 0),
+                created_by=str(snapshot.get("created_by") or "system"),
+                reason=str(snapshot.get("reason") or "update"),
+                metadata_json=redact_secrets(dict(snapshot.get("metadata") or {})),
+            ),
+            "snapshot_id",
+        )
+
+    async def latest_universe_snapshot(self) -> dict[str, Any] | None:
+        items = await self._list_engine_records(UniverseSnapshotRecord, order_by=UniverseSnapshotRecord.version, limit=1)
+        return items[0] if items else None
+
+    async def list_universe_snapshots(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        return await self._list_engine_records(UniverseSnapshotRecord, order_by=UniverseSnapshotRecord.version, limit=limit)
+
+    async def record_venue_market_snapshot(self, snapshot: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            VenueMarketSnapshotRecord(
+                snapshot_id=str(snapshot["snapshot_id"]),
+                instrument_id=str(snapshot.get("instrument_id") or ""),
+                underlying_id=str(snapshot.get("underlying_id") or ""),
+                venue_id=str(snapshot.get("venue_id") or "unknown"),
+                provider_symbol=str(snapshot.get("provider_symbol") or ""),
+                bid_px=snapshot.get("bid_px"),
+                ask_px=snapshot.get("ask_px"),
+                mid_px=snapshot.get("mid_px"),
+                mark_px=snapshot.get("mark_px"),
+                index_px=snapshot.get("index_px"),
+                last_trade_px=snapshot.get("last_trade_px"),
+                volume_24h=snapshot.get("volume_24h"),
+                open_interest=snapshot.get("open_interest"),
+                funding_rate=snapshot.get("funding_rate"),
+                depth_bands_json=redact_secrets(dict(snapshot.get("depth_bands") or {})),
+                exchange_ts_ms=snapshot.get("exchange_ts_ms"),
+                received_ts_ms=int(snapshot.get("received_ts_ms") or 0),
+                source_integrity=str(snapshot.get("source_integrity") or "confirmed"),
+                staleness_ms=snapshot.get("staleness_ms"),
+                sequence=snapshot.get("sequence"),
+                metadata_json=redact_secrets(dict(snapshot.get("metadata") or {})),
+            ),
+            "snapshot_id",
+        )
+
+    async def list_venue_market_snapshots(
+        self,
+        *,
+        instrument_id: str | None = None,
+        underlying_id: str | None = None,
+        venue_id: str | None = None,
+        since_ms: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        filters = []
+        if instrument_id:
+            filters.append(VenueMarketSnapshotRecord.instrument_id == instrument_id)
+        if underlying_id:
+            filters.append(VenueMarketSnapshotRecord.underlying_id == underlying_id)
+        if venue_id:
+            filters.append(VenueMarketSnapshotRecord.venue_id == venue_id)
+        if since_ms is not None:
+            filters.append(VenueMarketSnapshotRecord.received_ts_ms >= int(since_ms))
+        return await self._list_engine_records(
+            VenueMarketSnapshotRecord,
+            order_by=VenueMarketSnapshotRecord.received_ts_ms,
+            limit=limit,
+            filters=filters,
+        )
+
+    async def record_cross_venue_feature_snapshot(self, snapshot: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            CrossVenueFeatureSnapshotRecord(
+                snapshot_id=str(snapshot["snapshot_id"]),
+                underlying_id=str(snapshot.get("underlying_id") or ""),
+                reference_instrument_id=str(snapshot.get("reference_instrument_id") or ""),
+                comparison_instrument_id=str(snapshot.get("comparison_instrument_id") or ""),
+                reference_venue_id=str(snapshot.get("reference_venue_id") or "unknown"),
+                comparison_venue_id=str(snapshot.get("comparison_venue_id") or "unknown"),
+                as_of_ms=int(snapshot.get("as_of_ms") or 0),
+                price_delta_bps=snapshot.get("price_delta_bps"),
+                volume_imbalance=snapshot.get("volume_imbalance"),
+                depth_divergence=snapshot.get("depth_divergence"),
+                liquidation_divergence=snapshot.get("liquidation_divergence"),
+                lead_lag_windows_json=dict(snapshot.get("lead_lag_windows") or {}),
+                max_clock_skew_ms=snapshot.get("max_clock_skew_ms"),
+                quality_flags_json=list(snapshot.get("quality_flags") or []),
+                metadata_json=redact_secrets(dict(snapshot.get("metadata") or {})),
+            ),
+            "snapshot_id",
+        )
+
+    async def list_cross_venue_feature_snapshots(self, *, underlying_id: str | None = None, since_ms: int | None = None, limit: int = 1000) -> list[dict[str, Any]]:
+        filters = []
+        if underlying_id:
+            filters.append(CrossVenueFeatureSnapshotRecord.underlying_id == underlying_id)
+        if since_ms is not None:
+            filters.append(CrossVenueFeatureSnapshotRecord.as_of_ms >= int(since_ms))
+        return await self._list_engine_records(
+            CrossVenueFeatureSnapshotRecord,
+            order_by=CrossVenueFeatureSnapshotRecord.as_of_ms,
+            limit=limit,
+            filters=filters,
+        )
+
+    async def get_engine_validation_counts(self, *, start_ms: int, end_ms: int) -> dict[str, int]:
+        """Return uncapped headline counts for one common half-open cohort."""
+
+        if self.sessionmaker is None:
+            return {}
+
+        async with self.sessionmaker() as session:
+            async def count(model: Any, time_column: Any, *conditions: Any) -> int:
+                stmt = select(func.count()).select_from(model).where(time_column >= int(start_ms), time_column < int(end_ms), *conditions)
+                return int((await session.execute(stmt)).scalar_one() or 0)
+
+            return {
+                "candidate_count": await count(AlphaCandidateRecord, AlphaCandidateRecord.created_at_ms),
+                "ev_estimate_count": await count(EVEstimateRecord, EVEstimateRecord.created_at_ms),
+                "allocation_count": await count(AllocationDecisionRecord, AllocationDecisionRecord.created_at_ms),
+                "allocated_count": await count(
+                    AllocationDecisionRecord,
+                    AllocationDecisionRecord.created_at_ms,
+                    AllocationDecisionRecord.status.in_(["allocate", "reduce", "require_debate"]),
+                ),
+                "shadow_intent_count": await count(OrderIntentRecord, OrderIntentRecord.created_at_ms, OrderIntentRecord.execution_mode == "shadow"),
+                "paper_intent_count": await count(OrderIntentRecord, OrderIntentRecord.created_at_ms, OrderIntentRecord.execution_mode == "paper"),
+                "live_intent_count": await count(OrderIntentRecord, OrderIntentRecord.created_at_ms, OrderIntentRecord.execution_mode == "live"),
+                "execution_report_count": await count(ExecutionReportRecord, ExecutionReportRecord.created_at_ms),
+                "risk_decision_count": await count(RiskGatewayDecisionRecord, RiskGatewayDecisionRecord.created_at_ms),
+                "risk_reject_count": await count(RiskGatewayDecisionRecord, RiskGatewayDecisionRecord.created_at_ms, RiskGatewayDecisionRecord.decision == "reject"),
+                "pnl_attribution_count": await count(PnLAttributionRecord, PnLAttributionRecord.window_end_ms),
+                "open_position_count": int(
+                    (
+                        await session.execute(
+                            select(func.count()).select_from(PositionThesisRecord).where(PositionThesisRecord.position_state == "open")
+                        )
+                    ).scalar_one()
+                    or 0
+                ),
+            }
 
     async def _merge_engine_record(self, item: Any, primary_key_attr: str) -> str | None:
         if self.sessionmaker is None:

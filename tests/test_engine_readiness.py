@@ -161,24 +161,33 @@ def test_engine_settings_defaults_are_shadow_only():
     assert settings.engine_shadow_enabled is True
     assert settings.engine_paper_enabled is False
     assert settings.engine_live_enabled is False
-    assert settings.engine_wave2_enabled is False
+    assert settings.engine_wave2_enabled is True
+    assert settings.engine_alpha_catalog_mode == "wave2_early_shadow"
     assert settings.engine_execution_mode_list == ["shadow"]
 
 
-def test_engine_wave2_flag_is_deferred_until_wave1_evidence_is_reliable():
+def test_engine_wave2_flag_is_allowed_only_in_safe_shadow_research_catalogs():
+    settings = Settings(environment="test", engine_wave2_enabled=True, _env_file=None)
+    assert settings.engine_wave2_enabled is True
+
     with pytest.raises(ValueError, match="ENGINE_WAVE2_ENABLED"):
-        Settings(environment="test", engine_wave2_enabled=True)
+        Settings(
+            environment="test",
+            engine_wave2_enabled=True,
+            engine_alpha_catalog_mode="wave1a_locked",
+            _env_file=None,
+        )
 
 
 def test_shadow_full_alpha_catalog_mode_requires_shadow_only_runtime():
     settings = Settings(environment="test", engine_alpha_catalog_mode="SHADOW_FULL_CATALOG", _env_file=None)
     assert settings.engine_alpha_catalog_mode == "shadow_full_catalog"
 
-    with pytest.raises(ValueError, match="ENGINE_ALPHA_CATALOG_MODE=shadow_full_catalog requires"):
+    with pytest.raises(ValueError, match="Wave 2 research catalogs require"):
         Settings(environment="test", engine_alpha_catalog_mode="shadow_full_catalog", engine_paper_enabled=True, _env_file=None)
-    with pytest.raises(ValueError, match="ENGINE_ALPHA_CATALOG_MODE=shadow_full_catalog requires"):
+    with pytest.raises(ValueError, match="Wave 2 research catalogs require"):
         Settings(environment="test", engine_alpha_catalog_mode="shadow_full_catalog", engine_execution_modes="paper,shadow", _env_file=None)
-    with pytest.raises(ValueError, match="ENGINE_ALPHA_CATALOG_MODE=shadow_full_catalog requires"):
+    with pytest.raises(ValueError, match="Wave 2 research catalogs require"):
         Settings(environment="test", engine_alpha_catalog_mode="shadow_full_catalog", engine_shadow_enabled=False, _env_file=None)
 
 
@@ -215,6 +224,7 @@ def readiness_settings(**overrides) -> Settings:
         engine_readiness_require_latest_replay=True,
         engine_readiness_min_replay_window_hours=1,
         engine_readiness_min_replay_sample_size=2,
+        engine_readiness_min_matured_outcomes_per_active_strategy=1,
     )
     defaults.update(overrides)
     return Settings(**defaults)

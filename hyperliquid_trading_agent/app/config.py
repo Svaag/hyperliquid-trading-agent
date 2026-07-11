@@ -96,7 +96,7 @@ DEFAULT_AUTONOMY_EVENT_EVAL_HORIZONS = "15m,1h,4h,24h,72h"
 DEFAULT_AUTONOMY_MEMORY_PROMPT_ROLES = "analyst,quant,research,adversary,judge"
 AUTONOMY_ALLOWED_EVAL_HORIZONS = {"5m", "15m", "1h", "4h", "24h", "72h", "expiry"}
 AUTONOMY_WEEKDAYS = {"MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"}
-EngineAlphaCatalogMode = Literal["wave1a_locked", "wave1c", "shadow_full_catalog", "specs_only"]
+EngineAlphaCatalogMode = Literal["wave1a_locked", "wave1c", "wave2_early_shadow", "shadow_full_catalog", "specs_only"]
 
 
 class ServiceRole(StrEnum):
@@ -313,9 +313,9 @@ class Settings(BaseSettings):
     autonomy_require_human_signoff: bool = True
     autonomy_admin_user_ids: str = ""
     autonomy_admin_role_ids: str = ""
-    autonomy_core_universe: str = "BTC,ETH,HYPE"
+    autonomy_core_universe: str = "BTC,ETH,HYPE,SOL,ZEC,LIT,AAVE,XMR,AERO"
     autonomy_universe_top_n_perps: int = 20
-    autonomy_hip3_dexs: str = ""
+    autonomy_hip3_dexs: str = "xyz"
     autonomy_hip3_index_aliases: str = "SP500:SPX|SP500|SPY,NASDAQ100:NDX|NASDAQ|QQQ,NIKKEI225:NIKKEI|NKY,KOSPI:KOSPI"
     autonomy_loop_interval_seconds: int = 5
     autonomy_deep_scan_interval_seconds: int = 60
@@ -324,7 +324,7 @@ class Settings(BaseSettings):
     autonomy_candle_refresh_seconds: int = 60
     autonomy_news_refresh_seconds: int = 60
     autonomy_portfolio_snapshot_seconds: int = 60
-    autonomy_max_tracked_assets: int = 40
+    autonomy_max_tracked_assets: int = 100
     autonomy_max_hot_l2_assets: int = 5
     autonomy_max_signals_per_day: int = 10
     autonomy_signal_ttl_minutes: int = 30
@@ -356,10 +356,11 @@ class Settings(BaseSettings):
     engine_model_artifact_dir: str = "/var/lib/hyperliquid-trading-agent/models"
     engine_approved_scorer_model_id: str = ""
     engine_scorer_fallback_mode: Literal["deterministic"] = "deterministic"
-    engine_alpha_catalog_mode: EngineAlphaCatalogMode = "wave1a_locked"
-    engine_cross_venue_dexes: str = ""
-    engine_wave1c_enabled: bool = False
-    engine_wave2_enabled: bool = False
+    engine_alpha_catalog_mode: EngineAlphaCatalogMode = "wave2_early_shadow"
+    engine_cross_venue_dexes: str = "lighter,xyz,alpaca:paper"
+    engine_wave1c_enabled: bool = True
+    engine_wave2_enabled: bool = True
+    engine_evidence_epoch_id: str = ""
     engine_loop_interval_seconds: int = 60
     engine_shadow_enabled: bool = True
     engine_paper_enabled: bool = False
@@ -449,6 +450,8 @@ class Settings(BaseSettings):
     engine_readiness_require_latest_replay: bool = True
     engine_readiness_min_replay_window_hours: int = 24
     engine_readiness_min_replay_sample_size: int = 50
+    engine_readiness_concentration_min_samples: int = 50
+    engine_readiness_min_matured_outcomes_per_active_strategy: int = 20
     engine_pnl_attribution_interval_seconds: int = 300
     engine_strategy_throttles_enabled: bool = True
     engine_strategy_max_candidates_per_loop: int = 15
@@ -456,6 +459,11 @@ class Settings(BaseSettings):
     engine_strategy_max_allocation_share_pct: float = 55.0
     engine_strategy_throttle_lookback_hours: int = 24
     engine_strategy_throttle_cooldown_loops: int = 3
+    engine_shadow_evidence_admission_enabled: bool = True
+    engine_shadow_evidence_lookback_intents: int = 100
+    engine_shadow_evidence_strategy_share_pct: float = 45.0
+    engine_shadow_evidence_family_share_pct: float = 60.0
+    engine_shadow_evidence_symbol_strategy_share_pct: float = 35.0
     engine_pnl_attribution_enabled: bool = False
     engine_pnl_attribution_mark_source: str = "all_mids"
     engine_pnl_attribution_close_on_expired_horizon: bool = True
@@ -633,7 +641,26 @@ class Settings(BaseSettings):
     alpha_vantage_transport: Literal["auto", "mcp", "rest"] = "auto"
     alpha_vantage_timeout_seconds: float = 10.0
     alpaca_trading_enabled: bool = False  # gated like HYPERLIQUID_EXCHANGE_ENABLED
+    alpaca_paper_trading_enabled: bool = False
+    alpaca_live_trading_enabled: bool = False
+    alpaca_paper_api_key: str = ""
+    alpaca_paper_api_secret: str = ""
+    alpaca_paper_base_url: str = "https://paper-api.alpaca.markets"
+    alpaca_index_base_url: str = "https://data.alpaca.markets/v1beta1/indices"
     alpaca_data_feed: Literal["iex", "sip", "delayed_sip"] = "iex"  # IEX = free
+
+    # Canonical multi-venue market universe. Environment CSVs remain bootstrap
+    # fallbacks only; runtime membership is persisted and versioned.
+    market_universe_enabled: bool = True
+    market_universe_metadata_refresh_seconds: int = 900
+    market_universe_snapshot_refresh_seconds: int = 60
+    market_universe_deep_scan_capacity: int = 40
+    market_universe_pinned_rotation_seconds: int = 60
+    market_universe_max_cross_venue_clock_skew_ms: int = 15_000
+    lighter_enabled: bool = True
+    lighter_base_url: str = "https://mainnet.zklighter.elliot.ai"
+    lighter_read_only: bool = True
+    lighter_local_paper_enabled: bool = True
 
     # SEC EDGAR (public, keyless; set User-Agent contact for production)
     sec_edgar_user_agent: str = "hyperliquid-trading-agent/0.1 sec-edgar-contact@example.com"
@@ -694,6 +721,13 @@ class Settings(BaseSettings):
             raise ValueError("ALPACA_TRADING_ENABLED must remain false for the MVP")
         return value
 
+    @field_validator("alpaca_live_trading_enabled")
+    @classmethod
+    def live_alpaca_adapter_must_remain_disabled(cls, value: bool) -> bool:
+        if value:
+            raise ValueError("ALPACA_LIVE_TRADING_ENABLED must remain false; only Alpaca Paper is supported")
+        return value
+
     @field_validator("engine_live_enabled")
     @classmethod
     def engine_live_must_remain_disabled(cls, value: bool) -> bool:
@@ -706,13 +740,6 @@ class Settings(BaseSettings):
     def normalize_engine_alpha_catalog_mode(cls, value: object) -> object:
         if isinstance(value, str):
             return value.strip().lower()
-        return value
-
-    @field_validator("engine_wave2_enabled")
-    @classmethod
-    def engine_wave2_must_remain_deferred(cls, value: bool) -> bool:
-        if value:
-            raise ValueError("ENGINE_WAVE2_ENABLED must remain false until Wave 1 outcome attribution, replay, and readiness gates are reliable")
         return value
 
     @field_validator("hyperliquid_exchange_enabled")
@@ -850,7 +877,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def shadow_full_alpha_catalog_requires_shadow_only(self) -> "Settings":
-        if self.engine_alpha_catalog_mode == "shadow_full_catalog":
+        if self.engine_alpha_catalog_mode in {"shadow_full_catalog", "wave2_early_shadow"} or self.engine_wave2_enabled:
             execution_modes = [item.lower() for item in _csv(self.engine_execution_modes)]
             if (
                 not self.engine_shadow_enabled
@@ -859,9 +886,18 @@ class Settings(BaseSettings):
                 or execution_modes != ["shadow"]
             ):
                 raise ValueError(
-                    "ENGINE_ALPHA_CATALOG_MODE=shadow_full_catalog requires ENGINE_SHADOW_ENABLED=true, "
+                    "Wave 2 research catalogs require ENGINE_SHADOW_ENABLED=true, "
                     "ENGINE_PAPER_ENABLED=false, ENGINE_LIVE_ENABLED=false, and ENGINE_EXECUTION_MODES=shadow"
                 )
+            if self.engine_wave2_enabled and self.engine_alpha_catalog_mode not in {"shadow_full_catalog", "wave2_early_shadow"}:
+                raise ValueError("ENGINE_WAVE2_ENABLED requires ENGINE_ALPHA_CATALOG_MODE=wave2_early_shadow or shadow_full_catalog")
+        if self.alpaca_paper_trading_enabled:
+            if self.alpaca_paper_base_url.rstrip("/") != "https://paper-api.alpaca.markets":
+                raise ValueError("ALPACA_PAPER_BASE_URL must use https://paper-api.alpaca.markets")
+            if not self.alpaca_paper_api_key or not self.alpaca_paper_api_secret:
+                raise ValueError("ALPACA_PAPER_TRADING_ENABLED requires separate ALPACA_PAPER_API_KEY and ALPACA_PAPER_API_SECRET")
+        if self.lighter_enabled and not self.lighter_read_only:
+            raise ValueError("LIGHTER_READ_ONLY must remain true; signing and exchange mutations are out of scope")
         return self
 
     @property

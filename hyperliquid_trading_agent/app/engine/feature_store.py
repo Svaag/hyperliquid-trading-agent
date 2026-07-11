@@ -56,10 +56,19 @@ class FeatureStore:
         self._series: dict[tuple[str, str], list[tuple[int, float, str]]] = {}
         self._latest: dict[str, dict[str, FeatureValue]] = {}
         self._recent: dict[str, deque[FeatureValue]] = {}
+        self._identity_by_asset: dict[str, dict[str, str]] = {}
         self._recent_buffer_size = max(32, int(recent_buffer_size))
 
     async def record(self, feature: FeatureValue) -> FeatureValue:
         asset = feature.asset
+        if feature.metadata.get("instrument_identity_explicit"):
+            self._identity_by_asset[asset] = {
+                "instrument_id": feature.instrument_id,
+                "underlying_id": feature.underlying_id,
+                "venue_id": feature.venue_id,
+                "provider_symbol": feature.provider_symbol,
+                "asset_class": str(feature.metadata.get("asset_class") or "unknown"),
+            }
         by_name = self._latest.setdefault(asset, {})
         current = by_name.get(feature.feature_name)
         if current is None or feature.computed_ts_ms >= current.computed_ts_ms:
@@ -99,7 +108,26 @@ class FeatureStore:
         tails = [points[-1][_POINT_TS] for name in ROLLUP_SOURCE_FEATURES if (points := self._series.get((asset, name)))]
         cutoff = as_of_ms or (max(tails) if tails else now_ms())
         series = {name: self._series_slice(asset, name, as_of_ms=cutoff) for name in ROLLUP_SOURCE_FEATURES}
-        return _compute_rollups(asset=asset, series=series, cutoff_ms=cutoff)
+        rollups = _compute_rollups(asset=asset, series=series, cutoff_ms=cutoff)
+        identity = self._identity_by_asset.get(asset)
+        if identity:
+            rollups = [
+                item.model_copy(
+                    update={
+                        "instrument_id": identity["instrument_id"],
+                        "underlying_id": identity["underlying_id"],
+                        "venue_id": identity["venue_id"],
+                        "provider_symbol": identity["provider_symbol"],
+                        "metadata": {
+                            **item.metadata,
+                            "asset_class": identity["asset_class"],
+                            "instrument_identity_explicit": True,
+                        },
+                    }
+                )
+                for item in rollups
+            ]
+        return rollups
 
     async def features_for_event(self, event: NormalizedEvent) -> list[FeatureValue]:
         features = derive_features(event, cross_venue_dexes=self.cross_venue_dexes)
@@ -157,9 +185,14 @@ class FeatureStore:
             item.feature_name: max(0, int(cutoff) - int(item.computed_ts_ms)) for item in selected
         }
         snapshot_id = "fs_" + hashlib.sha1(f"{asset}:{cutoff}:{sorted(features.items())}".encode()).hexdigest()[:24]
+        identity = self._identity_by_asset.get(asset) or {}
         return FeatureSnapshot(
             snapshot_id=snapshot_id,
             asset=asset,
+            instrument_id=str(identity.get("instrument_id") or ""),
+            underlying_id=str(identity.get("underlying_id") or ""),
+            venue_id=str(identity.get("venue_id") or "hyperliquid:main"),
+            provider_symbol=str(identity.get("provider_symbol") or ""),
             as_of_ms=cutoff,
             feature_ids=[item.feature_id for item in selected],
             features=features,
@@ -170,6 +203,7 @@ class FeatureStore:
                 "feature_quality_scores": {
                     item.feature_name: float(item.quality_score) for item in selected
                 },
+                "asset_class": str(identity.get("asset_class") or "crypto"),
             },
         )
 
@@ -187,6 +221,8 @@ def derive_features(event: NormalizedEvent, *, cross_venue_dexes: list[str] | No
         return _liquidation_features(event)
     if event.event_type in {"cross_venue", "cross_venue_market", "cross_venue_features"}:
         return _cross_venue_features(event, enabled_dexes=cross_venue_dexes or [])
+    if event.event_type == "venue_market_snapshot":
+        return _venue_market_snapshot_features(event)
     return []
 
 
@@ -241,9 +277,15 @@ def _feature(
 ) -> FeatureValue:
     computed = now_ms()
     fid = "feat_" + hashlib.sha1(f"{event.event_id}:{asset}:{group}:{name}".encode()).hexdigest()[:24]
+    identity = event.metadata.get("instrument_identity")
+    identity = identity if isinstance(identity, dict) else {}
     return FeatureValue(
         feature_id=fid,
         asset=asset,
+        instrument_id=str(identity.get("instrument_id") or ""),
+        underlying_id=str(identity.get("underlying_id") or ""),
+        venue_id=str(identity.get("venue_id") or "hyperliquid:main"),
+        provider_symbol=str(identity.get("provider_symbol") or ""),
         feature_group=group,
         feature_name=name,
         value=value,
@@ -256,7 +298,11 @@ def _feature(
         version=FEATURE_VERSION,
         quality_score=quality if quality is not None else event.quality_score,
         staleness_ms=event.staleness_ms,
-        metadata={**dict(event.metadata or {}), **(metadata or {})},
+        metadata={
+            **dict(event.metadata or {}),
+            **({"instrument_identity_explicit": True} if identity else {}),
+            **(metadata or {}),
+        },
     )
 
 
@@ -568,6 +614,129 @@ def _funding_oi_features(event: NormalizedEvent) -> list[FeatureValue]:
     return out
 
 
+def _venue_market_snapshot_features(event: NormalizedEvent) -> list[FeatureValue]:
+    """Translate a canonical provider snapshot into replayable engine features."""
+
+    payload = event.payload or {}
+    symbol = (
+        event.symbols[0]
+        if event.symbols
+        else str(payload.get("display_symbol") or payload.get("provider_symbol") or "").split(":", 1)[-1]
+    ).upper()
+    if not symbol:
+        return []
+    out: list[FeatureValue] = []
+    mid = _first_float(payload, "mid_px", "mark_px", "last_trade_px")
+    mark = _first_float(payload, "mark_px", "mid_px")
+    index = _first_float(payload, "index_px")
+    funding = _first_float(payload, "funding_rate")
+    open_interest = _first_float(payload, "open_interest")
+    volume = _first_float(payload, "volume_24h")
+    bid = _first_float(payload, "bid_px")
+    ask = _first_float(payload, "ask_px")
+    if mid is not None and mid > 0:
+        out.append(
+            _feature(event, asset=symbol, group="price", name="mid", value={"mid": mid}, scalar=mid)
+        )
+    if funding is not None:
+        out.append(
+            _feature(
+                event,
+                asset=symbol,
+                group="funding_oi",
+                name="funding_hourly",
+                value={"funding_hourly": funding},
+                scalar=funding,
+            )
+        )
+    if open_interest is not None:
+        out.append(
+            _feature(
+                event,
+                asset=symbol,
+                group="funding_oi",
+                name="open_interest",
+                value={"open_interest": open_interest},
+                scalar=open_interest,
+            )
+        )
+    if volume is not None:
+        out.append(
+            _feature(
+                event,
+                asset=symbol,
+                group="funding_oi",
+                name="day_volume_usd",
+                value={"day_volume_usd": volume},
+                scalar=volume,
+            )
+        )
+    if mark is not None and index is not None and mark > 0 and index > 0:
+        basis = (mark / index - 1.0) * 10_000.0
+        out.append(
+            _feature(
+                event,
+                asset=symbol,
+                group="funding_oi",
+                name="perp_basis_bps",
+                value={"perp_basis_bps": basis},
+                scalar=basis,
+            )
+        )
+    if bid is not None and ask is not None and bid > 0 and ask >= bid:
+        quote_mid = (bid + ask) / 2.0
+        spread = (ask - bid) / quote_mid * 10_000.0 if quote_mid > 0 else 0.0
+        out.append(
+            _feature(
+                event,
+                asset=symbol,
+                group="microstructure",
+                name="spread_bps",
+                value={"spread_bps": spread},
+                scalar=spread,
+            )
+        )
+    depth = payload.get("depth_bands") if isinstance(payload.get("depth_bands"), dict) else {}
+    bids = depth.get("bids") if isinstance(depth.get("bids"), list) else []
+    asks = depth.get("asks") if isinstance(depth.get("asks"), list) else []
+    bid_px, bid_size = _canonical_level_px_size(bids[0]) if bids else (None, None)
+    ask_px, ask_size = _canonical_level_px_size(asks[0]) if asks else (None, None)
+    if bid_px and ask_px and bid_size is not None and ask_size is not None:
+        top_depth = bid_px * bid_size + ask_px * ask_size
+        imbalance = (bid_size - ask_size) / max(bid_size + ask_size, 1e-9)
+        out.extend(
+            [
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="microstructure",
+                    name="top_depth_usd",
+                    value={"top_depth_usd": top_depth},
+                    scalar=top_depth,
+                ),
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="microstructure",
+                    name="top_imbalance",
+                    value={"top_imbalance": imbalance},
+                    scalar=imbalance,
+                ),
+            ]
+        )
+    return out
+
+
+def _canonical_level_px_size(level: Any) -> tuple[float | None, float | None]:
+    if isinstance(level, dict):
+        return _first_float(level, "px", "price"), _first_float(
+            level, "size", "sz", "remaining_base_amount"
+        )
+    if isinstance(level, (list, tuple)) and len(level) >= 2:
+        return _float(level[0]), _float(level[1])
+    return None, None
+
+
 def _perp_basis_bps(ctx: dict[str, Any]) -> float | None:
     direct = _first_float(ctx, "perp_basis_bps", "perpBasisBps", "basis_bps", "basisBps")
     if direct is not None:
@@ -642,7 +811,8 @@ def _liquidation_features(event: NormalizedEvent) -> list[FeatureValue]:
 
 
 def _cross_venue_features(event: NormalizedEvent, *, enabled_dexes: list[str]) -> list[FeatureValue]:
-    if not enabled_dexes:
+    pairwise = bool(event.payload.get("pairwise_not_averaged") or event.payload.get("reference_venue_id"))
+    if not enabled_dexes and not pairwise:
         return []
     symbol = (event.symbols[0] if event.symbols else str(event.payload.get("symbol") or event.payload.get("coin") or "")).upper()
     if not symbol:
@@ -650,6 +820,32 @@ def _cross_venue_features(event: NormalizedEvent, *, enabled_dexes: list[str]) -
     payload = event.payload or {}
     venues = payload.get("venues") if isinstance(payload.get("venues"), dict) else {}
     enabled = {dex.lower() for dex in enabled_dexes}
+    if pairwise:
+        direct_delta = _first_float(payload, "cross_venue_mid_delta_bps", "price_delta_bps")
+        direct_volume = _first_float(payload, "cross_venue_volume_imbalance", "volume_imbalance")
+        direct_liq = _first_float(payload, "cross_venue_liq_imbalance", "liquidation_divergence")
+        metadata = {
+            "enabled_cross_venue_dexes": sorted(enabled),
+            "read_only": True,
+            "advisory_only": True,
+            "pairwise_not_averaged": True,
+            "reference_instrument_id": payload.get("reference_instrument_id"),
+            "comparison_instrument_id": payload.get("comparison_instrument_id"),
+            "reference_venue_id": payload.get("reference_venue_id"),
+            "comparison_venue_id": payload.get("comparison_venue_id"),
+            "max_clock_skew_ms": payload.get("max_clock_skew_ms"),
+            "quality_flags": payload.get("quality_flags") or [],
+        }
+        if {"clock_skew_exceeded", "stale_provider_quote"} & set(metadata["quality_flags"]):
+            return []
+        out: list[FeatureValue] = []
+        if direct_delta is not None:
+            out.append(_feature(event, asset=symbol, group="cross_venue", name="cross_venue_mid_delta_bps", value={"delta_bps": direct_delta}, scalar=direct_delta, metadata=metadata))
+        if direct_volume is not None:
+            out.append(_feature(event, asset=symbol, group="cross_venue", name="cross_venue_volume_imbalance", value={"imbalance": direct_volume}, scalar=direct_volume, metadata=metadata))
+        if direct_liq is not None:
+            out.append(_feature(event, asset=symbol, group="cross_venue", name="cross_venue_liq_imbalance", value={"cross_venue_liq_imbalance": direct_liq}, scalar=direct_liq, metadata=metadata))
+        return out
     home_mid = _first_float(payload, "hyperliquid_mid", "hl_mid", "mid") or _venue_float(venues, "hyperliquid", "mid", "mark", "mark_px")
     external_mids = [_venue_float(venues, venue, "mid", "mark", "mark_px") for venue in enabled]
     external_mids.extend(_first_float(payload, f"{venue}_mid", f"{venue}_mark") for venue in enabled)
