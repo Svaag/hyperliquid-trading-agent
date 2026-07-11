@@ -197,6 +197,7 @@ def _backfill_legacy_instrument_identity() -> None:
         sa.column("last_observed_at_ms", sa.BigInteger),
         sa.column("metadata_json", sa.JSON),
     )
+    identities: list[dict[str, str]] = []
     for asset in sorted(assets):
         provider_symbol = asset
         venue_id = "hyperliquid:main"
@@ -225,13 +226,35 @@ def _backfill_legacy_instrument_identity() -> None:
                 metadata_json={"migration": revision},
             )
         )
-        values = {
-            "asset": asset,
-            "instrument_id": instrument_id,
-            "underlying_id": underlying_id,
-            "venue_id": venue_id,
-            "provider_symbol": provider_symbol,
-        }
+        identities.append(
+            {
+                "asset": asset,
+                "instrument_id": instrument_id,
+                "underlying_id": underlying_id,
+                "venue_id": venue_id,
+                "provider_symbol": provider_symbol,
+            }
+        )
+
+    # Backfill each evidence table in one set-based pass. The previous per-asset
+    # UPDATE loop forced a full scan of large evidence tables for every symbol.
+    if identities:
+        bind.execute(
+            sa.text(
+                "CREATE TEMPORARY TABLE legacy_instrument_identity_map ("
+                "asset VARCHAR(128) PRIMARY KEY, instrument_id VARCHAR(64) NOT NULL, "
+                "underlying_id VARCHAR(128) NOT NULL, venue_id VARCHAR(96) NOT NULL, "
+                "provider_symbol VARCHAR(128) NOT NULL)"
+            )
+        )
+        bind.execute(
+            sa.text(
+                "INSERT INTO legacy_instrument_identity_map "
+                "(asset, instrument_id, underlying_id, venue_id, provider_symbol) "
+                "VALUES (:asset, :instrument_id, :underlying_id, :venue_id, :provider_symbol)"
+            ),
+            identities,
+        )
         for table_name in (
             "feature_values",
             "engine_strategy_evaluations",
@@ -240,19 +263,24 @@ def _backfill_legacy_instrument_identity() -> None:
         ):
             bind.execute(
                 sa.text(
-                    f"UPDATE {table_name} SET instrument_id=:instrument_id, underlying_id=:underlying_id, "
-                    "venue_id=:venue_id, provider_symbol=:provider_symbol WHERE UPPER(asset)=:asset"
-                ),
-                values,
+                    f"UPDATE {table_name} SET "
+                    "instrument_id=identity.instrument_id, underlying_id=identity.underlying_id, "
+                    "venue_id=identity.venue_id, provider_symbol=identity.provider_symbol "
+                    "FROM legacy_instrument_identity_map AS identity "
+                    f"WHERE UPPER({table_name}.asset)=identity.asset"
+                )
             )
         for table_name in ("candidate_evidence_links", "candidate_outcome_attributions"):
             bind.execute(
                 sa.text(
-                    f"UPDATE {table_name} SET instrument_id=:instrument_id, underlying_id=:underlying_id, "
-                    "venue_id=:venue_id WHERE UPPER(asset)=:asset"
-                ),
-                values,
+                    f"UPDATE {table_name} SET "
+                    "instrument_id=identity.instrument_id, underlying_id=identity.underlying_id, "
+                    "venue_id=identity.venue_id "
+                    "FROM legacy_instrument_identity_map AS identity "
+                    f"WHERE UPPER({table_name}.asset)=identity.asset"
+                )
             )
+        bind.execute(sa.text("DROP TABLE legacy_instrument_identity_map"))
     bind.execute(
         sa.text(
             "UPDATE alpha_candidates SET evidence_epoch_id='pre_0030' "
