@@ -22,6 +22,10 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _severity_rank(severity: str) -> int:
+    return {"info": 0, "warning": 1, "critical": 2}.get(str(severity).lower(), 1)
+
+
 class EngineValidationMonitorService:
     """Trader-owned watchdog and digest producer for the shadow engine."""
 
@@ -45,6 +49,7 @@ class EngineValidationMonitorService:
         self.digest_count = 0
         self.alert_count = 0
         self.last_alerts: list[dict[str, Any]] = []
+        self._active_watchdog_alerts: dict[str, dict[str, Any]] = {}
 
     def status(self) -> dict[str, Any]:
         return {
@@ -59,6 +64,7 @@ class EngineValidationMonitorService:
             "digest_count": self.digest_count,
             "alert_count": self.alert_count,
             "last_alerts": self.last_alerts,
+            "active_watchdog_alert_types": sorted(self._active_watchdog_alerts),
         }
 
     async def start(self) -> None:
@@ -171,18 +177,31 @@ class EngineValidationMonitorService:
 
     async def _send_watchdog_alerts(self, alerts: list[dict[str, Any]]) -> None:
         now = _now_ms()
-        bucket_seconds = max(300, self.settings.engine_validation_alert_stale_loop_seconds)
-        bucket = now // (bucket_seconds * 1000)
+        selected: dict[str, dict[str, Any]] = {}
         for alert in alerts:
             alert_type = str(alert.get("type") or "unknown")
             severity = str(alert.get("severity") or "warning")
-            ENGINE_VALIDATION_ALERTS.labels(alert_type=alert_type).inc()
-            await self._send(
-                f"{'🚨' if severity == 'critical' else '⚠️'} **Engine validation alert** `{alert_type}`\n{alert.get('detail')}",
-                category="engine_validation_alert",
-                dedupe_key=f"engine-validation-alert:{alert_type}:{bucket}",
-                severity=severity,
-            )
+            existing = selected.get(alert_type)
+            if existing is None or _severity_rank(severity) > _severity_rank(str(existing.get("severity") or "warning")):
+                selected[alert_type] = {**alert, "severity": severity}
+        current: dict[str, dict[str, Any]] = {}
+        for alert_type, alert in selected.items():
+            severity = str(alert.get("severity") or "warning")
+            previous = self._active_watchdog_alerts.get(alert_type)
+            started_at_ms = int((previous or {}).get("started_at_ms") or now)
+            current_alert = {**alert, "severity": severity, "started_at_ms": started_at_ms}
+            current[alert_type] = current_alert
+            is_new = previous is None
+            escalated = previous is not None and _severity_rank(severity) > _severity_rank(str(previous.get("severity") or "warning"))
+            if is_new or escalated:
+                ENGINE_VALIDATION_ALERTS.labels(alert_type=alert_type).inc()
+                await self._send(
+                    f"{'🚨' if severity == 'critical' else '⚠️'} **Engine validation alert** `{alert_type}`\n{alert.get('detail')}",
+                    category="engine_validation_alert",
+                    dedupe_key=f"engine-validation-alert:{alert_type}:{started_at_ms}:{severity}",
+                    severity=severity,
+                )
+        self._active_watchdog_alerts = current
 
     async def _detect_alerts(self, report: dict[str, Any]) -> list[dict[str, Any]]:
         alerts: list[dict[str, Any]] = []
@@ -239,13 +258,24 @@ class EngineValidationMonitorService:
         if self.settings.engine_live_enabled:
             alerts.append({"type": "live_engine_enabled", "severity": "critical", "detail": "ENGINE_LIVE_ENABLED=true"})
 
-        recent_rejects = await self._recent_risk_rejects(now)
-        if len(recent_rejects) >= self.settings.engine_validation_risk_reject_spike_count:
+        recent_decisions = await self._recent_risk_decisions(now)
+        recent_rejects = [item for item in recent_decisions if item.get("decision") == "reject"]
+        decision_count = len(recent_decisions)
+        reject_count = len(recent_rejects)
+        reject_rate_pct = round(reject_count / decision_count * 100, 2) if decision_count else 0.0
+        if (
+            decision_count >= self.settings.engine_validation_risk_reject_min_decisions
+            and reject_count >= self.settings.engine_validation_risk_reject_spike_count
+            and reject_rate_pct >= self.settings.engine_validation_risk_reject_spike_rate_pct
+        ):
             alerts.append(
                 {
                     "type": "risk_rejects_spike",
                     "severity": "warning",
-                    "detail": f"{len(recent_rejects)} rejects in the last digest window",
+                    "detail": (
+                        f"rejects={reject_count}/{decision_count} ({reject_rate_pct:.2f}%) "
+                        f"window_seconds={self.settings.engine_validation_risk_reject_window_seconds}"
+                    ),
                 }
             )
 
@@ -296,9 +326,9 @@ class EngineValidationMonitorService:
             latest_source_at_ms=int(stories[0].get("last_updated_at_ms") or 0) if stories else None,
         )
 
-    async def _recent_risk_rejects(self, now_ms: int) -> list[dict[str, Any]]:
-        window_ms = max(60, self.settings.engine_validation_digest_interval_seconds) * 1000
-        items = await self.repository.list_risk_gateway_decisions(limit=500, decision="reject")
+    async def _recent_risk_decisions(self, now_ms: int) -> list[dict[str, Any]]:
+        window_ms = max(60, self.settings.engine_validation_risk_reject_window_seconds) * 1000
+        items = await self.repository.list_risk_gateway_decisions(limit=500)
         return [item for item in items if int(item.get("created_at_ms") or 0) >= now_ms - window_ms]
 
     async def _missing_data(self, now_ms: int) -> list[str]:

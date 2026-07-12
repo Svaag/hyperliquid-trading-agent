@@ -28,6 +28,10 @@ class FakeEngineService:
 class FakeMonitorRepository:
     def __init__(self):
         self.now = int(time.time() * 1000)
+        self.risk_decisions = [
+            {"decision_id": f"risk_{idx}", "decision": "reject", "violations": ["stale_market_data"], "created_at_ms": self.now}
+            for idx in range(6)
+        ]
 
     async def list_alpha_candidates(self, **kwargs):
         return [
@@ -62,10 +66,10 @@ class FakeMonitorRepository:
         return []
 
     async def list_risk_gateway_decisions(self, **kwargs):
-        return [
-            {"decision_id": f"risk_{idx}", "decision": "reject", "violations": ["stale_market_data"], "created_at_ms": self.now}
-            for idx in range(6)
-        ]
+        items = self.risk_decisions
+        if kwargs.get("decision"):
+            items = [item for item in items if item.get("decision") == kwargs["decision"]]
+        return items[: int(kwargs.get("limit") or 100)]
 
     async def list_pnl_attribution(self, **kwargs):
         return []
@@ -120,6 +124,8 @@ def test_engine_validation_monitor_detects_bad_shadow_conditions_and_posts_diges
         autonomy_core_universe="BTC,ETH",
         autonomy_alert_channel_id="alerts",
         engine_validation_risk_reject_spike_count=5,
+        engine_validation_risk_reject_spike_rate_pct=50,
+        engine_validation_risk_reject_min_decisions=1,
         engine_validation_missing_data_seconds=300,
     )
     repo = FakeMonitorRepository()
@@ -143,6 +149,66 @@ def test_engine_validation_monitor_detects_bad_shadow_conditions_and_posts_diges
     assert "missing_feature_or_regime_data" in alert_types
     assert sink.messages
     assert service.status()["digest_count"] == 1
+
+
+def test_engine_validation_monitor_does_not_alert_on_low_reject_rate_with_high_absolute_volume():
+    settings = Settings(
+        _env_file=None,
+        engine_enabled=True,
+        engine_paper_enabled=False,
+        engine_shadow_enabled=True,
+        engine_execution_modes="shadow",
+        autonomy_core_universe="BTC",
+        engine_validation_risk_reject_spike_count=20,
+        engine_validation_risk_reject_spike_rate_pct=20,
+        engine_validation_risk_reject_min_decisions=50,
+    )
+    repo = FakeMonitorRepository()
+    repo.risk_decisions = [
+        {
+            "decision_id": f"risk_{idx}",
+            "decision": "reject" if idx < 30 else "allow",
+            "violations": ["edge_below_minimum"] if idx < 30 else [],
+            "created_at_ms": repo.now,
+        }
+        for idx in range(500)
+    ]
+    service = EngineValidationMonitorService(
+        settings=settings,
+        repository=repo,
+        engine_service=FakeEngineService({"run_count": 1, "last_error": None, "last_run_at_ms": repo.now}),
+        alert_sink=FakeSink(),
+    )
+
+    async def run():
+        return await service.run_once(post=False)
+
+    result = anyio.run(run)
+    assert "risk_rejects_spike" not in {item["type"] for item in result["alerts"]}
+
+
+def test_engine_validation_watchdog_posts_only_on_incident_open_or_escalation():
+    settings = Settings(
+        _env_file=None,
+        engine_enabled=True,
+        autonomy_alert_channel_id="alerts",
+    )
+    repo = OutboxMonitorRepository()
+    service = EngineValidationMonitorService(settings=settings, repository=repo, alert_sink=None)
+    warning = {"type": "risk_rejects_spike", "severity": "warning", "detail": "rejects=25/100 (25.00%)"}
+    critical = {"type": "risk_rejects_spike", "severity": "critical", "detail": "rejects=90/100 (90.00%)"}
+
+    async def run():
+        await service._send_watchdog_alerts([warning])
+        await service._send_watchdog_alerts([warning])
+        await service._send_watchdog_alerts([critical])
+        return service.status()
+
+    status = anyio.run(run)
+    assert len(repo.notifications) == 2
+    assert status["active_watchdog_alert_types"] == ["risk_rejects_spike"]
+    assert repo.notifications[0]["severity"] == "warning"
+    assert repo.notifications[1]["severity"] == "critical"
 
 def test_engine_validation_monitor_alerts_on_loop_duration_overrun():
     settings = Settings(

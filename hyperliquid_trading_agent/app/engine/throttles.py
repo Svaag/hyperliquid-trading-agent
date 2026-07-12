@@ -16,6 +16,9 @@ class StrategyThrottleController:
         self.strategy_reason_counts: Counter[str] = Counter()
         self.last_recent_share_pct: dict[str, float] = {}
         self.last_decision_at_ms: int | None = None
+        self._recent_allocation_cache_at_ms: int | None = None
+        self._recent_allocation_counts: Counter[str] = Counter()
+        self._recent_allocation_total = 0
 
     def status(self) -> dict[str, Any]:
         return {
@@ -128,20 +131,24 @@ class StrategyThrottleController:
     async def _recent_allocation_share(self, repository: Any, strategy_id: str, *, now_ms: int) -> dict[str, Any]:
         if repository is None or not getattr(repository, "enabled", False):
             return {"share_pct": 0.0, "strategy_count": 0, "total_count": 0}
-        lookback_ms = max(1, self.settings.engine_strategy_throttle_lookback_hours) * 60 * 60 * 1000
-        start_ms = now_ms - lookback_ms
-        allocations = await repository.list_allocation_decisions(limit=5000)
-        counts: Counter[str] = Counter()
-        for allocation in allocations:
-            if int(allocation.get("created_at_ms") or 0) < start_ms:
-                continue
-            if allocation.get("status") not in {"allocate", "reduce", "require_debate"}:
-                continue
-            strategy = _allocation_strategy(allocation)
-            if strategy:
-                counts[strategy] += 1
-        total = sum(counts.values())
-        strategy_count = counts[strategy_id]
+        if self._recent_allocation_cache_at_ms != now_ms:
+            lookback_ms = max(1, self.settings.engine_strategy_throttle_lookback_hours) * 60 * 60 * 1000
+            start_ms = now_ms - lookback_ms
+            allocations = await repository.list_allocation_decisions(limit=5000)
+            counts: Counter[str] = Counter()
+            for allocation in allocations:
+                if int(allocation.get("created_at_ms") or 0) < start_ms:
+                    continue
+                if allocation.get("status") not in {"allocate", "reduce", "require_debate"}:
+                    continue
+                strategy = _allocation_strategy(allocation)
+                if strategy:
+                    counts[strategy] += 1
+            self._recent_allocation_cache_at_ms = now_ms
+            self._recent_allocation_counts = counts
+            self._recent_allocation_total = sum(counts.values())
+        total = self._recent_allocation_total
+        strategy_count = self._recent_allocation_counts[strategy_id]
         share = round(strategy_count / total * 100, 4) if total else 0.0
         return {"share_pct": share, "strategy_count": strategy_count, "total_count": total}
 

@@ -12,8 +12,10 @@ class FakeAllocationRepo:
 
     def __init__(self, allocations: list[dict]):
         self.allocations = allocations
+        self.list_calls = 0
 
     async def list_allocation_decisions(self, limit: int = 1000):
+        self.list_calls += 1
         return self.allocations[:limit]
 
 
@@ -130,3 +132,36 @@ async def test_strategy_throttle_reports_recent_dominance_but_allows_shadow_obse
     assert reasons == []
     assert metadata["throttle_reason"] == "recent_allocation_share_report_only"
     assert metadata["shadow_observation_report_only"] is True
+
+
+@pytest.mark.asyncio
+async def test_strategy_throttle_reuses_recent_allocation_snapshot_within_loop() -> None:
+    now_ms = 10 * 60 * 60 * 1000
+    settings = Settings(
+        environment="test",
+        engine_shadow_enabled=True,
+        engine_paper_enabled=False,
+        engine_strategy_throttle_lookback_hours=24,
+    )
+    repo = FakeAllocationRepo(
+        [
+            _allocation("support_resistance_reversion_v2", now_ms - 1_000),
+            _allocation("microstructure_ofi_v2", now_ms - 2_000),
+        ]
+    )
+    throttles = StrategyThrottleController(settings)
+
+    await throttles.allow_allocation(
+        _candidate("support_resistance_reversion_v2"),
+        current_loop_allocations=[],
+        repository=repo,
+        timestamp_ms=now_ms,
+    )
+    await throttles.allow_allocation(
+        _candidate("microstructure_ofi_v2"),
+        current_loop_allocations=[],
+        repository=repo,
+        timestamp_ms=now_ms,
+    )
+
+    assert repo.list_calls == 1
