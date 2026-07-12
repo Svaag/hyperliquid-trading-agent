@@ -1,0 +1,388 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "Engine Alert Spam Incident",
+    "description": "Diagnosis, remediation, and post-deployment verification for the July 11–12 engine validation alert incident.",
+    "generatedAt": "2026-07-12T09:50:00Z",
+    "cards": [
+      {
+        "id": "latency_before",
+        "description": "Last observed loop before the performance fix.",
+        "dataset": "latency_comparison",
+        "sourceId": "src_runtime",
+        "filter": {"phase": "Before fix"},
+        "metrics": [
+          {"label": "Before fix, seconds", "field": "total_seconds", "format": "number"},
+          {"label": "Candidate pipeline", "field": "candidate_pipeline_seconds", "format": "number"}
+        ]
+      },
+      {
+        "id": "latency_post_1",
+        "description": "First complete loop after deploying the allocation-history cache.",
+        "dataset": "latency_comparison",
+        "sourceId": "src_runtime",
+        "filter": {"phase": "Post-fix loop 1"},
+        "metrics": [
+          {"label": "Post-fix loop 1, seconds", "field": "total_seconds", "format": "number"},
+          {"label": "Candidate pipeline", "field": "candidate_pipeline_seconds", "format": "number"}
+        ]
+      },
+      {
+        "id": "latency_post_2",
+        "description": "Second complete loop after deploying the allocation-history cache.",
+        "dataset": "latency_comparison",
+        "sourceId": "src_runtime",
+        "filter": {"phase": "Post-fix loop 2"},
+        "metrics": [
+          {"label": "Post-fix loop 2, seconds", "field": "total_seconds", "format": "number"},
+          {"label": "Candidate pipeline", "field": "candidate_pipeline_seconds", "format": "number"}
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "reject_rate_hourly",
+        "title": "Hourly RiskGateway reject rate",
+        "subtitle": "Rolling deployment evidence, July 11–12; last hour is partial",
+        "intent": "trend",
+        "question": "Was the absolute reject count a genuine rate spike?",
+        "rationale": "An hourly line preserves the numerator and denominator context across enough periods to distinguish volume from degradation.",
+        "comparisonContext": {
+          "denominator": "All RiskGateway decisions in each hour",
+          "grain": "Hour",
+          "unit": "%"
+        },
+        "type": "line",
+        "dataset": "hourly_reject_rates",
+        "sourceId": "src_risk_db",
+        "encodings": {
+          "x": {"field": "hour", "type": "temporal", "label": "Local time"},
+          "y": {"field": "reject_pct", "type": "quantitative", "label": "Reject rate", "unit": "%"},
+          "tooltip": [
+            {"field": "hour_label", "type": "text", "label": "Hour"},
+            {"field": "rejects", "type": "quantitative", "label": "Rejects"},
+            {"field": "decisions", "type": "quantitative", "label": "Decisions"},
+            {"field": "reject_pct", "type": "quantitative", "label": "Reject rate", "unit": "%"}
+          ]
+        },
+        "xAxisTitle": "Europe/Amsterdam time",
+        "yAxisTitle": "Reject rate (%)",
+        "valueFormat": "number",
+        "unit": "%",
+        "layout": "half",
+        "referenceLines": [
+          {"axis": "y", "value": 20, "label": "New alert threshold", "color": "neutral", "lineStyle": "dashed"}
+        ],
+        "surface": {"surface": "card", "viewMode": "visualization", "showControls": false}
+      },
+      {
+        "id": "discord_alert_cadence",
+        "title": "Repeated reject-alert count",
+        "subtitle": "Twelve notifications arrived at five-minute intervals on July 11",
+        "intent": "trend",
+        "question": "Was Discord receiving distinct incidents or repeated copies of one condition?",
+        "rationale": "The ordered alert series makes the fixed five-minute cadence and slowly changing detail explicit.",
+        "comparisonContext": {
+          "denominator": "Rejects in the configured six-hour digest window",
+          "grain": "Discord notification",
+          "unit": "rejects"
+        },
+        "type": "line",
+        "dataset": "discord_alerts",
+        "sourceId": "src_discord_excerpt",
+        "encodings": {
+          "x": {"field": "timestamp", "type": "temporal", "label": "Notification time"},
+          "y": {"field": "reject_count", "type": "quantitative", "label": "Reported rejects"},
+          "tooltip": [
+            {"field": "time_label", "type": "text", "label": "Time"},
+            {"field": "reject_count", "type": "quantitative", "label": "Reported rejects"}
+          ]
+        },
+        "xAxisTitle": "Europe/Amsterdam time",
+        "yAxisTitle": "Reported rejects",
+        "valueFormat": "number",
+        "layout": "full",
+        "surface": {"surface": "card", "viewMode": "visualization", "showControls": false}
+      },
+      {
+        "id": "loop_latency_comparison",
+        "title": "Engine loop duration before and after the fix",
+        "subtitle": "Complete observed loops; 60-second loop interval shown as the reference",
+        "intent": "comparison",
+        "question": "Did the allocation-history cache restore the engine loop budget?",
+        "rationale": "A horizontal bar comparison makes the three discrete observed durations and the 60-second operating threshold directly comparable.",
+        "comparisonContext": {
+          "baseline": "60-second configured loop interval",
+          "grain": "Complete engine loop",
+          "unit": "seconds"
+        },
+        "type": "horizontalBar",
+        "dataset": "latency_comparison",
+        "sourceId": "src_runtime",
+        "encodings": {
+          "x": {"field": "phase", "type": "nominal", "label": "Observed loop"},
+          "y": {"field": "total_seconds", "type": "quantitative", "label": "Total loop duration", "unit": "seconds"},
+          "tooltip": [
+            {"field": "phase", "type": "text", "label": "Observed loop"},
+            {"field": "total_seconds", "type": "quantitative", "label": "Total duration", "unit": "seconds"},
+            {"field": "candidate_pipeline_seconds", "type": "quantitative", "label": "Candidate pipeline", "unit": "seconds"},
+            {"field": "candidate_count", "type": "quantitative", "label": "Candidates"}
+          ]
+        },
+        "xAxisTitle": "Observed loop",
+        "yAxisTitle": "Total loop duration (seconds)",
+        "valueFormat": "number",
+        "unit": "seconds",
+        "layout": "half",
+        "referenceLines": [
+          {"axis": "y", "value": 60, "label": "Loop interval", "color": "neutral", "lineStyle": "dashed"}
+        ],
+        "surface": {"surface": "card", "viewMode": "visualization", "showControls": false}
+      }
+    ],
+    "tables": [
+      {
+        "id": "reject_reasons",
+        "title": "Recent reject reasons",
+        "subtitle": "One-hour sample captured during diagnosis",
+        "dataset": "reject_reasons",
+        "defaultSort": {"field": "count", "direction": "desc"},
+        "density": "spacious",
+        "sourceId": "src_reject_reasons",
+        "layout": "full",
+        "columns": [
+          {"field": "violation", "label": "RiskGateway violation", "type": "text"},
+          {"field": "count", "label": "Reject decisions", "format": "number", "role": "value"}
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "src_risk_db",
+        "label": "RiskGateway decisions — hourly diagnostic",
+        "query": {
+          "engine": "PostgreSQL",
+          "sql": "SELECT date_trunc('hour', to_timestamp(created_at_ms / 1000.0) AT TIME ZONE 'Europe/Amsterdam') AS hour_local, count(*) FILTER (WHERE decision = 'reject') AS rejects, count(*) AS decisions, round(100.0 * count(*) FILTER (WHERE decision = 'reject') / nullif(count(*), 0), 2) AS reject_pct FROM risk_gateway_decisions WHERE created_at_ms >= extract(epoch FROM now() - interval '24 hours') * 1000 GROUP BY 1 ORDER BY 1;",
+          "description": "Hourly reject numerator, total-decision denominator, and reject percentage for the 24 hours ending at the incident verification snapshot.",
+          "executed_at": "2026-07-12T09:49:00Z",
+          "language": "SQL",
+          "tables_used": ["public.risk_gateway_decisions"],
+          "filters": ["Last 24 hours at query execution", "Hourly grain", "All shadow RiskGateway decisions"],
+          "metric_definitions": ["Reject rate = reject decisions divided by all RiskGateway decisions in the same hour, multiplied by 100."]
+        }
+      },
+      {
+        "id": "src_reject_reasons",
+        "label": "RiskGateway decisions — violation diagnostic",
+        "query": {
+          "engine": "PostgreSQL",
+          "sql": "SELECT violation->>'code' AS violation, count(*) AS count FROM risk_gateway_decisions CROSS JOIN LATERAL jsonb_array_elements(violations_json::jsonb) violation WHERE decision = 'reject' AND created_at_ms >= extract(epoch FROM now() - interval '1 hour') * 1000 GROUP BY 1 ORDER BY 2 DESC;",
+          "description": "Counts violation codes attached to rejected RiskGateway decisions in the latest one-hour diagnostic window.",
+          "executed_at": "2026-07-12T08:39:00Z",
+          "language": "SQL",
+          "tables_used": ["public.risk_gateway_decisions"],
+          "filters": ["Decision equals reject", "Latest one-hour window at execution"],
+          "metric_definitions": ["Violation count is the number of reject decisions carrying each deterministic RiskGateway violation code."]
+        }
+      },
+      {
+        "id": "src_runtime",
+        "label": "Trader runtime status",
+        "query": {
+          "engine": "Hyperliquid Trading Agent API",
+          "sql": "SELECT service_role, instance_id, started_at_ms, updated_at_ms, metadata_json #>> '{engine_loop,service,last_run_duration_ms}' AS last_run_duration_ms, metadata_json #> '{engine_loop,service,last_stage_ms}' AS last_stage_ms FROM service_heartbeats WHERE service_role = 'trader' ORDER BY updated_at_ms DESC;",
+          "query": "Read the runtime status endpoint and select the current trader heartbeat plus engine-loop duration fields.",
+          "description": "Pre-fix and post-fix total loop and candidate-pipeline durations captured from the trader heartbeat.",
+          "executed_at": "2026-07-12T09:49:00Z",
+          "language": "HTTP GET",
+          "filters": ["Current trader instance", "Complete loops only"],
+          "metric_definitions": ["Total loop duration is wall-clock milliseconds for EngineService.run_once.", "Candidate-pipeline duration is accumulated wall-clock milliseconds spent scoring, allocating, risk-checking, reviewing, attributing, and simulating candidates."]
+        }
+      },
+      {
+        "id": "src_discord_excerpt",
+        "label": "Operator-provided Discord alert excerpt",
+        "query": {
+          "engine": "User-provided incident evidence",
+          "sql": "SELECT * FROM (VALUES ('2026-07-11T21:00:00+02:00'::timestamptz, 90), ('2026-07-11T21:05:00+02:00'::timestamptz, 94), ('2026-07-11T21:10:00+02:00'::timestamptz, 94), ('2026-07-11T21:15:00+02:00'::timestamptz, 94), ('2026-07-11T21:20:00+02:00'::timestamptz, 95), ('2026-07-11T21:25:00+02:00'::timestamptz, 97), ('2026-07-11T21:30:00+02:00'::timestamptz, 97), ('2026-07-11T21:35:00+02:00'::timestamptz, 97), ('2026-07-11T21:40:00+02:00'::timestamptz, 97), ('2026-07-11T21:45:00+02:00'::timestamptz, 99), ('2026-07-11T21:50:00+02:00'::timestamptz, 100), ('2026-07-11T21:55:00+02:00'::timestamptz, 103)) AS supplied_alerts(timestamp, reject_count);",
+          "query": "Twelve risk_rejects_spike messages posted between 21:00 and 21:55 Europe/Amsterdam on July 11, 2026.",
+          "description": "The incident excerpt supplied by the operator, transcribed into timestamp and reported-reject-count rows.",
+          "executed_at": "2026-07-12T08:30:00Z",
+          "language": "Text transcription",
+          "filters": ["risk_rejects_spike messages only", "July 11, 21:00–21:55 Europe/Amsterdam"],
+          "metric_definitions": ["Reported rejects is the absolute reject count printed in each Discord message."]
+        }
+      },
+      {
+        "id": "src_code",
+        "label": "Engine validation monitor implementation",
+        "query": {
+          "engine": "Repository source",
+          "query": "Inspect EngineValidationMonitorService._send_watchdog_alerts and _recent_risk_decisions in the hyperliquid_trading_agent.app.engine.monitor module.",
+          "description": "Source inspection comparing the five-minute time-bucket dedupe and six-hour absolute-count window with the deployed transition-only, rate-aware implementation.",
+          "executed_at": "2026-07-12T09:40:00Z",
+          "language": "Python",
+          "filters": ["Commit c8a3546"],
+          "metric_definitions": ["Old alert dedupe bucket = max(300 seconds, stale-loop threshold).", "New alert threshold requires at least 20 rejects, 50 total decisions, and a 20% reject rate in 900 seconds."]
+        }
+      },
+      {
+        "id": "src_outbox",
+        "label": "Operational notification outbox verification",
+        "query": {
+          "engine": "PostgreSQL",
+          "sql": "SELECT category, count(*) FROM operational_notification_outbox WHERE scheduled_at_ms >= 1783849578103 AND source_type = 'engine_validation_monitor' GROUP BY category ORDER BY category;",
+          "description": "Counts validation-monitor notifications enqueued after the corrected trader instance started.",
+          "executed_at": "2026-07-12T09:47:30Z",
+          "language": "SQL",
+          "tables_used": ["public.operational_notification_outbox"],
+          "filters": ["Corrected trader deployment only", "Source type engine_validation_monitor"],
+          "metric_definitions": ["Alert messages are rows with category engine_validation_alert; the normal six-hour digest uses engine_validation_digest and may span multiple Discord chunks."]
+        }
+      }
+    ],
+    "blocks": [
+      {"id": "title", "type": "markdown", "body": "# Engine Alert Spam Incident", "layout": "full"},
+      {
+        "id": "executive_summary",
+        "type": "markdown",
+        "body": "## Executive Summary\n\n- **This was primarily an alert-definition and deduplication regression, not a RiskGateway failure.** The rollout increased the number of shadow evaluations, while the monitor counted rejects across a six-hour window without considering the much larger decision denominator.\n- **The Discord repetition was deterministic.** One continuing condition received a fresh dedupe bucket every five minutes, producing twelve near-identical warnings in 55 minutes. Notifications now fire only when an incident opens or escalates.\n- **The loop overrun was real and has been corrected.** A repeated allocation-history query inside every candidate evaluation drove the candidate pipeline to 55.0 seconds. One snapshot is now reused within each loop; the first two verified loops completed in 13.8 and 29.1 seconds, below the 60-second interval.",
+        "layout": "full"
+      },
+      {
+        "id": "reject_rate_finding",
+        "type": "markdown",
+        "body": "## Absolute reject counts hid a low failure rate\n\nThe alert used a threshold of five rejects over the same six-hour window as the validation digest. After Wave 2 increased shadow candidate volume, that threshold became almost certain to fire. Hourly reject rates remained between 0% and 2.63% in the reviewed deployment window; the corrected monitor requires both material volume and a 20% reject rate over 15 minutes.\n\n**Implication:** deterministic RiskGateway rejections still block weak-edge or poor-market-quality candidates, but ordinary safety filtering no longer masquerades as an operational incident.",
+        "layout": "full",
+        "sourceId": "src_risk_db"
+      },
+      {
+        "id": "reject_reason_finding",
+        "type": "markdown",
+        "body": "## The rejects were normal policy outcomes\n\nThe latest one-hour diagnostic sample contained 35 rejects versus 1,588 allows. All rejects were explained by two deterministic controls: 20 candidates were below the minimum net edge and 15 encountered spreads above the engine limit.\n\n**Implication:** the gate was doing useful filtering; weakening it would have addressed the symptom by admitting worse candidates.",
+        "layout": "full",
+        "sourceId": "src_reject_reasons"
+      },
+      {"id": "reject_reason_table", "type": "table", "tableId": "reject_reasons", "layout": "full"},
+      {
+        "id": "dedupe_finding",
+        "type": "markdown",
+        "body": "## A five-minute bucket recycled one incident\n\nThe operator-visible sequence was one persistent condition, not twelve separate spikes. Reported counts moved only from 90 to 103 while a new message arrived every five minutes.\n\n**Implication:** the monitor now retains active incident state and posts only on opening or severity escalation. A continuing warning does not generate reminder spam.",
+        "layout": "full",
+        "sourceId": "src_discord_excerpt"
+      },
+      {
+        "id": "dedupe_code_finding",
+        "type": "markdown",
+        "body": "## Alert semantics now match incident semantics\n\nThe old key included a five-minute time bucket. The deployed key is tied to the incident start and severity, and active state is cleared only after the condition disappears. Reject-spike detection now uses a 15-minute window with count, denominator, and rate gates.\n\n**Implication:** a resolved condition may alert again if it genuinely reopens, while an unresolved condition remains quiet.",
+        "layout": "full",
+        "sourceId": "src_code"
+      },
+      {
+        "id": "latency_finding",
+        "type": "markdown",
+        "body": "## Candidate processing is back inside the loop budget\n\nBefore the fix, each candidate independently loaded and scanned up to 5,000 historical allocations. Reusing that read-only snapshot within the loop reduced the candidate-pipeline stage from 55.0 seconds to 4.9 seconds on the first run and 19.7 seconds on the second. Both complete loops stayed below the 60-second watchdog threshold.\n\n**Implication:** strategy breadth remains enabled; the fix removes duplicate database work instead of suppressing evidence generation.",
+        "layout": "full",
+        "sourceId": "src_runtime"
+      },
+      {"id": "latency_chart", "type": "chart", "chartId": "loop_latency_comparison", "layout": "half"},
+      {"id": "latency_metrics", "type": "metric-strip", "cardIds": ["latency_before", "latency_post_1", "latency_post_2"], "layout": "full"},
+      {
+        "id": "verification_finding",
+        "type": "markdown",
+        "body": "## Post-deployment verification is clean\n\nThe first corrected watchdog observed 13 rejects out of 381 decisions, or 3.41%, and opened no active incident. No `engine_validation_alert` row entered the Discord outbox after the corrected trader started; only the normal validation digest was enqueued.\n\n**Implication:** monitoring is active again, without weakening shadow-only execution, RiskGateway, Council review, or readiness blocking.",
+        "layout": "full",
+        "sourceId": "src_outbox"
+      },
+      {
+        "id": "next_steps",
+        "type": "markdown",
+        "body": "## Recommended Next Steps\n\n1. Keep the new 15-minute, 20-reject, 50-decision, 20% rate threshold unchanged for one full day.\n2. Review the hourly reject-rate distribution after 24 hours and adjust only if normal operation approaches the threshold.\n3. Preserve transition-only delivery for all watchdog conditions; add a deliberately long reminder interval only if operators later request one.\n4. Continue tracking candidate-pipeline duration separately from total loop duration so future strategy breadth does not hide database regressions.",
+        "layout": "full"
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "body": "## Further Questions\n\n- Does the post-fix candidate pipeline remain below 45 seconds at the highest observed candidate volume over the next 24 hours?\n- Should market-quality rejections such as wide spreads receive a separate informational digest rather than share an operational incident metric?",
+        "layout": "full"
+      },
+      {
+        "id": "caveats",
+        "type": "markdown",
+        "body": "## Caveats and Assumptions\n\n- The last hourly reject-rate point is partial.\n- The latency comparison contains one pre-fix loop and two immediate post-fix loops; it proves the regression is removed in the observed runs, not a long-run percentile target.\n- Incident state is process-local. A trader restart may emit one fresh opening notification for a still-active condition, but it will not repeat every five minutes thereafter.\n- Normal six-hour validation digests remain enabled and can span multiple Discord chunks.",
+        "layout": "full"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-12T09:50:00Z",
+    "status": "ready",
+    "datasets": {
+      "hourly_reject_rates": [
+        {"hour": "2026-07-11T11:00:00+02:00", "hour_label": "Jul 11 11:00", "rejects": 0, "decisions": 94, "reject_pct": 0.0},
+        {"hour": "2026-07-11T12:00:00+02:00", "hour_label": "Jul 11 12:00", "rejects": 0, "decisions": 529, "reject_pct": 0.0},
+        {"hour": "2026-07-11T13:00:00+02:00", "hour_label": "Jul 11 13:00", "rejects": 0, "decisions": 495, "reject_pct": 0.0},
+        {"hour": "2026-07-11T14:00:00+02:00", "hour_label": "Jul 11 14:00", "rejects": 0, "decisions": 517, "reject_pct": 0.0},
+        {"hour": "2026-07-11T15:00:00+02:00", "hour_label": "Jul 11 15:00", "rejects": 0, "decisions": 508, "reject_pct": 0.0},
+        {"hour": "2026-07-11T16:00:00+02:00", "hour_label": "Jul 11 16:00", "rejects": 0, "decisions": 497, "reject_pct": 0.0},
+        {"hour": "2026-07-11T17:00:00+02:00", "hour_label": "Jul 11 17:00", "rejects": 0, "decisions": 454, "reject_pct": 0.0},
+        {"hour": "2026-07-11T18:00:00+02:00", "hour_label": "Jul 11 18:00", "rejects": 3, "decisions": 568, "reject_pct": 0.53},
+        {"hour": "2026-07-11T19:00:00+02:00", "hour_label": "Jul 11 19:00", "rejects": 50, "decisions": 1985, "reject_pct": 2.52},
+        {"hour": "2026-07-11T20:00:00+02:00", "hour_label": "Jul 11 20:00", "rejects": 37, "decisions": 1840, "reject_pct": 2.01},
+        {"hour": "2026-07-11T21:00:00+02:00", "hour_label": "Jul 11 21:00", "rejects": 15, "decisions": 1785, "reject_pct": 0.84},
+        {"hour": "2026-07-11T22:00:00+02:00", "hour_label": "Jul 11 22:00", "rejects": 19, "decisions": 1725, "reject_pct": 1.1},
+        {"hour": "2026-07-11T23:00:00+02:00", "hour_label": "Jul 11 23:00", "rejects": 16, "decisions": 1741, "reject_pct": 0.92},
+        {"hour": "2026-07-12T00:00:00+02:00", "hour_label": "Jul 12 00:00", "rejects": 29, "decisions": 1813, "reject_pct": 1.6},
+        {"hour": "2026-07-12T01:00:00+02:00", "hour_label": "Jul 12 01:00", "rejects": 29, "decisions": 1923, "reject_pct": 1.51},
+        {"hour": "2026-07-12T02:00:00+02:00", "hour_label": "Jul 12 02:00", "rejects": 34, "decisions": 1776, "reject_pct": 1.91},
+        {"hour": "2026-07-12T03:00:00+02:00", "hour_label": "Jul 12 03:00", "rejects": 25, "decisions": 1803, "reject_pct": 1.39},
+        {"hour": "2026-07-12T04:00:00+02:00", "hour_label": "Jul 12 04:00", "rejects": 44, "decisions": 1672, "reject_pct": 2.63},
+        {"hour": "2026-07-12T05:00:00+02:00", "hour_label": "Jul 12 05:00", "rejects": 15, "decisions": 1684, "reject_pct": 0.89},
+        {"hour": "2026-07-12T06:00:00+02:00", "hour_label": "Jul 12 06:00", "rejects": 18, "decisions": 1636, "reject_pct": 1.1},
+        {"hour": "2026-07-12T07:00:00+02:00", "hour_label": "Jul 12 07:00", "rejects": 26, "decisions": 1584, "reject_pct": 1.64},
+        {"hour": "2026-07-12T08:00:00+02:00", "hour_label": "Jul 12 08:00", "rejects": 34, "decisions": 1751, "reject_pct": 1.94},
+        {"hour": "2026-07-12T09:00:00+02:00", "hour_label": "Jul 12 09:00", "rejects": 8, "decisions": 1638, "reject_pct": 0.49},
+        {"hour": "2026-07-12T10:00:00+02:00", "hour_label": "Jul 12 10:00", "rejects": 41, "decisions": 1632, "reject_pct": 2.51},
+        {"hour": "2026-07-12T11:00:00+02:00", "hour_label": "Jul 12 11:00", "rejects": 26, "decisions": 1375, "reject_pct": 1.89}
+      ],
+      "discord_alerts": [
+        {"timestamp": "2026-07-11T21:00:00+02:00", "time_label": "21:00", "reject_count": 90, "alert_type": "risk_rejects_spike"},
+        {"timestamp": "2026-07-11T21:05:00+02:00", "time_label": "21:05", "reject_count": 94, "alert_type": "risk_rejects_spike"},
+        {"timestamp": "2026-07-11T21:10:00+02:00", "time_label": "21:10", "reject_count": 94, "alert_type": "risk_rejects_spike"},
+        {"timestamp": "2026-07-11T21:15:00+02:00", "time_label": "21:15", "reject_count": 94, "alert_type": "risk_rejects_spike"},
+        {"timestamp": "2026-07-11T21:20:00+02:00", "time_label": "21:20", "reject_count": 95, "alert_type": "risk_rejects_spike"},
+        {"timestamp": "2026-07-11T21:25:00+02:00", "time_label": "21:25", "reject_count": 97, "alert_type": "risk_rejects_spike"},
+        {"timestamp": "2026-07-11T21:30:00+02:00", "time_label": "21:30", "reject_count": 97, "alert_type": "risk_rejects_spike"},
+        {"timestamp": "2026-07-11T21:35:00+02:00", "time_label": "21:35", "reject_count": 97, "alert_type": "risk_rejects_spike"},
+        {"timestamp": "2026-07-11T21:40:00+02:00", "time_label": "21:40", "reject_count": 97, "alert_type": "risk_rejects_spike"},
+        {"timestamp": "2026-07-11T21:45:00+02:00", "time_label": "21:45", "reject_count": 99, "alert_type": "risk_rejects_spike"},
+        {"timestamp": "2026-07-11T21:50:00+02:00", "time_label": "21:50", "reject_count": 100, "alert_type": "risk_rejects_spike"},
+        {"timestamp": "2026-07-11T21:55:00+02:00", "time_label": "21:55", "reject_count": 103, "alert_type": "risk_rejects_spike"}
+      ],
+      "reject_reasons": [
+        {"violation": "edge_below_minimum", "count": 20, "window_minutes": 60},
+        {"violation": "spread_too_wide", "count": 15, "window_minutes": 60}
+      ],
+      "latency_comparison": [
+        {"phase": "Before fix", "total_seconds": 67.816, "candidate_pipeline_seconds": 54.973, "loop_interval_seconds": 60, "candidate_count": 38},
+        {"phase": "Post-fix loop 1", "total_seconds": 13.786, "candidate_pipeline_seconds": 4.897, "loop_interval_seconds": 60, "candidate_count": 8},
+        {"phase": "Post-fix loop 2", "total_seconds": 29.112, "candidate_pipeline_seconds": 19.712, "loop_interval_seconds": 60, "candidate_count": null}
+      ],
+      "outbox_verification": [
+        {"category": "engine_validation_alert", "count": 0, "deployment_started_at_ms": 1783849578103},
+        {"category": "engine_validation_digest", "count": 2, "deployment_started_at_ms": 1783849578103}
+      ]
+    }
+  },
+  "sources": [
+    {"id": "src_risk_db", "label": "RiskGateway decisions — hourly diagnostic"},
+    {"id": "src_reject_reasons", "label": "RiskGateway decisions — violation diagnostic"},
+    {"id": "src_runtime", "label": "Trader runtime status"},
+    {"id": "src_discord_excerpt", "label": "Operator-provided Discord alert excerpt"},
+    {"id": "src_code", "label": "Engine validation monitor implementation"},
+    {"id": "src_outbox", "label": "Operational notification outbox verification"}
+  ]
+}
