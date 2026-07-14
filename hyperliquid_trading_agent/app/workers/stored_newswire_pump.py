@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -37,10 +38,14 @@ class StoredNewswirePump:
         self.running = False
         self.processed = 0
         self.error_count = 0
+        self.consecutive_error_count = 0
         self.invalid_rows_skipped = 0
         self.bootstrapped_from_latest = False
         self.last_event_id: str | None = None
         self.last_error: str | None = None
+        self.last_error_at_ms: int | None = None
+        self.last_success_at_ms: int | None = None
+        self.last_invalid_row_at_ms: int | None = None
         self._stop = asyncio.Event()
 
     async def run_forever(self) -> None:
@@ -88,9 +93,12 @@ class StoredNewswirePump:
                 self.processed += 1
                 count += 1
                 self.last_event_id = event.event_id
+                self._record_success()
             except Exception as exc:  # pragma: no cover - worker safety net
                 self.error_count += 1
+                self.consecutive_error_count += 1
                 self.last_error = type(exc).__name__
+                self.last_error_at_ms = _now_ms()
                 log.warning("stored_newswire_pump_event_failed", consumer=self.consumer_name, event_id=event.event_id, error=type(exc).__name__)
                 break
         return count
@@ -134,6 +142,7 @@ class StoredNewswirePump:
         self.error_count += 1
         self.invalid_rows_skipped += 1
         self.last_error = type(exc).__name__
+        self.last_invalid_row_at_ms = _now_ms()
         if event_id and received_at_ms > 0:
             await self.repository.update_consumer_offset(
                 self.consumer_name,
@@ -160,8 +169,21 @@ class StoredNewswirePump:
             "processed": self.processed,
             "last_event_id": self.last_event_id,
             "error_count": self.error_count,
+            "consecutive_error_count": self.consecutive_error_count,
             "invalid_rows_skipped": self.invalid_rows_skipped,
             "bootstrap_from_latest": self.bootstrap_from_latest,
             "bootstrapped_from_latest": self.bootstrapped_from_latest,
             "last_error": self.last_error,
+            "last_error_at_ms": self.last_error_at_ms,
+            "last_success_at_ms": self.last_success_at_ms,
+            "last_invalid_row_at_ms": self.last_invalid_row_at_ms,
         }
+
+    def _record_success(self) -> None:
+        self.consecutive_error_count = 0
+        self.last_success_at_ms = _now_ms()
+        self.last_error = None
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)

@@ -40,6 +40,7 @@ class ShadowEvidenceAdmissionController:
         timestamp_ms: int,
         alternative_strategy_available: bool,
         alternative_family_available: bool,
+        history_rows: list[dict[str, Any]] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
         if not bool(getattr(self.settings, "engine_shadow_evidence_admission_enabled", True)):
             return True, {"decision": "admit", "reason": "controller_disabled"}
@@ -52,8 +53,8 @@ class ShadowEvidenceAdmissionController:
 
         lookback = max(10, int(getattr(self.settings, "engine_shadow_evidence_lookback_intents", 100)))
         method = getattr(repository, "list_order_intents", None)
-        rows: list[dict[str, Any]] = []
-        if callable(method):
+        rows: list[dict[str, Any]] = list(history_rows or [])
+        if history_rows is None and callable(method):
             try:
                 rows = await method(execution_mode="shadow", limit=lookback)
             except TypeError:

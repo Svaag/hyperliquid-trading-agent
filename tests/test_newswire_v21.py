@@ -417,6 +417,44 @@ def test_newsfeed_health_and_soak_readiness_are_machine_readable_and_time_based(
     assert api_role_health["runtime_detected"] is True
     assert api_role_health["status"] == "healthy"
 
+    recovered_runtime = {
+        **runtime,
+        "pump": {
+            **runtime["pump"],
+            "error_count": 5,
+            "invalid_rows_skipped": 5,
+            "consecutive_error_count": 0,
+            "last_success_at_ms": now - 1_000,
+            "last_error_at_ms": now - 2_000,
+            "last_invalid_row_at_ms": now - 2 * 60 * 60_000,
+        },
+    }
+    recovered = build_engine_newsfeed_health(
+        _settings(), recovered_runtime, offset, newswire_active=True, generated_at_ms=now
+    )
+    assert recovered["status"] == "healthy"
+    assert recovered["counters"]["pump_errors"] == 5
+
+    active_error_runtime = {
+        **recovered_runtime,
+        "pump": {**recovered_runtime["pump"], "consecutive_error_count": 2},
+    }
+    active_error = build_engine_newsfeed_health(
+        _settings(), active_error_runtime, offset, newswire_active=True, generated_at_ms=now
+    )
+    assert active_error["status"] == "degraded"
+    assert "pump_errors" in {item["code"] for item in active_error["reasons"]}
+
+    recent_invalid_runtime = {
+        **recovered_runtime,
+        "pump": {**recovered_runtime["pump"], "last_invalid_row_at_ms": now - 1_000},
+    }
+    recent_invalid = build_engine_newsfeed_health(
+        _settings(), recent_invalid_runtime, offset, newswire_active=True, generated_at_ms=now
+    )
+    assert recent_invalid["status"] == "warning"
+    assert "invalid_rows_skipped" in {item["code"] for item in recent_invalid["reasons"]}
+
     class Repo:
         def __init__(self, started_at_ms: int) -> None:
             self.started_at_ms = started_at_ms

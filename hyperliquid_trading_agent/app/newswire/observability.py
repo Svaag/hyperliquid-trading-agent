@@ -6,6 +6,7 @@ from typing import Any
 from hyperliquid_trading_agent.app.config import Settings
 
 ENGINE_NEWSWIRE_CONSUMER = "trader:engine_newswire"
+RECENT_INVALID_ROW_MS = 60 * 60 * 1000
 
 
 def build_engine_newsfeed_health(
@@ -30,6 +31,10 @@ def build_engine_newsfeed_health(
     offset_age_ms = max(0, now_ms - updated_at_ms) if updated_at_ms > 0 else None
     stale_after_ms = max(1, int(settings.newswire_engine_offset_stale_seconds)) * 1000
     reasons: list[dict[str, str]] = []
+    pump_consecutive_errors = int(pump.get("consecutive_error_count") or 0)
+    consumer_consecutive_errors = int(consumer.get("consecutive_error_count") or 0)
+    last_invalid_row_at_ms = int(pump.get("last_invalid_row_at_ms") or 0)
+    invalid_row_age_ms = max(0, now_ms - last_invalid_row_at_ms) if last_invalid_row_at_ms > 0 else None
 
     configured_for_local_role = bool(settings.engine_enabled and settings.engine_newsfeed_enabled)
     runtime_detected = bool(consumer.get("running") or pump.get("running"))
@@ -61,16 +66,28 @@ def build_engine_newsfeed_health(
                 f"Offset age {offset_age_ms}ms exceeds {stale_after_ms}ms while Newswire is active.",
             )
         )
-    if int(pump.get("error_count") or 0) > 0:
-        reasons.append(_reason("pump_errors", "degraded", f"pump.error_count={pump.get('error_count')}"))
-    if int(consumer.get("error_count") or 0) > 0:
-        reasons.append(_reason("consumer_errors", "degraded", f"consumer.error_count={consumer.get('error_count')}"))
-    if int(pump.get("invalid_rows_skipped") or 0) > 0:
+    if pump_consecutive_errors > 0:
+        reasons.append(
+            _reason(
+                "pump_errors",
+                "degraded",
+                f"pump.consecutive_error_count={pump_consecutive_errors}",
+            )
+        )
+    if consumer_consecutive_errors > 0:
+        reasons.append(
+            _reason(
+                "consumer_errors",
+                "degraded",
+                f"consumer.consecutive_error_count={consumer_consecutive_errors}",
+            )
+        )
+    if invalid_row_age_ms is not None and invalid_row_age_ms <= RECENT_INVALID_ROW_MS:
         reasons.append(
             _reason(
                 "invalid_rows_skipped",
                 "warning",
-                f"pump.invalid_rows_skipped={pump.get('invalid_rows_skipped')}",
+                f"last invalid row was {invalid_row_age_ms}ms ago; lifetime count={pump.get('invalid_rows_skipped') or 0}",
             )
         )
     received = int(consumer.get("received_events") or 0)
@@ -99,12 +116,16 @@ def build_engine_newsfeed_health(
             "pump_processed": int(pump.get("processed") or 0),
             "invalid_rows_skipped": int(pump.get("invalid_rows_skipped") or 0),
             "pump_errors": int(pump.get("error_count") or 0),
+            "pump_consecutive_errors": pump_consecutive_errors,
             "received": received,
             "recorded": recorded,
             "features_created": features,
             "skipped": int(consumer.get("skipped_events") or 0),
             "consumer_errors": int(consumer.get("error_count") or 0),
+            "consumer_consecutive_errors": consumer_consecutive_errors,
         },
+        "last_invalid_row_at_ms": last_invalid_row_at_ms or None,
+        "invalid_row_age_ms": invalid_row_age_ms,
         "skip_reasons": dict(consumer.get("skip_reasons") or {}),
         "offset": offset_data,
     }
@@ -179,6 +200,9 @@ async def build_newswire_soak_readiness(
     paper_or_live_reports = [item for item in reports if item.get("execution_mode") in {"paper", "live"}]
     consumer = _as_dict(runtime.get("consumer"))
     pump = _as_dict(runtime.get("pump"))
+    pump_consecutive_errors = int(pump.get("consecutive_error_count") or 0)
+    consumer_consecutive_errors = int(consumer.get("consecutive_error_count") or 0)
+    last_invalid_row_at_ms = int(pump.get("last_invalid_row_at_ms") or 0)
 
     criteria = {
         "continuous_window_complete": elapsed_ms >= required_ms,
@@ -189,9 +213,9 @@ async def build_newswire_soak_readiness(
         "normalized_events_present": len(normalized) > 0,
         "news_features_present": len(features) > 0,
         "no_invalid_rows_or_errors": (
-            int(pump.get("invalid_rows_skipped") or 0) == 0
-            and int(pump.get("error_count") or 0) == 0
-            and int(consumer.get("error_count") or 0) == 0
+            last_invalid_row_at_ms < start
+            and pump_consecutive_errors == 0
+            and consumer_consecutive_errors == 0
         ),
         "no_paper_or_live_execution_side_effects": not paper_or_live_intents and not paper_or_live_reports,
     }
@@ -219,7 +243,9 @@ async def build_newswire_soak_readiness(
             "news_feature_rows": len(features),
             "invalid_rows": int(pump.get("invalid_rows_skipped") or 0),
             "pump_errors": int(pump.get("error_count") or 0),
+            "pump_consecutive_errors": pump_consecutive_errors,
             "consumer_errors": int(consumer.get("error_count") or 0),
+            "consumer_consecutive_errors": consumer_consecutive_errors,
             "paper_or_live_order_intents": len(paper_or_live_intents),
             "paper_or_live_execution_reports": len(paper_or_live_reports),
         },

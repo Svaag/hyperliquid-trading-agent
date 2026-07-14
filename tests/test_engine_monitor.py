@@ -90,10 +90,25 @@ class OutboxMonitorRepository(FakeMonitorRepository):
     def __init__(self):
         super().__init__()
         self.notifications: list[dict] = []
+        self.incidents: dict[str, dict] = {}
 
     async def enqueue_operational_notification(self, **kwargs):
         self.notifications.append(kwargs)
         return f"opn_{len(self.notifications)}"
+
+    async def list_operational_incidents(self, **kwargs):
+        source_type = kwargs.get("source_type")
+        state = kwargs.get("state")
+        return [
+            dict(item)
+            for item in self.incidents.values()
+            if (not source_type or item.get("source_type") == source_type)
+            and (not state or item.get("state") == state)
+        ]
+
+    async def upsert_operational_incident(self, incident):
+        self.incidents[str(incident["incident_key"])] = dict(incident)
+        return dict(incident)
 
 
 def test_engine_validation_digest_formats_summary():
@@ -209,6 +224,110 @@ def test_engine_validation_watchdog_posts_only_on_incident_open_or_escalation():
     assert status["active_watchdog_alert_types"] == ["risk_rejects_spike"]
     assert repo.notifications[0]["severity"] == "warning"
     assert repo.notifications[1]["severity"] == "critical"
+
+
+def test_engine_validation_watchdog_does_not_reopen_persisted_incident_after_restart():
+    settings = Settings(
+        _env_file=None,
+        engine_enabled=True,
+        autonomy_alert_channel_id="alerts",
+    )
+    repo = OutboxMonitorRepository()
+    warning = {"type": "risk_rejects_spike", "severity": "warning", "detail": "rejects=25/100 (25.00%)"}
+
+    async def run():
+        first = EngineValidationMonitorService(settings=settings, repository=repo, alert_sink=None)
+        await first._send_watchdog_alerts([warning])
+        restarted = EngineValidationMonitorService(settings=settings, repository=repo, alert_sink=None)
+        await restarted._send_watchdog_alerts([warning])
+        return restarted.status()
+
+    status = anyio.run(run)
+    assert len(repo.notifications) == 1
+    assert status["active_watchdog_alert_types"] == ["risk_rejects_spike"]
+    assert next(iter(repo.incidents.values()))["state"] == "open"
+
+
+def test_engine_duration_incident_requires_three_of_five_samples_and_ten_good_runs_to_recover():
+    settings = Settings(
+        _env_file=None,
+        engine_enabled=True,
+        engine_loop_interval_seconds=60,
+        autonomy_alert_channel_id="alerts",
+    )
+    repo = OutboxMonitorRepository()
+    runtime = {
+        "run_count": 0,
+        "last_error": None,
+        "last_run_at_ms": repo.now,
+        "last_run_completed_at_ms": repo.now,
+        "last_stage_ms": {"candidate_pipeline": 61_000.0},
+    }
+    engine = FakeEngineService(runtime)
+    service = EngineValidationMonitorService(
+        settings=settings,
+        repository=repo,
+        engine_service=engine,
+        alert_sink=None,
+    )
+
+    async def run():
+        detected: list[bool] = []
+        for run_id in ("run_1", "run_2", "run_3"):
+            runtime.update(last_run_id=run_id, last_run_duration_ms=61_000.0)
+            alerts = await service._detect_alerts({})
+            detected.append(any(item["type"] == "engine_loop_duration_overrun" for item in alerts))
+            await service._send_watchdog_alerts(
+                [item for item in alerts if item["type"] == "engine_loop_duration_overrun"]
+            )
+        recovery_alerts: list[bool] = []
+        for index in range(1, 11):
+            runtime.update(last_run_id=f"good_{index}", last_run_duration_ms=59_000.0)
+            alerts = await service._detect_alerts({})
+            recovery_alerts.append(any(item["type"] == "engine_loop_duration_overrun" for item in alerts))
+            await service._send_watchdog_alerts(
+                [item for item in alerts if item["type"] == "engine_loop_duration_overrun"]
+            )
+        return detected, recovery_alerts
+
+    detected, recovery_alerts = anyio.run(run)
+    assert detected == [False, False, True]
+    assert recovery_alerts == [True] * 9 + [False]
+    incident = repo.incidents["engine_validation_monitor:engine_loop_duration_overrun"]
+    assert incident["state"] == "resolved"
+    assert len(repo.notifications) == 1
+
+
+def test_engine_loop_in_progress_is_only_stale_after_stuck_threshold():
+    settings = Settings(
+        _env_file=None,
+        engine_enabled=True,
+        engine_validation_alert_stale_loop_seconds=180,
+    )
+    repo = FakeMonitorRepository()
+    runtime = {
+        "run_count": 1,
+        "last_error": None,
+        "run_in_progress": True,
+        "current_run_id": "run_active",
+        "current_run_started_at_ms": repo.now - 120_000,
+    }
+    service = EngineValidationMonitorService(
+        settings=settings,
+        repository=repo,
+        engine_service=FakeEngineService(runtime),
+        alert_sink=FakeSink(),
+    )
+
+    async def run():
+        healthy = await service._detect_alerts({})
+        runtime["current_run_started_at_ms"] = repo.now - 181_000
+        stuck = await service._detect_alerts({})
+        return healthy, stuck
+
+    healthy, stuck = anyio.run(run)
+    assert "engine_loop_stale" not in {item["type"] for item in healthy}
+    assert "engine_loop_stale" in {item["type"] for item in stuck}
 
 def test_engine_validation_monitor_alerts_on_loop_duration_overrun():
     settings = Settings(

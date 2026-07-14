@@ -17,6 +17,12 @@ from hyperliquid_trading_agent.app.newswire.observability import build_engine_ne
 
 log = get_logger(__name__)
 
+INCIDENT_SOURCE = "engine_validation_monitor"
+DURATION_SAMPLE_WINDOW = 5
+DURATION_OPEN_OVERRUNS = 3
+DURATION_RECOVERY_RUNS = 10
+GENERAL_RECOVERY_SAMPLES = 3
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -50,6 +56,13 @@ class EngineValidationMonitorService:
         self.alert_count = 0
         self.last_alerts: list[dict[str, Any]] = []
         self._active_watchdog_alerts: dict[str, dict[str, Any]] = {}
+        self._incident_states: dict[str, dict[str, Any]] = {}
+        self._incidents_loaded = False
+        self._recent_recoveries: list[dict[str, Any]] = []
+        self._duration_samples: list[dict[str, Any]] = []
+        self._duration_last_sample_id: str | None = None
+        self._duration_consecutive_good = 0
+        self._duration_alert_active = False
 
     def status(self) -> dict[str, Any]:
         return {
@@ -65,6 +78,7 @@ class EngineValidationMonitorService:
             "alert_count": self.alert_count,
             "last_alerts": self.last_alerts,
             "active_watchdog_alert_types": sorted(self._active_watchdog_alerts),
+            "recently_resolved_incidents": self._recent_recoveries[-10:],
         }
 
     async def start(self) -> None:
@@ -102,7 +116,15 @@ class EngineValidationMonitorService:
         self.alert_count += len(alerts)
         for alert in alerts:
             ENGINE_VALIDATION_ALERTS.labels(alert_type=str(alert.get("type") or "unknown")).inc()
-        message = format_engine_validation_digest(report, alerts, settings=self.settings, service_status=await self._engine_status(), readiness=readiness, latest_replay=latest_replay)
+        message = format_engine_validation_digest(
+            report,
+            alerts,
+            settings=self.settings,
+            service_status=await self._engine_status(),
+            readiness=readiness,
+            latest_replay=latest_replay,
+            recently_resolved=self._recent_recoveries[-10:],
+        )
         if post:
             sent_at_ms = _now_ms()
             digest_bucket = sent_at_ms // (max(60, self.settings.engine_validation_digest_interval_seconds) * 1000)
@@ -114,6 +136,7 @@ class EngineValidationMonitorService:
             )
             self.last_digest_at_ms = sent_at_ms
             self.digest_count += 1
+            self._recent_recoveries.clear()
         return {"report": report, "readiness": readiness, "latest_replay": latest_replay, "alerts": alerts, "message": message}
 
     async def _run(self) -> None:
@@ -176,6 +199,7 @@ class EngineValidationMonitorService:
             log.warning("engine_validation_notification_enqueue_failed", error=type(exc).__name__)
 
     async def _send_watchdog_alerts(self, alerts: list[dict[str, Any]]) -> None:
+        await self._ensure_incidents_loaded()
         now = _now_ms()
         selected: dict[str, dict[str, Any]] = {}
         for alert in alerts:
@@ -186,13 +210,37 @@ class EngineValidationMonitorService:
                 selected[alert_type] = {**alert, "severity": severity}
         current: dict[str, dict[str, Any]] = {}
         for alert_type, alert in selected.items():
-            severity = str(alert.get("severity") or "warning")
-            previous = self._active_watchdog_alerts.get(alert_type)
-            started_at_ms = int((previous or {}).get("started_at_ms") or now)
+            requested_severity = str(alert.get("severity") or "warning")
+            previous = self._incident_states.get(alert_type) or {}
+            was_open = str(previous.get("state") or "") == "open"
+            previous_severity = str(previous.get("severity") or "warning")
+            severity = previous_severity if was_open and _severity_rank(previous_severity) > _severity_rank(requested_severity) else requested_severity
+            started_at_ms = int(previous.get("opened_at_ms") or now) if was_open else now
             current_alert = {**alert, "severity": severity, "started_at_ms": started_at_ms}
             current[alert_type] = current_alert
-            is_new = previous is None
-            escalated = previous is not None and _severity_rank(severity) > _severity_rank(str(previous.get("severity") or "warning"))
+            is_new = not was_open
+            escalated = was_open and _severity_rank(requested_severity) > _severity_rank(previous_severity)
+            details = dict(previous.get("details") or {})
+            details.update({"detail": str(alert.get("detail") or ""), "latest_alert": alert})
+            if alert_type == "engine_loop_duration_overrun":
+                details.update(self._duration_state_details())
+            incident = {
+                "incident_key": self._incident_key(alert_type),
+                "source_type": INCIDENT_SOURCE,
+                "alert_type": alert_type,
+                "state": "open",
+                "severity": severity,
+                "opened_at_ms": started_at_ms,
+                "last_seen_at_ms": now,
+                "resolved_at_ms": None,
+                "last_notified_at_ms": now if is_new or escalated else previous.get("last_notified_at_ms"),
+                "last_sample_id": alert.get("sample_id") or previous.get("last_sample_id"),
+                "bad_sample_count": int(previous.get("bad_sample_count") or 0) + 1,
+                "good_sample_count": 0,
+                "details": details,
+                "updated_at_ms": now,
+            }
+            await self._persist_incident(incident)
             if is_new or escalated:
                 ENGINE_VALIDATION_ALERTS.labels(alert_type=alert_type).inc()
                 await self._send(
@@ -201,23 +249,76 @@ class EngineValidationMonitorService:
                     dedupe_key=f"engine-validation-alert:{alert_type}:{started_at_ms}:{severity}",
                     severity=severity,
                 )
+        for alert_type, previous in list(self._incident_states.items()):
+            if alert_type in selected or str(previous.get("state") or "") != "open":
+                continue
+            good_samples = int(previous.get("good_sample_count") or 0) + 1
+            recovery_samples = 1 if alert_type == "engine_loop_duration_overrun" else GENERAL_RECOVERY_SAMPLES
+            if good_samples < recovery_samples:
+                retained = {
+                    **previous,
+                    "good_sample_count": good_samples,
+                    "updated_at_ms": now,
+                }
+                await self._persist_incident(retained)
+                current[alert_type] = {
+                    "type": alert_type,
+                    "severity": str(previous.get("severity") or "warning"),
+                    "detail": str((previous.get("details") or {}).get("detail") or "recovery pending"),
+                    "started_at_ms": previous.get("opened_at_ms"),
+                }
+                continue
+            resolved = {
+                **previous,
+                "state": "resolved",
+                "resolved_at_ms": now,
+                "good_sample_count": good_samples,
+                "updated_at_ms": now,
+            }
+            await self._persist_incident(resolved)
+            self._recent_recoveries.append(
+                {
+                    "type": alert_type,
+                    "severity": str(previous.get("severity") or "warning"),
+                    "opened_at_ms": previous.get("opened_at_ms"),
+                    "resolved_at_ms": now,
+                }
+            )
         self._active_watchdog_alerts = current
 
     async def _detect_alerts(self, report: dict[str, Any]) -> list[dict[str, Any]]:
+        await self._ensure_incidents_loaded()
         alerts: list[dict[str, Any]] = []
         now = _now_ms()
         service_status = await self._engine_status()
-        last_run_at = service_status.get("last_run_at_ms")
         stale_after_ms = max(1, self.settings.engine_validation_alert_stale_loop_seconds) * 1000
-        if self.settings.engine_enabled and (not last_run_at or now - int(last_run_at) > stale_after_ms):
-            if last_run_at or now - self.started_at_ms > stale_after_ms:
-                alerts.append(
-                    {
-                        "type": "engine_loop_stale",
-                        "severity": "critical",
-                        "detail": f"last_run_at_ms={last_run_at}; stale_after_ms={stale_after_ms}",
-                    }
-                )
+        run_in_progress = bool(service_status.get("run_in_progress"))
+        current_run_started_at_ms = service_status.get("current_run_started_at_ms")
+        last_completed_at_ms = (
+            service_status.get("last_run_completed_at_ms")
+            or service_status.get("last_successful_run_completed_at_ms")
+            or service_status.get("last_run_at_ms")
+        )
+        stale = False
+        stale_detail = ""
+        if run_in_progress and current_run_started_at_ms:
+            run_age_ms = now - int(current_run_started_at_ms)
+            stale = run_age_ms > stale_after_ms
+            stale_detail = (
+                f"run_in_progress=true current_run_id={service_status.get('current_run_id')} "
+                f"run_age_ms={run_age_ms} stuck_after_ms={stale_after_ms}"
+            )
+        elif self.settings.engine_enabled and (not last_completed_at_ms or now - int(last_completed_at_ms) > stale_after_ms):
+            stale = bool(last_completed_at_ms or now - self.started_at_ms > stale_after_ms)
+            stale_detail = f"last_run_completed_at_ms={last_completed_at_ms}; stale_after_ms={stale_after_ms}"
+        if self.settings.engine_enabled and stale:
+            alerts.append(
+                {
+                    "type": "engine_loop_stale",
+                    "severity": "critical",
+                    "detail": stale_detail,
+                }
+            )
         if service_status.get("last_error"):
             alerts.append({"type": "engine_loop_error", "severity": "critical", "detail": str(service_status.get("last_error"))})
         newsfeed_health = await self._newsfeed_health()
@@ -230,18 +331,9 @@ class EngineValidationMonitorService:
                         "detail": str(reason.get("detail") or "Engine Newswire consumer is degraded."),
                     }
                 )
-        duration_ms = service_status.get("last_run_duration_ms")
-        interval_ms = max(5, int(self.settings.engine_loop_interval_seconds)) * 1000
-        if duration_ms is not None and float(duration_ms) > interval_ms:
-            stage_ms = service_status.get("last_stage_ms") if isinstance(service_status.get("last_stage_ms"), dict) else {}
-            slowest_stage = max(stage_ms, key=lambda name: float(stage_ms.get(name) or 0)) if stage_ms else "unknown"
-            alerts.append(
-                {
-                    "type": "engine_loop_duration_overrun",
-                    "severity": "critical" if float(duration_ms) > 3 * interval_ms else "warning",
-                    "detail": f"last_run_duration_ms={duration_ms} interval_ms={interval_ms} slowest_stage={slowest_stage}",
-                }
-            )
+        duration_alert = await self._duration_alert(service_status)
+        if duration_alert is not None:
+            alerts.append(duration_alert)
 
         shadow_only = self.settings.engine_shadow_enabled and not self.settings.engine_paper_enabled and self.settings.engine_execution_mode_list == ["shadow"]
         if shadow_only:
@@ -296,6 +388,123 @@ class EngineValidationMonitorService:
                     }
                 )
         return alerts
+
+    async def _ensure_incidents_loaded(self) -> None:
+        if self._incidents_loaded:
+            return
+        list_incidents = getattr(self.repository, "list_operational_incidents", None)
+        if not callable(list_incidents):
+            self._incidents_loaded = True
+            return
+        try:
+            rows = await list_incidents(source_type=INCIDENT_SOURCE, limit=100)
+        except Exception:
+            return
+        self._incidents_loaded = True
+        for row in rows:
+            alert_type = str(row.get("alert_type") or "")
+            if not alert_type:
+                continue
+            self._incident_states[alert_type] = dict(row)
+            if str(row.get("state") or "") == "open":
+                self._active_watchdog_alerts[alert_type] = {
+                    "type": alert_type,
+                    "severity": str(row.get("severity") or "warning"),
+                    "detail": str((row.get("details") or {}).get("detail") or "persisted incident"),
+                    "started_at_ms": row.get("opened_at_ms"),
+                }
+        duration = self._incident_states.get("engine_loop_duration_overrun") or {}
+        details = duration.get("details") if isinstance(duration.get("details"), dict) else {}
+        samples = details.get("duration_samples") if isinstance(details.get("duration_samples"), list) else []
+        self._duration_samples = [dict(item) for item in samples[-DURATION_SAMPLE_WINDOW:] if isinstance(item, dict)]
+        self._duration_last_sample_id = str(duration.get("last_sample_id") or "") or None
+        self._duration_consecutive_good = int(details.get("duration_consecutive_good") or 0)
+        self._duration_alert_active = str(duration.get("state") or "") == "open"
+
+    async def _persist_incident(self, incident: dict[str, Any]) -> None:
+        alert_type = str(incident.get("alert_type") or "unknown")
+        self._incident_states[alert_type] = dict(incident)
+        upsert = getattr(self.repository, "upsert_operational_incident", None)
+        if not callable(upsert):
+            return
+        try:
+            persisted = await upsert(incident)
+        except Exception as exc:  # pragma: no cover - monitor remains available if persistence is degraded
+            log.warning("engine_validation_incident_persist_failed", alert_type=alert_type, error=type(exc).__name__)
+            return
+        if isinstance(persisted, dict):
+            self._incident_states[alert_type] = persisted
+
+    async def _duration_alert(self, service_status: dict[str, Any]) -> dict[str, Any] | None:
+        duration_value = service_status.get("last_run_duration_ms")
+        if duration_value is None:
+            return None
+        sample_id = str(service_status.get("last_run_id") or f"run-count:{service_status.get('run_count', 0)}")
+        duration_ms = float(duration_value)
+        interval_ms = max(5, int(self.settings.engine_loop_interval_seconds)) * 1000
+        if sample_id != self._duration_last_sample_id:
+            overrun = duration_ms > interval_ms
+            self._duration_samples.append({"sample_id": sample_id, "duration_ms": duration_ms, "overrun": overrun})
+            self._duration_samples = self._duration_samples[-DURATION_SAMPLE_WINDOW:]
+            self._duration_last_sample_id = sample_id
+            if self._duration_alert_active:
+                self._duration_consecutive_good = 0 if overrun else self._duration_consecutive_good + 1
+                if self._duration_consecutive_good >= DURATION_RECOVERY_RUNS:
+                    self._duration_alert_active = False
+            elif overrun and (
+                duration_ms > 3 * interval_ms
+                or sum(1 for item in self._duration_samples if item.get("overrun")) >= DURATION_OPEN_OVERRUNS
+            ):
+                self._duration_alert_active = True
+                self._duration_consecutive_good = 0
+            if not self._duration_alert_active:
+                previous = self._incident_states.get("engine_loop_duration_overrun") or {}
+                if str(previous.get("state") or "") != "open":
+                    await self._persist_incident(
+                        {
+                            "incident_key": self._incident_key("engine_loop_duration_overrun"),
+                            "source_type": INCIDENT_SOURCE,
+                            "alert_type": "engine_loop_duration_overrun",
+                            "state": "pending",
+                            "severity": "warning",
+                            "opened_at_ms": None,
+                            "last_seen_at_ms": previous.get("last_seen_at_ms"),
+                            "resolved_at_ms": previous.get("resolved_at_ms"),
+                            "last_notified_at_ms": previous.get("last_notified_at_ms"),
+                            "last_sample_id": sample_id,
+                            "bad_sample_count": int(previous.get("bad_sample_count") or 0),
+                            "good_sample_count": self._duration_consecutive_good,
+                            "details": self._duration_state_details(),
+                            "updated_at_ms": _now_ms(),
+                        }
+                    )
+        if not self._duration_alert_active:
+            return None
+        stage_ms = service_status.get("last_stage_ms") if isinstance(service_status.get("last_stage_ms"), dict) else {}
+        slowest_stage = max(stage_ms, key=lambda name: float(stage_ms.get(name) or 0)) if stage_ms else "unknown"
+        overrun_count = sum(1 for item in self._duration_samples if item.get("overrun"))
+        return {
+            "type": "engine_loop_duration_overrun",
+            "severity": "critical" if duration_ms > 3 * interval_ms else "warning",
+            "detail": (
+                f"last_run_duration_ms={duration_ms} interval_ms={interval_ms} "
+                f"overruns={overrun_count}/{len(self._duration_samples)} "
+                f"healthy_recovery_runs={self._duration_consecutive_good}/{DURATION_RECOVERY_RUNS} "
+                f"slowest_stage={slowest_stage}"
+            ),
+            "sample_id": sample_id,
+        }
+
+    def _duration_state_details(self) -> dict[str, Any]:
+        return {
+            "duration_samples": self._duration_samples,
+            "duration_consecutive_good": self._duration_consecutive_good,
+            "duration_alert_active": self._duration_alert_active,
+        }
+
+    @staticmethod
+    def _incident_key(alert_type: str) -> str:
+        return f"{INCIDENT_SOURCE}:{alert_type}"
 
     async def _newsfeed_health(self) -> dict[str, Any] | None:
         list_heartbeats = getattr(self.repository, "list_service_heartbeats", None)
@@ -368,6 +577,7 @@ def format_engine_validation_digest(
     service_status: dict[str, Any] | None = None,
     readiness: dict[str, Any] | None = None,
     latest_replay: dict[str, Any] | None = None,
+    recently_resolved: list[dict[str, Any]] | None = None,
 ) -> str:
     service_status = service_status or {}
     summary = report.get("summary") or {}
@@ -376,13 +586,19 @@ def format_engine_validation_digest(
     defensive_no_trade = report.get("defensive_no_trade") or {}
     buckets = report.get("ev_calibration", {}).get("bucket_summary") or {}
     readiness = readiness or {}
+    recently_resolved = recently_resolved or []
     mode = "shadow-only" if settings.engine_shadow_enabled and not settings.engine_paper_enabled else "paper/shadow"
+    execution_line = (
+        f"Measured avg slippage `{execution.get('avg_slippage_bps')}` bps | fees `${execution.get('fees_usd')}`"
+        if execution.get("measurement_state") == "measured"
+        else "Shadow execution costs `not measured`"
+    )
     lines = [
         f"🧪 **Engine validation digest — {mode}**",
         f"Loop: runs `{service_status.get('run_count', 0)}` | last error `{service_status.get('last_error') or 'none'}` | last run `{service_status.get('last_run_at_ms') or 'n/a'}`",
         f"Candidates `{summary.get('candidate_count', 0)}` | EVs `{summary.get('ev_estimate_count', 0)}` | allocations `{summary.get('allocated_count', 0)}/{summary.get('allocation_count', 0)}` ({summary.get('allocation_rate_pct', 0)}%)",
         f"Intents shadow/paper `{summary.get('shadow_intent_count', 0)}`/`{summary.get('paper_intent_count', 0)}` | reports `{summary.get('execution_report_count', 0)}` | risk rejects `{summary.get('risk_reject_count', 0)}`",
-        f"Sim avg slippage `{execution.get('avg_slippage_bps', 0)}` bps | fees `${execution.get('fees_usd', 0)}` | open positions `{summary.get('open_position_count', 0)}`",
+        f"{execution_line} | open positions `{summary.get('open_position_count', 0)}`",
         f"Readiness: `{str(readiness.get('grade') or 'unknown').upper()}` `{readiness.get('score', 'n/a')}/100` | hard blocks `{len(readiness.get('hard_blocks') or [])}` | recommendation `{readiness.get('recommendation') or 'n/a'}`",
         "",
     ]
@@ -394,6 +610,11 @@ def format_engine_validation_digest(
     else:
         lines.append("✅ **No alert conditions detected.**")
     lines.append("")
+    if recently_resolved:
+        lines.append("**Resolved since the previous digest:**")
+        for incident in recently_resolved[:10]:
+            lines.append(f"- `{incident.get('type')}` resolved at `{incident.get('resolved_at_ms')}`")
+        lines.append("")
     if latest_replay:
         metadata = latest_replay.get("metadata") or {}
         diffs = latest_replay.get("diffs") or {}
@@ -428,12 +649,19 @@ def format_engine_validation_digest(
         )
         lines.append("")
     lines.append("**Top strategies:**")
-    ranked = sorted(by_strategy.items(), key=lambda item: (item[1].get("allocated_count", 0), item[1].get("candidate_count", 0)), reverse=True)
-    for strategy, values in ranked[:6]:
-        lines.append(
-            f"- `{strategy}` candidates `{values.get('candidate_count', 0)}` | allocated `{values.get('allocated_count', 0)}` | shadow `{values.get('shadow_intent_count', 0)}` | EV `{values.get('avg_net_ev_bps', 0)}` bps | PnL `${values.get('total_pnl_usd', 0)}`"
-        )
-    if not ranked:
+    strict_groups = ((readiness.get("checks") or {}).get("strict_signal_performance") or {}).get("groups") or []
+    if strict_groups:
+        for values in sorted(strict_groups, key=lambda item: int(item.get("unique_candidate_count") or 0), reverse=True)[:6]:
+            lines.append(
+                f"- `{values.get('strategy_id')}` horizon `{values.get('candidate_horizon')}` | strict samples `{values.get('unique_candidate_count', 0)}` | mean net `{values.get('mean_modeled_net_return_bps', 0)}` bps | mean R `{values.get('mean_realized_r', 0)}`"
+            )
+    else:
+        ranked = sorted(by_strategy.items(), key=lambda item: (item[1].get("allocated_count", 0), item[1].get("candidate_count", 0)), reverse=True)
+        for strategy, values in ranked[:6]:
+            lines.append(
+                f"- `{strategy}` candidates `{values.get('candidate_count', 0)}` | allocated `{values.get('allocated_count', 0)}` | shadow `{values.get('shadow_intent_count', 0)}` | EV `{values.get('avg_net_ev_bps', 0)}` bps | latest mark PnL `${values.get('total_pnl_usd', 0)}`"
+            )
+    if not strict_groups and not by_strategy:
         lines.append("- no strategies observed yet")
     lines.append("")
     lines.append("**EV buckets:**")

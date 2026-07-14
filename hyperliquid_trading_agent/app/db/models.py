@@ -929,6 +929,29 @@ class OperationalNotificationRow(TimestampMixin, Base):
     updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+class OperationalIncidentRecord(TimestampMixin, Base):
+    __tablename__ = "operational_incidents"
+    __table_args__ = (
+        Index("ix_operational_incidents_source_state", "source_type", "state"),
+        Index("ix_operational_incidents_alert_type", "alert_type"),
+    )
+
+    incident_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    source_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    alert_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    state: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, default="warning")
+    opened_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    last_seen_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    resolved_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    last_notified_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    last_sample_id: Mapped[str | None] = mapped_column(String(128))
+    bad_sample_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    good_sample_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 class EngineOperatorProposalRow(TimestampMixin, Base):
     __tablename__ = "engine_operator_proposals"
     __table_args__ = (

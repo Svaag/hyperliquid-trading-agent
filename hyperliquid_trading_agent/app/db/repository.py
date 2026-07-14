@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import statistics
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable, cast
 from uuid import uuid4
@@ -91,6 +92,7 @@ from hyperliquid_trading_agent.app.db.models import (
     NewswireStoryRevisionRow,
     NewswireStoryRow,
     NormalizedEventRecord,
+    OperationalIncidentRecord,
     OperationalNotificationRow,
     OperatorFeedbackRecord,
     OperatorOutputLessonRecord,
@@ -2687,6 +2689,485 @@ class Repository:
                 ),
             }
 
+    async def get_engine_readiness_aggregates(self, *, start_ms: int, end_ms: int) -> dict[str, Any]:
+        """Return uncapped promotion-gate evidence for one half-open cohort."""
+
+        if self.sessionmaker is None:
+            return {}
+        start = int(start_ms)
+        end = int(end_ms)
+        matured_before = end - 5 * 60 * 1000
+
+        async with self.sessionmaker() as session:
+            candidate_stats = (
+                await session.execute(
+                    select(
+                        func.count(),
+                        func.min(AlphaCandidateRecord.created_at_ms),
+                        func.max(AlphaCandidateRecord.created_at_ms),
+                    ).where(AlphaCandidateRecord.created_at_ms >= start, AlphaCandidateRecord.created_at_ms < end)
+                )
+            ).one()
+            intent_rows = (
+                await session.execute(
+                    select(
+                        OrderIntentRecord.execution_mode,
+                        func.count(),
+                        func.min(OrderIntentRecord.created_at_ms),
+                        func.max(OrderIntentRecord.created_at_ms),
+                    )
+                    .where(OrderIntentRecord.created_at_ms >= start, OrderIntentRecord.created_at_ms < end)
+                    .group_by(OrderIntentRecord.execution_mode)
+                )
+            ).all()
+            intent_counts = {str(mode): int(count or 0) for mode, count, _, _ in intent_rows}
+            shadow_first = min([int(first) for mode, _, first, _ in intent_rows if mode == "shadow" and first] or [0]) or None
+            report_rows = (
+                await session.execute(
+                    select(ExecutionReportRecord.execution_mode, func.count())
+                    .where(ExecutionReportRecord.created_at_ms >= start, ExecutionReportRecord.created_at_ms < end)
+                    .group_by(ExecutionReportRecord.execution_mode)
+                )
+            ).all()
+            report_counts = {str(mode): int(count or 0) for mode, count in report_rows}
+            report_status_rows = (
+                await session.execute(
+                    select(ExecutionReportRecord.status, func.count())
+                    .where(ExecutionReportRecord.created_at_ms >= start, ExecutionReportRecord.created_at_ms < end)
+                    .group_by(ExecutionReportRecord.status)
+                )
+            ).all()
+            report_status_counts = {str(status): int(count or 0) for status, count in report_status_rows}
+            measured_report_stats = (
+                await session.execute(
+                    select(
+                        func.count(),
+                        func.sum(ExecutionReportRecord.slippage_bps),
+                        func.sum(ExecutionReportRecord.fees_usd),
+                    ).where(
+                        ExecutionReportRecord.created_at_ms >= start,
+                        ExecutionReportRecord.created_at_ms < end,
+                        ExecutionReportRecord.status == "filled",
+                        ExecutionReportRecord.avg_fill_px.is_not(None),
+                        ExecutionReportRecord.filled_size > 0,
+                    )
+                )
+            ).one()
+            risk_rows = (
+                await session.execute(
+                    select(RiskGatewayDecisionRecord.decision, func.count())
+                    .where(RiskGatewayDecisionRecord.created_at_ms >= start, RiskGatewayDecisionRecord.created_at_ms < end)
+                    .group_by(RiskGatewayDecisionRecord.decision)
+                )
+            ).all()
+            risk_counts = {str(decision): int(count or 0) for decision, count in risk_rows}
+
+            async def distinct_join_count(column: Any, model: Any, on_clause: Any, *conditions: Any) -> int:
+                value = await session.execute(
+                    select(func.count(func.distinct(column)))
+                    .select_from(model)
+                    .join(AlphaCandidateRecord, on_clause)
+                    .where(
+                        AlphaCandidateRecord.created_at_ms >= start,
+                        AlphaCandidateRecord.created_at_ms < end,
+                        *conditions,
+                    )
+                )
+                return int(value.scalar_one() or 0)
+
+            candidate_count = int(candidate_stats[0] or 0)
+            ev_estimate_count = int(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(EVEstimateRecord)
+                        .where(EVEstimateRecord.created_at_ms >= start, EVEstimateRecord.created_at_ms < end)
+                    )
+                ).scalar_one()
+                or 0
+            )
+            candidate_before_window = bool(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(AlphaCandidateRecord)
+                        .where(AlphaCandidateRecord.created_at_ms < start)
+                    )
+                ).scalar_one()
+            )
+            shadow_intent_before_window = bool(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(OrderIntentRecord)
+                        .where(OrderIntentRecord.created_at_ms < start, OrderIntentRecord.execution_mode == "shadow")
+                    )
+                ).scalar_one()
+            )
+            non_flat_count = int(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(AlphaCandidateRecord)
+                        .where(
+                            AlphaCandidateRecord.created_at_ms >= start,
+                            AlphaCandidateRecord.created_at_ms < end,
+                            AlphaCandidateRecord.side != "flat",
+                        )
+                    )
+                ).scalar_one()
+                or 0
+            )
+            flat_count = candidate_count - non_flat_count
+            matured_candidate_count = int(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(AlphaCandidateRecord)
+                        .where(
+                            AlphaCandidateRecord.created_at_ms >= start,
+                            AlphaCandidateRecord.created_at_ms < end,
+                            AlphaCandidateRecord.created_at_ms <= matured_before,
+                        )
+                    )
+                ).scalar_one()
+                or 0
+            )
+            ev_covered = await distinct_join_count(
+                EVEstimateRecord.candidate_id,
+                EVEstimateRecord,
+                EVEstimateRecord.candidate_id == AlphaCandidateRecord.candidate_id,
+            )
+            evidence_covered = await distinct_join_count(
+                CandidateEvidenceLinkRecord.candidate_id,
+                CandidateEvidenceLinkRecord,
+                CandidateEvidenceLinkRecord.candidate_id == AlphaCandidateRecord.candidate_id,
+            )
+            council_covered = await distinct_join_count(
+                CandidateEvidenceLinkRecord.candidate_id,
+                CandidateEvidenceLinkRecord,
+                CandidateEvidenceLinkRecord.candidate_id == AlphaCandidateRecord.candidate_id,
+                CandidateEvidenceLinkRecord.council_review_id.is_not(None),
+            )
+            risk_candidate_covered = await distinct_join_count(
+                CandidateEvidenceLinkRecord.candidate_id,
+                CandidateEvidenceLinkRecord,
+                CandidateEvidenceLinkRecord.candidate_id == AlphaCandidateRecord.candidate_id,
+                AlphaCandidateRecord.side != "flat",
+                CandidateEvidenceLinkRecord.risk_decision_id.is_not(None),
+            )
+            flat_risk_covered = await distinct_join_count(
+                CandidateEvidenceLinkRecord.candidate_id,
+                CandidateEvidenceLinkRecord,
+                CandidateEvidenceLinkRecord.candidate_id == AlphaCandidateRecord.candidate_id,
+                AlphaCandidateRecord.side == "flat",
+                CandidateEvidenceLinkRecord.risk_decision_id.is_not(None),
+            )
+            matured_outcome_covered = await distinct_join_count(
+                CandidateOutcomeAttributionRecord.candidate_id,
+                CandidateOutcomeAttributionRecord,
+                CandidateOutcomeAttributionRecord.candidate_id == AlphaCandidateRecord.candidate_id,
+                AlphaCandidateRecord.created_at_ms <= matured_before,
+                CandidateOutcomeAttributionRecord.terminal_state.in_(["matured", "missing_mark"]),
+            )
+            candidate_outcome_attribution_count = int(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(CandidateOutcomeAttributionRecord)
+                        .join(
+                            AlphaCandidateRecord,
+                            AlphaCandidateRecord.candidate_id == CandidateOutcomeAttributionRecord.candidate_id,
+                        )
+                        .where(
+                            AlphaCandidateRecord.created_at_ms >= start,
+                            AlphaCandidateRecord.created_at_ms < end,
+                        )
+                    )
+                ).scalar_one()
+                or 0
+            )
+            risk_intent_covered = int(
+                (
+                    await session.execute(
+                        select(func.count(func.distinct(OrderIntentRecord.intent_id)))
+                        .select_from(OrderIntentRecord)
+                        .join(RiskGatewayDecisionRecord, RiskGatewayDecisionRecord.intent_id == OrderIntentRecord.intent_id)
+                        .where(OrderIntentRecord.created_at_ms >= start, OrderIntentRecord.created_at_ms < end)
+                    )
+                ).scalar_one()
+                or 0
+            )
+            allocated_candidate_count = int(
+                (
+                    await session.execute(
+                        select(func.count(func.distinct(AllocationDecisionRecord.candidate_id)))
+                        .where(
+                            AllocationDecisionRecord.created_at_ms >= start,
+                            AllocationDecisionRecord.created_at_ms < end,
+                            AllocationDecisionRecord.status.in_(["allocate", "reduce", "require_debate"]),
+                        )
+                    )
+                ).scalar_one()
+                or 0
+            )
+            council_covered_allocated_count = int(
+                (
+                    await session.execute(
+                        select(func.count(func.distinct(AllocationDecisionRecord.candidate_id)))
+                        .select_from(AllocationDecisionRecord)
+                        .join(CouncilReviewRecord, CouncilReviewRecord.candidate_id == AllocationDecisionRecord.candidate_id)
+                        .where(
+                            AllocationDecisionRecord.created_at_ms >= start,
+                            AllocationDecisionRecord.created_at_ms < end,
+                            AllocationDecisionRecord.status.in_(["allocate", "reduce", "require_debate"]),
+                        )
+                    )
+                ).scalar_one()
+                or 0
+            )
+
+            allocation_rows = (
+                await session.execute(
+                    select(AllocationDecisionRecord.status, func.count())
+                    .where(AllocationDecisionRecord.created_at_ms >= start, AllocationDecisionRecord.created_at_ms < end)
+                    .group_by(AllocationDecisionRecord.status)
+                )
+            ).all()
+            allocation_counts = {str(status): int(count or 0) for status, count in allocation_rows}
+            allocated_rows = (
+                await session.execute(
+                    select(AllocationDecisionRecord.allocated_notional_usd, AllocationDecisionRecord.metadata_json)
+                    .where(
+                        AllocationDecisionRecord.created_at_ms >= start,
+                        AllocationDecisionRecord.created_at_ms < end,
+                        AllocationDecisionRecord.status.in_(["allocate", "reduce", "require_debate"]),
+                    )
+                )
+            ).all()
+            allocation_notional_by_strategy: dict[str, float] = {}
+            allocation_notional_by_family: dict[str, float] = {}
+            allocation_notional_by_symbol_strategy: dict[str, float] = {}
+            total_allocated_notional = 0.0
+            for notional_value, metadata_value in allocated_rows:
+                metadata = metadata_value if isinstance(metadata_value, dict) else {}
+                notional = float(notional_value or 0.0)
+                strategy = str(metadata.get("strategy_id") or "unknown")
+                family = str(metadata.get("strategy_family") or "unknown")
+                asset = str(metadata.get("asset") or "UNKNOWN").upper()
+                total_allocated_notional += notional
+                allocation_notional_by_strategy[strategy] = allocation_notional_by_strategy.get(strategy, 0.0) + notional
+                allocation_notional_by_family[family] = allocation_notional_by_family.get(family, 0.0) + notional
+                symbol_strategy = f"{asset}:{strategy}"
+                allocation_notional_by_symbol_strategy[symbol_strategy] = allocation_notional_by_symbol_strategy.get(symbol_strategy, 0.0) + notional
+
+            matured_rows = (
+                await session.execute(
+                    select(
+                        AlphaCandidateRecord.strategy_id,
+                        func.count(func.distinct(CandidateOutcomeAttributionRecord.candidate_id)),
+                    )
+                    .select_from(AlphaCandidateRecord)
+                    .join(
+                        CandidateOutcomeAttributionRecord,
+                        CandidateOutcomeAttributionRecord.candidate_id == AlphaCandidateRecord.candidate_id,
+                    )
+                    .where(
+                        AlphaCandidateRecord.created_at_ms >= start,
+                        AlphaCandidateRecord.created_at_ms < end,
+                        CandidateOutcomeAttributionRecord.terminal_state == "matured",
+                    )
+                    .group_by(AlphaCandidateRecord.strategy_id)
+                )
+            ).all()
+            matured_by_strategy = {str(strategy): int(count or 0) for strategy, count in matured_rows}
+            candidate_metadata_rows = (
+                await session.execute(
+                    select(
+                        AlphaCandidateRecord.strategy_id,
+                        AlphaCandidateRecord.side,
+                        AlphaCandidateRecord.regime_snapshot_id,
+                        AlphaCandidateRecord.metadata_json,
+                    ).where(AlphaCandidateRecord.created_at_ms >= start, AlphaCandidateRecord.created_at_ms < end)
+                )
+            ).all()
+            active_strategies: set[str] = set()
+            active_families: set[str] = set()
+            raw_paper_strategies: set[str] = set()
+            raw_paper_families: set[str] = set()
+            paper_strategy_families: dict[str, str] = {}
+            candidate_strategy_metadata_covered_count = 0
+            for strategy_value, side, regime_snapshot_id, metadata_value in candidate_metadata_rows:
+                metadata = metadata_value if isinstance(metadata_value, dict) else {}
+                family = str(metadata.get("strategy_family") or "unknown")
+                strategy_version = str(metadata.get("strategy_version") or "unknown")
+                if (
+                    strategy_value
+                    and strategy_version != "unknown"
+                    and family != "unknown"
+                    and regime_snapshot_id
+                    and metadata.get("feature_coverage_pct") is not None
+                ):
+                    candidate_strategy_metadata_covered_count += 1
+                counts_for_breadth = bool(metadata.get("counts_for_breadth", True))
+                if not counts_for_breadth or family in {"legacy_bridge", "risk_off_defensive"} or side == "flat":
+                    continue
+                strategy = str(strategy_value or "unknown")
+                active_strategies.add(strategy)
+                active_families.add(family)
+                source_integrity = metadata.get("source_integrity") if isinstance(metadata.get("source_integrity"), dict) else {}
+                activation_scope = str(metadata.get("activation_scope") or source_integrity.get("activation_scope") or "paper_shadow")
+                paper_eligible = bool(metadata.get("paper_eligible", source_integrity.get("paper_eligible", True))) and activation_scope != "shadow_only"
+                if paper_eligible:
+                    raw_paper_strategies.add(strategy)
+                    raw_paper_families.add(family)
+                    paper_strategy_families[strategy] = family
+
+            performance_rows = (
+                await session.execute(
+                    select(
+                        OrderIntentRecord.strategy_id,
+                        AlphaCandidateRecord.candidate_id,
+                        AlphaCandidateRecord.horizon,
+                        AlphaCandidateRecord.metadata_json,
+                        CandidateOutcomeAttributionRecord.outcome_window,
+                        CandidateOutcomeAttributionRecord.net_return_bps,
+                        CandidateOutcomeAttributionRecord.realized_r,
+                        CandidateOutcomeAttributionRecord.quality_flags_json,
+                        CandidateOutcomeAttributionRecord.metadata_json,
+                    )
+                    .select_from(OrderIntentRecord)
+                    .join(AlphaCandidateRecord, AlphaCandidateRecord.candidate_id == OrderIntentRecord.parent_candidate_id)
+                    .join(
+                        CandidateOutcomeAttributionRecord,
+                        and_(
+                            CandidateOutcomeAttributionRecord.candidate_id == AlphaCandidateRecord.candidate_id,
+                            CandidateOutcomeAttributionRecord.outcome_window == AlphaCandidateRecord.horizon,
+                        ),
+                    )
+                    .where(
+                        OrderIntentRecord.execution_mode == "shadow",
+                        OrderIntentRecord.created_at_ms >= start,
+                        OrderIntentRecord.created_at_ms < end,
+                        CandidateOutcomeAttributionRecord.terminal_state == "matured",
+                    )
+                )
+            ).all()
+            strict_groups: dict[tuple[str, str, str], list[tuple[str, float, float]]] = {}
+            strict_exclusions: dict[str, int] = {}
+            for strategy_value, candidate_id, horizon, candidate_metadata, outcome_window, net_return, realized_r, flags_value, outcome_metadata in performance_rows:
+                metadata = candidate_metadata if isinstance(candidate_metadata, dict) else {}
+                source_integrity = metadata.get("source_integrity") if isinstance(metadata.get("source_integrity"), dict) else {}
+                flags = {str(item) for item in (flags_value or [])}
+                mark_metadata = outcome_metadata if isinstance(outcome_metadata, dict) else {}
+                exclusion = None
+                if {"latest_mark_fallback", "late_mark", "future_mark"} & flags:
+                    exclusion = "non_strict_mark"
+                elif str(mark_metadata.get("mark_source") or "unknown") != "feature_store_mid":
+                    exclusion = "non_strict_mark_source"
+                elif not bool(metadata.get("paper_eligible", source_integrity.get("paper_eligible", True))) or str(metadata.get("activation_scope") or source_integrity.get("activation_scope") or "paper_shadow") == "shadow_only":
+                    exclusion = "not_paper_eligible"
+                elif not bool(metadata.get("counts_for_breadth", True)):
+                    exclusion = "excluded_from_breadth"
+                if exclusion:
+                    strict_exclusions[exclusion] = strict_exclusions.get(exclusion, 0) + 1
+                    continue
+                family = str(metadata.get("strategy_family") or "unknown")
+                key = (str(strategy_value or "unknown"), str(horizon or outcome_window or "unknown"), family)
+                strict_groups.setdefault(key, []).append((str(candidate_id), float(net_return or 0.0), float(realized_r or 0.0)))
+            strict_performance = []
+            for (strategy, horizon, family), values in sorted(strict_groups.items()):
+                returns = [item[1] for item in values]
+                realized = [item[2] for item in values]
+                strict_performance.append(
+                    {
+                        "strategy_id": strategy,
+                        "strategy_family": family,
+                        "candidate_horizon": horizon,
+                        "sample_count": len(values),
+                        "unique_candidate_count": len({item[0] for item in values}),
+                        "mean_modeled_net_return_bps": round(sum(returns) / len(returns), 4),
+                        "median_modeled_net_return_bps": round(statistics.median(returns), 4),
+                        "mean_realized_r": round(sum(realized) / len(realized), 4),
+                    }
+                )
+
+            return {
+                "window": {
+                    "start_ms": start,
+                    "end_ms": end,
+                    "first_candidate_ms": int(candidate_stats[1]) if candidate_stats[1] else None,
+                    "last_candidate_ms": int(candidate_stats[2]) if candidate_stats[2] else None,
+                    "first_shadow_intent_ms": shadow_first,
+                    "candidate_before_window": candidate_before_window,
+                    "shadow_intent_before_window": shadow_intent_before_window,
+                    "semantics": "[start_ms,end_ms)",
+                },
+                "counts": {
+                    "candidate_count": candidate_count,
+                    "ev_estimate_count": ev_estimate_count,
+                    "non_flat_candidate_count": non_flat_count,
+                    "flat_candidate_count": flat_count,
+                    "shadow_intent_count": intent_counts.get("shadow", 0),
+                    "paper_intent_count": intent_counts.get("paper", 0),
+                    "live_intent_count": intent_counts.get("live", 0),
+                    "intent_count": sum(intent_counts.values()),
+                    "execution_report_count": sum(report_counts.values()),
+                    "execution_failure_count": sum(
+                        report_status_counts.get(status, 0)
+                        for status in ("failed", "rejected", "expired", "cancelled")
+                    ),
+                    "measured_execution_report_count": int(measured_report_stats[0] or 0),
+                    "measured_slippage_total_bps": float(measured_report_stats[1] or 0.0),
+                    "measured_fees_total_usd": float(measured_report_stats[2] or 0.0),
+                    "shadow_report_count": report_counts.get("shadow", 0),
+                    "paper_report_count": report_counts.get("paper", 0),
+                    "live_report_count": report_counts.get("live", 0),
+                    "risk_decision_count": sum(risk_counts.values()),
+                    "risk_reject_count": risk_counts.get("reject", 0),
+                    "allocation_count": sum(allocation_counts.values()),
+                    "allocated_count": sum(allocation_counts.get(status, 0) for status in ("allocate", "reduce", "require_debate")),
+                    "matured_candidate_count": matured_candidate_count,
+                    "allocated_candidate_count": allocated_candidate_count,
+                    "candidate_outcome_attribution_count": candidate_outcome_attribution_count,
+                },
+                "coverage": {
+                    "ev_covered_candidate_count": ev_covered,
+                    "evidence_covered_candidate_count": evidence_covered,
+                    "council_covered_candidate_count": council_covered,
+                    "risk_covered_candidate_count": risk_candidate_covered,
+                    "flat_risk_covered_candidate_count": flat_risk_covered,
+                    "matured_outcome_covered_candidate_count": matured_outcome_covered,
+                    "risk_covered_intent_count": risk_intent_covered,
+                    "council_covered_allocated_candidate_count": council_covered_allocated_count,
+                    "candidate_strategy_metadata_covered_count": candidate_strategy_metadata_covered_count,
+                },
+                "breadth": {
+                    "active_shadow_strategies": sorted(active_strategies),
+                    "active_shadow_families": sorted(active_families),
+                    "raw_paper_eligible_strategies": sorted(raw_paper_strategies),
+                    "raw_paper_eligible_families": sorted(raw_paper_families),
+                    "paper_eligible_strategy_families": paper_strategy_families,
+                    "matured_outcome_candidate_count_by_strategy": matured_by_strategy,
+                },
+                "concentration": {
+                    "total_allocated_notional_usd": round(total_allocated_notional, 4),
+                    "allocation_notional_by_strategy": {key: round(value, 4) for key, value in allocation_notional_by_strategy.items()},
+                    "allocation_notional_by_family": {key: round(value, 4) for key, value in allocation_notional_by_family.items()},
+                    "allocation_notional_by_symbol_strategy": {key: round(value, 4) for key, value in allocation_notional_by_symbol_strategy.items()},
+                },
+                "execution": {
+                    "status_counts": report_status_counts,
+                    "measurement_semantics": "filled reports with positive size and an actual fill price",
+                },
+                "strict_performance": {
+                    "rows_seen": len(performance_rows),
+                    "exclusions": strict_exclusions,
+                    "groups": strict_performance,
+                    "semantics": "paper-eligible shadow intents, native horizon, strict feature-store marks, modeled costs",
+                },
+            }
+
     async def _merge_engine_record(self, item: Any, primary_key_attr: str) -> str | None:
         if self.sessionmaker is None:
             return None
@@ -3769,6 +4250,54 @@ class Repository:
                 "oldest_pending_at_ms": pending.scheduled_at_ms if pending is not None else None,
                 "oldest_pending_error": pending.last_error if pending is not None else None,
             }
+
+    async def upsert_operational_incident(self, incident: dict[str, Any]) -> dict[str, Any]:
+        incident_key = str(incident["incident_key"])[:255]
+        if self.sessionmaker is None:
+            return {**incident, "incident_key": incident_key}
+        async with self.sessionmaker() as session:
+            item = await session.get(OperationalIncidentRecord, incident_key)
+            if item is None:
+                item = OperationalIncidentRecord(
+                    incident_key=incident_key,
+                    source_type=str(incident.get("source_type") or "unknown")[:64],
+                    alert_type=str(incident.get("alert_type") or "unknown")[:128],
+                    updated_at_ms=int(incident.get("updated_at_ms") or _runtime_now_ms()),
+                )
+                session.add(item)
+            item.source_type = str(incident.get("source_type") or item.source_type or "unknown")[:64]
+            item.alert_type = str(incident.get("alert_type") or item.alert_type or "unknown")[:128]
+            item.state = str(incident.get("state") or item.state or "pending")[:24]
+            item.severity = str(incident.get("severity") or item.severity or "warning")[:16]
+            item.opened_at_ms = incident.get("opened_at_ms")
+            item.last_seen_at_ms = incident.get("last_seen_at_ms")
+            item.resolved_at_ms = incident.get("resolved_at_ms")
+            item.last_notified_at_ms = incident.get("last_notified_at_ms")
+            item.last_sample_id = str(incident["last_sample_id"])[:128] if incident.get("last_sample_id") else None
+            item.bad_sample_count = int(incident.get("bad_sample_count") or 0)
+            item.good_sample_count = int(incident.get("good_sample_count") or 0)
+            item.details_json = redact_secrets(dict(incident.get("details") or {}))
+            item.updated_at_ms = int(incident.get("updated_at_ms") or _runtime_now_ms())
+            await session.commit()
+            return _operational_incident_to_dict(item)
+
+    async def list_operational_incidents(
+        self,
+        *,
+        source_type: str | None = None,
+        state: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(OperationalIncidentRecord).order_by(OperationalIncidentRecord.updated_at_ms.desc()).limit(max(1, limit))
+            if source_type:
+                stmt = stmt.where(OperationalIncidentRecord.source_type == str(source_type))
+            if state:
+                stmt = stmt.where(OperationalIncidentRecord.state == str(state))
+            result = await session.execute(stmt)
+            return [_operational_incident_to_dict(item) for item in result.scalars().all()]
 
     async def enqueue_operational_notification(
         self,
@@ -6717,6 +7246,25 @@ def _operational_notification_to_dict(item: OperationalNotificationRow) -> dict[
         "discord_message_id": item.discord_message_id,
         "sent_at_ms": item.sent_at_ms,
         "last_error": item.last_error,
+        "updated_at_ms": item.updated_at_ms,
+    }
+
+
+def _operational_incident_to_dict(item: OperationalIncidentRecord) -> dict[str, Any]:
+    return {
+        "incident_key": item.incident_key,
+        "source_type": item.source_type,
+        "alert_type": item.alert_type,
+        "state": item.state,
+        "severity": item.severity,
+        "opened_at_ms": item.opened_at_ms,
+        "last_seen_at_ms": item.last_seen_at_ms,
+        "resolved_at_ms": item.resolved_at_ms,
+        "last_notified_at_ms": item.last_notified_at_ms,
+        "last_sample_id": item.last_sample_id,
+        "bad_sample_count": item.bad_sample_count,
+        "good_sample_count": item.good_sample_count,
+        "details": item.details_json or {},
         "updated_at_ms": item.updated_at_ms,
     }
 

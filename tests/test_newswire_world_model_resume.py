@@ -148,3 +148,34 @@ def test_stored_newswire_pump_does_not_advance_offset_past_failed_event(tmp_path
         assert seen == ["nw_a", "nw_b", "nw_c"]
 
     anyio.run(run)
+
+
+def test_stored_newswire_pump_clears_active_error_after_successful_retry(tmp_path: Path) -> None:
+    async def run() -> None:
+        repo = await _repo(tmp_path)
+        await _record(repo, "nw_retry", 100)
+        fail_once = True
+
+        async def callback(_event: NewswireEvent) -> None:
+            nonlocal fail_once
+            if fail_once:
+                fail_once = False
+                raise RuntimeError("transient")
+
+        pump = StoredNewswirePump(
+            consumer_name="world_model:newswire",
+            repository=repo,
+            callbacks=[callback],
+            batch_size=10,
+        )
+        assert await pump.run_once() == 0
+        assert pump.status()["consecutive_error_count"] == 1
+        assert pump.status()["last_error_at_ms"] is not None
+
+        assert await pump.run_once() == 1
+        assert pump.error_count == 1
+        assert pump.status()["consecutive_error_count"] == 0
+        assert pump.status()["last_success_at_ms"] is not None
+        assert pump.status()["last_error"] is None
+
+    anyio.run(run)

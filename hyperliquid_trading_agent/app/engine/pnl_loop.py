@@ -118,7 +118,9 @@ class EnginePnLAttributionLoopService:
             notional = entry_px * size
             slippage_cost = abs(notional) * slippage_bps / 10_000
             total = gross - fees_usd - slippage_cost
-            window_start = last_window_end.get(str(position.get("position_id") or "")) or int(position.get("opened_at_ms") or position.get("updated_at_ms") or ts)
+            opened_at_ms = int(position.get("opened_at_ms") or position.get("updated_at_ms") or ts)
+            previous_snapshot_at_ms = last_window_end.get(str(position.get("position_id") or ""))
+            window_start = opened_at_ms
             attribution = {
                 "attribution_id": _attr_id(position, window_start, ts),
                 "position_id": position.get("position_id"),
@@ -144,7 +146,11 @@ class EnginePnLAttributionLoopService:
                     "holding_ms": ts - int(position.get("opened_at_ms") or position.get("updated_at_ms") or ts),
                     "source": self.settings.engine_pnl_attribution_mark_source,
                 },
-                "metadata": {"exchange_actions": []},
+                "metadata": {
+                    "exchange_actions": [],
+                    "record_semantics": "position_snapshot",
+                    "previous_snapshot_at_ms": previous_snapshot_at_ms,
+                },
             }
             await self.repository.record_pnl_attribution(attribution)
             created += 1

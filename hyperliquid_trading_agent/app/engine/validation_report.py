@@ -64,6 +64,17 @@ async def build_engine_validation_report(
     risk_decisions = await cohort_list("list_risk_gateway_decisions")
     risk_rejects = [item for item in risk_decisions if item.get("decision") == "reject"]
     pnl_records = await cohort_list("list_pnl_attribution")
+    latest_pnl_by_position: dict[str, dict[str, Any]] = {}
+    unpositioned_pnl: list[dict[str, Any]] = []
+    for item in pnl_records:
+        position_id = str(item.get("position_id") or "")
+        if not position_id:
+            unpositioned_pnl.append(item)
+            continue
+        previous = latest_pnl_by_position.get(position_id)
+        if previous is None or int(item.get("window_end_ms") or 0) > int(previous.get("window_end_ms") or 0):
+            latest_pnl_by_position[position_id] = item
+    latest_pnl_records = [*latest_pnl_by_position.values(), *unpositioned_pnl]
 
     count_method = getattr(repository, "get_engine_validation_counts", None)
     headline_counts: dict[str, int] = {}
@@ -104,7 +115,7 @@ async def build_engine_validation_report(
     bucket_realized: dict[str, list[float]] = defaultdict(list)
 
     realized_by_candidate: dict[str, list[float]] = defaultdict(list)
-    for item in pnl_records:
+    for item in latest_pnl_records:
         if item.get("candidate_id"):
             realized_by_candidate[str(item["candidate_id"])].append(_f(item.get("total_pnl_usd")))
 
@@ -168,7 +179,7 @@ async def build_engine_validation_report(
         if position.get("position_state") == "open":
             by_strategy[strategy]["positions_open"] += 1
 
-    for pnl in pnl_records:
+    for pnl in latest_pnl_records:
         strategy = _strategy_of(pnl)
         by_strategy[strategy]["total_pnl_usd"] = round(by_strategy[strategy]["total_pnl_usd"] + _f(pnl.get("total_pnl_usd")), 4)
         by_strategy[strategy]["alpha_pnl_usd"] = round(by_strategy[strategy]["alpha_pnl_usd"] + _f(pnl.get("alpha_pnl_usd")), 4)
@@ -187,6 +198,11 @@ async def build_engine_validation_report(
     total_shadow_intents = int(headline_counts.get("shadow_intent_count", sum(1 for item in intents if item.get("execution_mode") == "shadow")))
     total_paper_intents = int(headline_counts.get("paper_intent_count", sum(1 for item in intents if item.get("execution_mode") == "paper")))
     total_live_intents = int(headline_counts.get("live_intent_count", sum(1 for item in intents if item.get("execution_mode") == "live")))
+    measured_execution_reports = [
+        item
+        for item in reports
+        if item.get("status") == "filled" and item.get("avg_fill_px") is not None and _f(item.get("filled_size")) > 0
+    ]
     signal_path_comparison = await build_signal_path_comparison(
         repository,
         settings=settings,
@@ -237,8 +253,16 @@ async def build_engine_validation_report(
             "paper_intent_count": total_paper_intents,
             "live_intent_count": total_live_intents,
             "status_counts": dict(Counter(str(item.get("status") or "unknown") for item in reports)),
-            "avg_slippage_bps": round(_avg([_f(item.get("slippage_bps")) for item in reports]), 4),
-            "fees_usd": round(sum(_f(item.get("fees_usd")) for item in reports), 4),
+            "measurement_state": "measured" if measured_execution_reports else "not_measured",
+            "measured_report_count": len(measured_execution_reports),
+            "avg_slippage_bps": round(_avg([_f(item.get("slippage_bps")) for item in measured_execution_reports]), 4) if measured_execution_reports else None,
+            "fees_usd": round(sum(_f(item.get("fees_usd")) for item in measured_execution_reports), 4) if measured_execution_reports else None,
+        },
+        "pnl_snapshot_semantics": {
+            "record_count": int(headline_counts.get("pnl_attribution_count", len(pnl_records))),
+            "latest_position_snapshot_count": len(latest_pnl_records),
+            "aggregation": "latest_snapshot_per_position",
+            "strategy_performance_source": "candidate_outcome_attributions",
         },
         "pnl_attribution_by_strategy": {
             strategy: {

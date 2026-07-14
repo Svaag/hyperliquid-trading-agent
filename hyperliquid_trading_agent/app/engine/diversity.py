@@ -50,6 +50,7 @@ class PortfolioDiversityController:
         current_loop_allocations: list[AllocationDecision],
         repository: Any | None,
         timestamp_ms: int,
+        historical_allocations: list[dict[str, Any]] | None = None,
     ) -> AllocationDecision:
         decision = await self.evaluate(
             candidate,
@@ -57,6 +58,7 @@ class PortfolioDiversityController:
             current_loop_allocations=current_loop_allocations,
             repository=repository,
             timestamp_ms=timestamp_ms,
+            historical_allocations=historical_allocations,
         )
         await self._persist_event(decision.event, repository=repository)
         metadata = {**allocation.metadata, "diversity": decision.metadata}
@@ -81,10 +83,16 @@ class PortfolioDiversityController:
         current_loop_allocations: list[AllocationDecision],
         repository: Any | None,
         timestamp_ms: int,
+        historical_allocations: list[dict[str, Any]] | None = None,
     ) -> DiversityDecision:
         if not self.enabled:
             return self._decision(True, [], candidate, allocation, timestamp_ms=timestamp_ms, window={}, projected={"controller_disabled": True})
-        window_allocations = await self._window_allocations(repository=repository, current_loop_allocations=current_loop_allocations, timestamp_ms=timestamp_ms)
+        window_allocations = await self._window_allocations(
+            repository=repository,
+            current_loop_allocations=current_loop_allocations,
+            timestamp_ms=timestamp_ms,
+            historical_allocations=historical_allocations,
+        )
         window = _aggregate(window_allocations)
         if allocation.status not in ALLOCATING_STATUSES or allocation.allocated_notional_usd <= 0:
             return self._decision(True, [], candidate, allocation, timestamp_ms=timestamp_ms, window=window, projected={"passthrough_status": allocation.status})
@@ -105,10 +113,17 @@ class PortfolioDiversityController:
             return self._decision(True, [*reasons, "shadow_observation_report_only"], candidate, allocation, timestamp_ms=timestamp_ms, window=window, projected={**projected, "shadow_observation_report_only": True})
         return self._decision(not reasons, reasons, candidate, allocation, timestamp_ms=timestamp_ms, window=window, projected=projected)
 
-    async def _window_allocations(self, *, repository: Any | None, current_loop_allocations: list[AllocationDecision], timestamp_ms: int) -> list[dict[str, Any]]:
+    async def _window_allocations(
+        self,
+        *,
+        repository: Any | None,
+        current_loop_allocations: list[AllocationDecision],
+        timestamp_ms: int,
+        historical_allocations: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         cutoff = timestamp_ms - self.lookback_ms
-        rows: list[dict[str, Any]] = []
-        if repository is not None and getattr(repository, "enabled", False):
+        rows: list[dict[str, Any]] = list(historical_allocations or [])
+        if historical_allocations is None and repository is not None and getattr(repository, "enabled", False):
             list_allocations = getattr(repository, "list_allocation_decisions", None)
             if callable(list_allocations):
                 try:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import time
+from collections import deque
 from typing import Any
 
 from hyperliquid_trading_agent.app.engine.alpha.base import StrategyGenerationTrace, evaluate_strategy
@@ -107,9 +108,15 @@ class InstitutionalEngineService:
                 configure(settings)
         self.last_run_at_ms: int | None = None
         self.last_run_id: str | None = None
+        self.last_run_completed_at_ms: int | None = None
+        self.last_successful_run_completed_at_ms: int | None = None
+        self.run_in_progress = False
+        self.current_run_id: str | None = None
+        self.current_run_started_at_ms: int | None = None
         self.last_error: str | None = None
         self.last_run_duration_ms: float | None = None
         self.last_stage_ms: dict[str, float] = {}
+        self._recent_run_durations_ms: deque[float] = deque(maxlen=100)
         self.run_count = 0
         self.candidates_created = 0
         self.order_intents_created = 0
@@ -128,9 +135,15 @@ class InstitutionalEngineService:
             "mode": self.settings.engine_mode,
             "last_run_at_ms": self.last_run_at_ms,
             "last_run_id": self.last_run_id,
+            "last_run_completed_at_ms": self.last_run_completed_at_ms,
+            "last_successful_run_completed_at_ms": self.last_successful_run_completed_at_ms,
+            "run_in_progress": self.run_in_progress,
+            "current_run_id": self.current_run_id,
+            "current_run_started_at_ms": self.current_run_started_at_ms,
             "last_error": self.last_error,
             "last_run_duration_ms": self.last_run_duration_ms,
             "last_stage_ms": self.last_stage_ms,
+            "latency_window": _latency_window(list(self._recent_run_durations_ms)),
             "run_count": self.run_count,
             "candidates_created": self.candidates_created,
             "order_intents_created": self.order_intents_created,
@@ -165,6 +178,9 @@ class InstitutionalEngineService:
         ).hexdigest()[:24]
         run_started = time.perf_counter()
         stage_ms: dict[str, float] = {}
+        self.run_in_progress = True
+        self.current_run_id = engine_run_id
+        self.current_run_started_at_ms = ts
 
         def _stage_done(name: str, started: float) -> None:
             stage_ms[name] = round(stage_ms.get(name, 0.0) + (time.perf_counter() - started) * 1000, 3)
@@ -223,6 +239,35 @@ class InstitutionalEngineService:
             diversity_decisions = []
             risk_market_snapshot_cache: dict[str, dict[str, Any]] = {}
             strategy_selection_summaries: dict[str, Any] = {}
+            stage_started = time.perf_counter()
+            allocation_history: list[dict[str, Any]] = []
+            shadow_intent_history: list[dict[str, Any]] = []
+            if self.repository is not None and getattr(self.repository, "enabled", False):
+                list_allocations = getattr(self.repository, "list_allocation_decisions", None)
+                if callable(list_allocations):
+                    try:
+                        allocation_history = list(await list_allocations(limit=5000))
+                    except Exception:
+                        allocation_history = []
+                list_intents = getattr(self.repository, "list_order_intents", None)
+                if callable(list_intents):
+                    evidence_lookback = max(10, int(getattr(self.settings, "engine_shadow_evidence_lookback_intents", 100)))
+                    try:
+                        shadow_intent_history = list(await list_intents(execution_mode="shadow", limit=evidence_lookback))
+                    except TypeError:
+                        try:
+                            shadow_intent_history = [
+                                item
+                                for item in await list_intents(limit=evidence_lookback)
+                                if item.get("execution_mode") == "shadow"
+                            ]
+                        except Exception:
+                            shadow_intent_history = []
+                    except Exception:
+                        shadow_intent_history = []
+            self.throttles.prime_allocation_history(allocation_history, timestamp_ms=ts)
+            replay_context = await self._latest_replay_context()
+            _stage_done("candidate_context", stage_started)
             for symbol in symbols:
                 stage_started = time.perf_counter()
                 await self._record_world_model_features(symbol)
@@ -305,10 +350,13 @@ class InstitutionalEngineService:
                 directional_strategy_ids = {item.strategy_id for item in symbol_candidates if item.side != "flat"}
                 directional_family_ids = {item.strategy_family for item in symbol_candidates if item.side != "flat"}
                 for candidate in symbol_candidates:
+                    candidate_step_started = time.perf_counter()
                     ev = await self.scorer.score(candidate, regime)
                     estimates[candidate.candidate_id] = ev
                     allocation = await self.allocator.allocate(candidate, ev, regime=regime, portfolio_state=self._portfolio_snapshot())
                     allocation = self._enrich_allocation_metadata(allocation, candidate)
+                    _stage_done("candidate_score_allocate", candidate_step_started)
+                    candidate_step_started = time.perf_counter()
                     candidate_risk = await self._candidate_risk_precheck(
                         candidate,
                         ev,
@@ -326,6 +374,8 @@ class InstitutionalEngineService:
                                 "reason_codes": [*allocation.reason_codes, "candidate_risk_gateway_reject"],
                             }
                         )
+                    _stage_done("candidate_risk", candidate_step_started)
+                    candidate_step_started = time.perf_counter()
                     allowed_by_throttle, throttle_reasons, throttle_metadata = await self.throttles.allow_allocation(candidate, current_loop_allocations=current_loop_allocations, repository=self.repository, timestamp_ms=ts)
                     if not allowed_by_throttle:
                         allocation = allocation.model_copy(
@@ -338,12 +388,20 @@ class InstitutionalEngineService:
                                 "metadata": {**allocation.metadata, **throttle_metadata},
                             }
                         )
-                    allocation = await self.diversity.apply(candidate, allocation, current_loop_allocations=current_loop_allocations, repository=self.repository, timestamp_ms=ts)
+                    allocation = await self.diversity.apply(
+                        candidate,
+                        allocation,
+                        current_loop_allocations=current_loop_allocations,
+                        repository=self.repository,
+                        timestamp_ms=ts,
+                        historical_allocations=allocation_history,
+                    )
                     diversity_decisions.append(allocation.metadata.get("diversity", {}))
                     allocations[candidate.candidate_id] = allocation
                     await self._persist_allocation(allocation)
+                    _stage_done("candidate_controls", candidate_step_started)
 
-                    replay_context = await self._latest_replay_context()
+                    candidate_step_started = time.perf_counter()
                     intent = None
                     order_risk = None
                     if allocation.status in {"allocate", "reduce", "require_debate"}:
@@ -378,6 +436,7 @@ class InstitutionalEngineService:
                             timestamp_ms=ts,
                             alternative_strategy_available=len(directional_strategy_ids - {candidate.strategy_id}) > 0,
                             alternative_family_available=len(directional_family_ids - {candidate.strategy_family}) > 0,
+                            history_rows=shadow_intent_history,
                         )
                         if not admitted:
                             allocation = allocation.model_copy(
@@ -393,6 +452,8 @@ class InstitutionalEngineService:
                             allocation = self._enrich_allocation_metadata(allocation, candidate)
                             allocations[candidate.candidate_id] = allocation
                             await self._persist_allocation(allocation)
+                    _stage_done("candidate_admission", candidate_step_started)
+                    candidate_step_started = time.perf_counter()
                     packet_risk = order_risk or candidate_risk or {"decision_id": None, "decision": "not_applicable", "allowed": True, "violations": []}
                     packet = build_candidate_trade_packet(candidate=candidate, ev=ev, allocation=allocation, order_intent=intent, risk_decision=packet_risk, replay_context=replay_context, created_at_ms=ts)
                     await self._persist_candidate_trade_packet(packet)
@@ -409,6 +470,7 @@ class InstitutionalEngineService:
                         replay_context=replay_context,
                         created_at_ms=ts,
                     )
+                    _stage_done("candidate_evidence", candidate_step_started)
                     if allocation.status not in {"allocate", "reduce", "require_debate"}:
                         continue
                     current_loop_allocations.append(allocation)
@@ -470,11 +532,16 @@ class InstitutionalEngineService:
                         if allocation.allocated_size <= 0:
                             continue
                         intent = self._order_intent(candidate, ev.model_version_id, allocation.allocation_id, allocation.allocated_size, allocation.allocated_notional_usd, now_ms())
+                    candidate_step_started = time.perf_counter()
                     report = await self.execution.submit(intent)
                     self.order_intents_created += 1
                     self.execution_reports_created += 1
                     executed.append(report)
                     await self.positions.open_from_execution(candidate, report)
+                    if intent.execution_mode == "shadow":
+                        shadow_intent_history.insert(0, intent.model_dump(mode="json"))
+                        shadow_intent_history = shadow_intent_history[: max(10, int(getattr(self.settings, "engine_shadow_evidence_lookback_intents", 100)))]
+                    _stage_done("candidate_execution", candidate_step_started)
                 _stage_done("candidate_pipeline", stage_started)
             stage_started = time.perf_counter()
             book = await self.candidate_book.snapshot(estimates, as_of_ms=ts)
@@ -487,8 +554,13 @@ class InstitutionalEngineService:
             self.last_run_id = engine_run_id
             self.run_count += 1
             duration_ms = round((time.perf_counter() - run_started) * 1000, 3)
+            completed_at_ms = now_ms()
             self.last_run_duration_ms = duration_ms
             self.last_stage_ms = stage_ms
+            self.last_run_completed_at_ms = completed_at_ms
+            self.last_successful_run_completed_at_ms = completed_at_ms
+            self.last_error = None
+            self._recent_run_durations_ms.append(duration_ms)
             return {
                 "candidate_book_id": book.candidate_book_id,
                 "engine_run_id": engine_run_id,
@@ -504,7 +576,12 @@ class InstitutionalEngineService:
             self.last_error = type(exc).__name__
             self.last_run_duration_ms = round((time.perf_counter() - run_started) * 1000, 3)
             self.last_stage_ms = stage_ms
+            self.last_run_completed_at_ms = now_ms()
             raise
+        finally:
+            self.run_in_progress = False
+            self.current_run_id = None
+            self.current_run_started_at_ms = None
 
     async def _record_no_asset_strategy_evaluations(
         self,
@@ -1168,6 +1245,26 @@ def _no_trade_intent_id(candidate_id: str) -> str:
     if len(value) <= 96:
         return value
     return "no_trade_" + hashlib.sha1(candidate_id.encode()).hexdigest()[:24]
+
+
+def _latency_window(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {"sample_count": 0, "p50_ms": None, "p95_ms": None, "max_ms": None}
+    return {
+        "sample_count": len(values),
+        "p50_ms": round(_percentile(values, 0.50), 3),
+        "p95_ms": round(_percentile(values, 0.95), 3),
+        "max_ms": round(max(values), 3),
+    }
+
+
+def _percentile(values: list[float], quantile: float) -> float:
+    ordered = sorted(values)
+    position = min(1.0, max(0.0, quantile)) * (len(ordered) - 1)
+    lower = int(position)
+    upper = min(len(ordered) - 1, lower + 1)
+    fraction = position - lower
+    return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
 
 
 def _meta_and_asset_payload(raw: Any) -> dict[str, Any]:

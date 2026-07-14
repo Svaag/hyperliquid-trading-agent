@@ -38,6 +38,22 @@ class StrategyThrottleController:
             },
         }
 
+    def prime_allocation_history(self, allocations: list[dict[str, Any]], *, timestamp_ms: int) -> None:
+        lookback_ms = max(1, self.settings.engine_strategy_throttle_lookback_hours) * 60 * 60 * 1000
+        start_ms = timestamp_ms - lookback_ms
+        counts: Counter[str] = Counter()
+        for allocation in allocations:
+            if int(allocation.get("created_at_ms") or 0) < start_ms:
+                continue
+            if allocation.get("status") not in {"allocate", "reduce", "require_debate"}:
+                continue
+            strategy = _allocation_strategy(allocation)
+            if strategy:
+                counts[strategy] += 1
+        self._recent_allocation_cache_at_ms = timestamp_ms
+        self._recent_allocation_counts = counts
+        self._recent_allocation_total = sum(counts.values())
+
     async def filter_candidates(
         self,
         candidates: list[AlphaCandidate],

@@ -36,8 +36,11 @@ class EngineNewsConsumer:
         self.features_created = 0
         self.skipped_events = 0
         self.error_count = 0
+        self.consecutive_error_count = 0
         self.last_event_id: str | None = None
         self.last_error: str | None = None
+        self.last_error_at_ms: int | None = None
+        self.last_success_at_ms: int | None = None
         self.skip_reasons: dict[str, int] = {}
         repository = getattr(engine_service, "repository", None) if engine_service is not None else None
         self.risk_state = NewsRiskStateMachine(settings, repository)
@@ -80,9 +83,10 @@ class EngineNewsConsumer:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - runtime persistence behavior
-                self.error_count += 1
-                self.last_error = type(exc).__name__
+                self._record_error(exc)
                 log.warning("engine_news_risk_refresh_failed", error=type(exc).__name__)
+            else:
+                self._record_success()
 
     def status(self) -> dict[str, Any]:
         return {
@@ -97,7 +101,10 @@ class EngineNewsConsumer:
             "skip_reasons": dict(self.skip_reasons),
             "last_event_id": self.last_event_id,
             "error_count": self.error_count,
+            "consecutive_error_count": self.consecutive_error_count,
             "last_error": self.last_error,
+            "last_error_at_ms": self.last_error_at_ms,
+            "last_success_at_ms": self.last_success_at_ms,
             "risk_state": self.risk_state.status(),
             "settings": {
                 "min_importance": self.settings.engine_news_min_importance,
@@ -119,6 +126,7 @@ class EngineNewsConsumer:
             return
         self.received_events += 1
         self.last_event_id = event.event_id
+        failed = False
         try:
             normalized = newswire_event_to_engine_event(event, settings=self.settings)
             if normalized is None:
@@ -149,10 +157,24 @@ class EngineNewsConsumer:
                 await self.risk_state.observe(routed_event, feature_store=self.engine_service.feature_store)
             ENGINE_NEWS_EVENTS.labels(result="bridged").inc()
         except Exception as exc:  # pragma: no cover - bridge must not break news fanout
-            self.error_count += 1
-            self.last_error = type(exc).__name__
+            failed = True
+            self._record_error(exc)
             ENGINE_NEWS_EVENTS.labels(result="error").inc()
             log.warning("engine_news_consumer_event_failed", event_id=event.event_id, error=type(exc).__name__)
+        finally:
+            if not failed:
+                self._record_success()
+
+    def _record_error(self, exc: Exception) -> None:
+        self.error_count += 1
+        self.consecutive_error_count += 1
+        self.last_error = type(exc).__name__
+        self.last_error_at_ms = now_ms()
+
+    def _record_success(self) -> None:
+        self.consecutive_error_count = 0
+        self.last_success_at_ms = now_ms()
+        self.last_error = None
 
     async def _record_story_invalidation(
         self,
