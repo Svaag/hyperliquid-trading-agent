@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import Counter
 from typing import Any
@@ -150,7 +151,13 @@ async def build_candidate_funnel(
     if asset:
         candidates = [row for row in candidates if str(row.get("asset") or "").upper() == asset.upper()]
     candidate_ids = {str(row.get("candidate_id") or "") for row in candidates}
-    evs, allocations, packets, councils, intents, reports, outcomes = await _candidate_related_rows(repository, limit=limit)
+    evs, allocations, packets, councils, intents, reports, outcomes = await _candidate_related_rows(
+        repository,
+        limit=limit,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        strategy_id=strategy_id,
+    )
     ev_by_candidate = _latest_by([row for row in evs if str(row.get("candidate_id") or "") in candidate_ids], "candidate_id")
     allocation_by_candidate = _latest_by(
         [row for row in allocations if str(row.get("candidate_id") or "") in candidate_ids],
@@ -245,6 +252,8 @@ async def build_candidate_funnel(
     return {
         "generated_at_ms": _now_ms(),
         "window": {"hours": max(1, int(window_hours)), "start_ms": start_ms, "end_ms": end_ms},
+        "sample_limit": limit,
+        "sample_limit_reached": len(candidates) >= limit,
         "grain": "candidate_id",
         "candidate_count": len(candidates),
         "stage_counts": dict(stage_counts),
@@ -261,16 +270,50 @@ async def build_candidate_funnel(
     }
 
 
-async def _candidate_related_rows(repository: Any, *, limit: int) -> tuple[list[dict[str, Any]], ...]:
-    return (
-        await _list_rows(repository, "list_ev_estimates", limit=limit),
-        await _list_rows(repository, "list_allocation_decisions", limit=limit),
-        await _list_rows(repository, "list_candidate_trade_packets", limit=limit),
-        await _list_rows(repository, "list_council_reviews", limit=limit),
-        await _list_rows(repository, "list_order_intents", limit=limit),
-        await _list_rows(repository, "list_execution_reports", limit=limit),
-        await _list_rows(repository, "list_candidate_outcome_attributions", limit=limit),
+async def _candidate_related_rows(
+    repository: Any,
+    *,
+    limit: int,
+    start_ms: int,
+    end_ms: int,
+    strategy_id: str | None,
+) -> tuple[list[dict[str, Any]], ...]:
+    packet_method = (
+        "list_candidate_trade_packet_summaries"
+        if callable(getattr(repository, "list_candidate_trade_packet_summaries", None))
+        else "list_candidate_trade_packets"
     )
+    rows = await asyncio.gather(
+        _list_rows(repository, "list_ev_estimates", limit=limit, since_ms=start_ms, until_ms=end_ms),
+        _list_rows(repository, "list_allocation_decisions", limit=limit, since_ms=start_ms, until_ms=end_ms),
+        _list_rows(
+            repository,
+            packet_method,
+            limit=limit,
+            since_ms=start_ms,
+            until_ms=end_ms,
+            strategy_id=strategy_id,
+        ),
+        _list_rows(
+            repository,
+            "list_council_reviews",
+            limit=limit,
+            since_ms=start_ms,
+            until_ms=end_ms,
+            strategy_id=strategy_id,
+        ),
+        _list_rows(repository, "list_order_intents", limit=limit, since_ms=start_ms, until_ms=end_ms),
+        _list_rows(repository, "list_execution_reports", limit=limit, since_ms=start_ms, until_ms=end_ms),
+        _list_rows(
+            repository,
+            "list_candidate_outcome_attributions",
+            limit=limit,
+            since_ms=start_ms,
+            until_ms=end_ms,
+            strategy_id=strategy_id,
+        ),
+    )
+    return tuple(rows)
 
 
 async def build_strategy_funnel(
@@ -380,6 +423,8 @@ async def build_strategy_funnel(
     return {
         "generated_at_ms": _now_ms(),
         "window": {"hours": max(1, int(window_hours)), "start_ms": start_ms, "end_ms": end_ms},
+        "sample_limit": limit,
+        "sample_limit_reached": len(evaluations) >= limit,
         "grain": "engine_run_id_x_asset_x_strategy_id",
         "activation_telemetry_available": bool(evaluations),
         "evaluation_count": len(evaluations),

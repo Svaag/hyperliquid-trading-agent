@@ -133,6 +133,23 @@ def test_signal_quality_never_pools_horizons_and_excludes_non_strict_marks() -> 
     assert report["legacy_mixed_latest_endpoint"]["readiness_eligible"] is False
 
 
+def test_signal_quality_supports_bounded_dashboard_samples() -> None:
+    repo = _QualityRepository()
+
+    report = anyio.run(
+        lambda: build_signal_quality_report(
+            repo,
+            window_hours=1,
+            as_of_ms=repo.as_of,
+            max_rows=2,
+        )
+    )
+
+    assert report["data_quality"]["sample_limit"] == 2
+    assert report["data_quality"]["sample_limit_reached"] is True
+    assert report["data_quality"]["rows_seen"] == 2
+
+
 def test_newswire_counterfactual_uses_persisted_shadow_overlay_and_is_research_only() -> None:
     repo = _QualityRepository()
 

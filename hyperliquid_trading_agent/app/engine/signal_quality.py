@@ -138,10 +138,17 @@ async def load_signal_quality_rows(
     *,
     window_hours: int = 24,
     as_of_ms: int | None = None,
+    max_rows: int = 100_000,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     end_ms = int(as_of_ms or _now_ms())
     start_ms = end_ms - max(1, int(window_hours)) * 3_600_000
-    source_rows = await _page_outcomes(repository, start_ms=start_ms, end_ms=end_ms)
+    bounded_max_rows = max(1, min(100_000, int(max_rows)))
+    source_rows = await _page_outcomes(
+        repository,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        max_rows=bounded_max_rows,
+    )
     regime_ids = [str(row.get("regime_snapshot_id") or "") for row in source_rows]
     allocation_ids = [str(row.get("allocation_id") or "") for row in source_rows]
     regimes, allocations = await _related_rows(
@@ -234,6 +241,8 @@ async def load_signal_quality_rows(
         "window": {"basis": "outcome_window_end", "start_ms": start_ms, "end_ms": end_ms, "hours": max(1, int(window_hours))},
         "grain": "candidate_id_x_outcome_window",
         "data_quality": {
+            "sample_limit": bounded_max_rows,
+            "sample_limit_reached": len(source_rows) >= bounded_max_rows,
             "rows_seen": len(source_rows),
             "unique_grain_rows": total_unique,
             "usable_rows": len(usable),
@@ -329,8 +338,14 @@ async def build_signal_quality_report(
     symbol: str | None = None,
     regime_label: str | None = None,
     outcome_window: str | None = None,
+    max_rows: int = 100_000,
 ) -> dict[str, Any]:
-    context, rows = await load_signal_quality_rows(repository, window_hours=window_hours, as_of_ms=as_of_ms)
+    context, rows = await load_signal_quality_rows(
+        repository,
+        window_hours=window_hours,
+        as_of_ms=as_of_ms,
+        max_rows=max_rows,
+    )
     if strategy_id:
         rows = [row for row in rows if str(row.get("strategy_id") or "") == strategy_id]
     if symbol:

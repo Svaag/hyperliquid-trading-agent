@@ -161,6 +161,13 @@ from hyperliquid_trading_agent.app.tracking.schemas import PositionTrackingPlan
 
 log = get_logger(__name__)
 
+_BULK_ID_QUERY_CHUNK_SIZE = 10_000
+
+
+def _chunked_ids(ids: list[str], *, chunk_size: int = _BULK_ID_QUERY_CHUNK_SIZE) -> list[list[str]]:
+    size = max(1, int(chunk_size))
+    return [ids[index : index + size] for index in range(0, len(ids), size)]
+
 
 class Repository:
     """Async persistence facade for audit, cache, conversations, and paper trades."""
@@ -1423,10 +1430,13 @@ class Repository:
         if not ids or self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            result = await session.execute(
-                select(RegimeSnapshotRecord).where(RegimeSnapshotRecord.regime_snapshot_id.in_(ids))
-            )
-            return [_engine_record_to_dict(item) for item in result.scalars().all()]
+            rows: list[dict[str, Any]] = []
+            for chunk in _chunked_ids(ids):
+                result = await session.execute(
+                    select(RegimeSnapshotRecord).where(RegimeSnapshotRecord.regime_snapshot_id.in_(chunk))
+                )
+                rows.extend(_engine_record_to_dict(item) for item in result.scalars().all())
+            return rows
 
     async def record_alpha_candidate(self, candidate: dict[str, Any]) -> str | None:
         metadata = {
@@ -1598,10 +1608,13 @@ class Repository:
         if not ids or self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            result = await session.execute(
-                select(AllocationDecisionRecord).where(AllocationDecisionRecord.allocation_id.in_(ids))
-            )
-            return [_engine_record_to_dict(item) for item in result.scalars().all()]
+            rows: list[dict[str, Any]] = []
+            for chunk in _chunked_ids(ids):
+                result = await session.execute(
+                    select(AllocationDecisionRecord).where(AllocationDecisionRecord.allocation_id.in_(chunk))
+                )
+                rows.extend(_engine_record_to_dict(item) for item in result.scalars().all())
+            return rows
 
     async def record_allocation_diversity_event(self, event: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -1857,6 +1870,66 @@ class Repository:
         if strategy_id:
             filters.append(CandidateTradePacketRecord.strategy_id == strategy_id)
         return await self._list_engine_records(CandidateTradePacketRecord, order_by=CandidateTradePacketRecord.created_at_ms, limit=limit, filters=filters)
+
+    async def list_candidate_trade_packet_summaries(
+        self,
+        *,
+        candidate_id: str | None = None,
+        strategy_id: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return only the packet fields required by candidate-funnel diagnostics.
+
+        Full candidate packets contain evidence and market context and can be hundreds
+        of kilobytes each. Funnel diagnostics only inspect the allocation and risk
+        decision, so projecting those JSON fields avoids transferring the full packet
+        history into the API process.
+        """
+
+        if self.sessionmaker is None:
+            return []
+        filters = []
+        if candidate_id:
+            filters.append(CandidateTradePacketRecord.candidate_id == candidate_id)
+        if strategy_id:
+            filters.append(CandidateTradePacketRecord.strategy_id == strategy_id)
+        if since_ms is not None:
+            filters.append(CandidateTradePacketRecord.created_at_ms >= int(since_ms))
+        if until_ms is not None:
+            filters.append(CandidateTradePacketRecord.created_at_ms <= int(until_ms))
+        try:
+            async with self.sessionmaker() as session:
+                stmt = select(
+                    CandidateTradePacketRecord.packet_id,
+                    CandidateTradePacketRecord.candidate_id,
+                    CandidateTradePacketRecord.strategy_id,
+                    CandidateTradePacketRecord.created_at_ms,
+                    CandidateTradePacketRecord.packet_json["allocation"].label("allocation"),
+                    CandidateTradePacketRecord.packet_json["risk_decision"].label("risk_decision"),
+                )
+                for condition in filters:
+                    stmt = stmt.where(condition)
+                stmt = stmt.order_by(CandidateTradePacketRecord.created_at_ms.desc()).limit(limit)
+                result = await session.execute(stmt)
+                return [
+                    {
+                        "packet_id": str(row["packet_id"]),
+                        "candidate_id": str(row["candidate_id"]),
+                        "strategy_id": str(row["strategy_id"]),
+                        "created_at_ms": int(row["created_at_ms"]),
+                        "allocation": _json_object(row["allocation"]),
+                        "risk_decision": _json_object(row["risk_decision"]),
+                    }
+                    for row in result.mappings().all()
+                ]
+        except Exception as exc:  # pragma: no cover - diagnostics must not break runtime
+            log.warning(
+                "candidate_trade_packet_summary_list_failed",
+                error=type(exc).__name__,
+            )
+            return []
 
     async def record_council_review(self, review: dict[str, Any]) -> str | None:
         review_id = await self._merge_engine_record(
@@ -6793,6 +6866,18 @@ def _engine_record_to_dict(item: Any) -> dict[str, Any]:
         out_key = key[:-5] if key.endswith("_json") else key
         data[out_key] = value
     return data
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 def _market_asset_to_dict(item: MarketAssetRecord) -> dict[str, Any]:

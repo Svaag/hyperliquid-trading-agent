@@ -127,6 +127,7 @@ async def build_paper_readiness_scorecard(
     *,
     window_hours: int | None = None,
     limit: int = 1000,
+    validation_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a deterministic paper-mode promotion scorecard.
 
@@ -151,12 +152,14 @@ async def build_paper_readiness_scorecard(
     risk_limit = max(expanded_limit * 5, 5000)
     outcome_limit = max(expanded_limit * (len(OUTCOME_WINDOWS_MS) + 2), 10_000)
 
-    report = await build_engine_validation_report(
-        repository,
-        limit=expanded_limit,
-        settings=settings,
-        window_hours=hours,
-    )
+    report = validation_report
+    if report is None:
+        report = await build_engine_validation_report(
+            repository,
+            limit=expanded_limit,
+            settings=settings,
+            window_hours=hours,
+        )
     candidates_all = await repository.list_alpha_candidates(since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit)
     ev_all = await repository.list_ev_estimates(since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit)
     allocations_all = await repository.list_allocation_decisions(since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit)

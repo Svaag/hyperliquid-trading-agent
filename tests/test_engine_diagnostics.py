@@ -12,6 +12,7 @@ from hyperliquid_trading_agent.app.engine.diagnostics import build_candidate_fun
 class _DiagnosticsRepository:
     def __init__(self) -> None:
         self.now = 2_000_000
+        self.packet_summary_kwargs: list[dict[str, object]] = []
         self.candidate = {
             "candidate_id": "cand_1",
             "strategy_id": "microstructure_ofi_v2",
@@ -39,7 +40,8 @@ class _DiagnosticsRepository:
             }
         ]
 
-    async def list_candidate_trade_packets(self, **kwargs):
+    async def list_candidate_trade_packet_summaries(self, **kwargs):
+        self.packet_summary_kwargs.append(kwargs)
         return [
             {
                 "packet_id": "packet_1",
@@ -62,6 +64,9 @@ class _DiagnosticsRepository:
                 "risk_decision": {"decision": "allow", "allowed": True},
             }
         ]
+
+    async def list_candidate_trade_packets(self, **kwargs):
+        raise AssertionError("funnel diagnostics must not load full candidate packets")
 
     async def list_council_reviews(self, **kwargs):
         return [
@@ -151,6 +156,14 @@ def test_candidate_funnel_deduplicates_downstream_allocation_symptoms() -> None:
     assert "allocation_not_approved" not in report["reason_counts"]
     assert report["items"][0]["pre_council_allocation_status"] == "allocate"
     assert report["items"][0]["final_allocation_status"] == "skip"
+    assert repo.packet_summary_kwargs == [
+        {
+            "limit": 20_000,
+            "since_ms": repo.now - 3_600_000,
+            "until_ms": repo.now,
+            "strategy_id": None,
+        }
+    ]
 
 
 def test_strategy_funnel_preserves_selected_no_trigger_and_freshness_evidence() -> None:

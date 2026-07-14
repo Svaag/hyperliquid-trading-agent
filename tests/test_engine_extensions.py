@@ -373,10 +373,17 @@ def test_unified_dashboard_routes_registered():
     assert "Hyperliquid Trading Agent" in root.text
     assert "/world-model/dashboard" in root.text
     assert "/dashboard" in root.text
-    assert "Trading Agent Dashboard" in client.get("/dashboard").text
+    dashboard = client.get("/dashboard")
+    assert "Trading Agent Dashboard" in dashboard.text
+    assert "Loading bounded dashboard snapshot" in dashboard.text
     data = client.get("/dashboard/data").json()
     assert "engine" in data
     assert "readiness" in data["engine"]
+    assert data["engine"]["readiness"]["detail_endpoint"] == "/engine/readiness"
+    assert "checks" not in data["engine"]["readiness"]
+    assert "reports" not in data["engine"]["readiness"]
+    assert data["engine"]["candidate_funnel"]["sample_limit"] == 1_000
+    assert data["engine"]["signal_quality"]["data_quality"]["sample_limit"] == 5_000
     assert data["engine"]["regime"]["latest_by_asset"]["BTC"]["news_risk_tier"] == "catalyst"
 
 def test_pnl_loop_closes_aged_position_even_without_execution_report():

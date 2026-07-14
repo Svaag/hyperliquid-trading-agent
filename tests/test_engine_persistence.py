@@ -5,8 +5,8 @@ from pathlib import Path
 import anyio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from hyperliquid_trading_agent.app.db.models import Base
-from hyperliquid_trading_agent.app.db.repository import Repository
+from hyperliquid_trading_agent.app.db.models import Base, CandidateTradePacketRecord
+from hyperliquid_trading_agent.app.db.repository import Repository, _chunked_ids
 from hyperliquid_trading_agent.app.engine.schemas import BanditRecommendation
 
 
@@ -113,6 +113,68 @@ def test_exact_readiness_aggregates_execute_against_repository_schema(tmp_path: 
         assert aggregates["window"]["semantics"] == "[start_ms,end_ms)"
 
     anyio.run(run)
+
+
+def test_candidate_trade_packet_summaries_project_only_funnel_fields(tmp_path: Path):
+    async def run() -> None:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'packet-summary.db'}")
+        async with engine.begin() as connection:
+            await connection.run_sync(CandidateTradePacketRecord.__table__.create)
+        repository = Repository(async_sessionmaker(engine, expire_on_commit=False))
+        await repository.record_candidate_trade_packet(
+            {
+                "packet_id": "packet_1",
+                "candidate_id": "candidate_1",
+                "strategy_id": "strategy_1",
+                "strategy_version": "v1",
+                "strategy_family": "momentum",
+                "asset": "BTC",
+                "side": "long",
+                "horizon": "5m",
+                "feature_snapshot_id": "feature_1",
+                "regime_snapshot_id": "regime_1",
+                "allocation": {"status": "allocate", "metadata": {"diversity": {"decision": "allow"}}},
+                "risk_decision": {"decision": "allow", "allowed": True},
+                "large_evidence_payload": "x" * 100_000,
+                "created_at_ms": 1_000,
+            }
+        )
+
+        summaries = await repository.list_candidate_trade_packet_summaries(
+            strategy_id="strategy_1",
+            since_ms=500,
+            until_ms=1_500,
+            limit=10,
+        )
+        outside_window = await repository.list_candidate_trade_packet_summaries(
+            since_ms=1_001,
+            until_ms=2_000,
+            limit=10,
+        )
+        await engine.dispose()
+
+        assert summaries == [
+            {
+                "packet_id": "packet_1",
+                "candidate_id": "candidate_1",
+                "strategy_id": "strategy_1",
+                "created_at_ms": 1_000,
+                "allocation": {"status": "allocate", "metadata": {"diversity": {"decision": "allow"}}},
+                "risk_decision": {"decision": "allow", "allowed": True},
+            }
+        ]
+        assert outside_window == []
+
+    anyio.run(run)
+
+
+def test_bulk_id_queries_are_chunked_below_driver_parameter_limits():
+    ids = [f"id_{index}" for index in range(25_001)]
+
+    chunks = _chunked_ids(ids)
+
+    assert [len(chunk) for chunk in chunks] == [10_000, 10_000, 5_001]
+    assert [item for chunk in chunks for item in chunk] == ids
 
 
 def test_bandit_recommendations_are_report_only_contracts():
