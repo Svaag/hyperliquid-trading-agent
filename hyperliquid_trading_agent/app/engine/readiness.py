@@ -5,6 +5,7 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.engine.alpha.wave2 import WAVE_2_IDS
 from hyperliquid_trading_agent.app.engine.attribution import OUTCOME_WINDOWS_MS
 from hyperliquid_trading_agent.app.engine.replay_compare import latest_engine_replay_comparison
 from hyperliquid_trading_agent.app.engine.runtime import resolve_engine_runtime
@@ -561,7 +562,8 @@ async def build_paper_readiness_scorecard(
     # first-class candidates in the same rolling window after integration. Report
     # strategy-level categories as mutually exclusive so it is not simultaneously
     # presented as paper eligible and research only.
-    shadow_research_strategies.difference_update(raw_paper_eligible_strategies)
+    current_first_class_strategies = WAVE_2_IDS if settings.engine_alpha_catalog_mode == "integrated" else set()
+    shadow_research_strategies.difference_update(raw_paper_eligible_strategies | current_first_class_strategies)
     shadow_research_families = {
         candidate_strategy_families.get(strategy_id, "unknown")
         for strategy_id in shadow_research_strategies
