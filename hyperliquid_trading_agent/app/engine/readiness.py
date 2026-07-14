@@ -498,6 +498,7 @@ async def build_paper_readiness_scorecard(
     paper_eligible_active_families: set[str] = set()
     shadow_research_strategies: set[str] = set()
     shadow_research_families: set[str] = set()
+    candidate_strategy_families: dict[str, str] = {}
     matured_outcome_candidate_ids_by_strategy: dict[str, set[str]] = defaultdict(set)
     for outcome in candidate_outcomes:
         if str(outcome.get("terminal_state") or "") != "matured":
@@ -521,6 +522,7 @@ async def build_paper_readiness_scorecard(
         counts_for_breadth = bool(metadata.get("counts_for_breadth", candidate.get("counts_for_breadth", True)))
         if counts_for_breadth and family not in {"legacy_bridge", "risk_off_defensive"} and candidate.get("side") != "flat":
             strategy_id = str(candidate.get("strategy_id") or "unknown")
+            candidate_strategy_families[strategy_id] = family
             active_alpha_strategies.add(strategy_id)
             active_alpha_families.add(family)
             if _paper_eligible(candidate):
@@ -555,6 +557,16 @@ async def build_paper_readiness_scorecard(
             for strategy_id in paper_eligible_active_strategies
             if strategy_families.get(strategy_id, "unknown") != "unknown"
         }
+    # A strategy can have immutable historical shadow-only candidates and new
+    # first-class candidates in the same rolling window after integration. Report
+    # strategy-level categories as mutually exclusive so it is not simultaneously
+    # presented as paper eligible and research only.
+    shadow_research_strategies.difference_update(raw_paper_eligible_strategies)
+    shadow_research_families = {
+        candidate_strategy_families.get(strategy_id, "unknown")
+        for strategy_id in shadow_research_strategies
+        if candidate_strategy_families.get(strategy_id, "unknown") != "unknown"
+    }
     if len(paper_eligible_active_strategies) < settings.engine_readiness_min_active_strategy_count_24h:
         hard_blocks.append(_issue("insufficient_active_strategy_count", f"Need >={settings.engine_readiness_min_active_strategy_count_24h} paper-eligible active alpha strategies; observed {len(paper_eligible_active_strategies)}. Shadow-active strategies observed={len(active_alpha_strategies)}."))
     if len(paper_eligible_active_families) < settings.engine_readiness_min_active_strategy_family_count_24h:

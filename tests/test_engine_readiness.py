@@ -337,6 +337,33 @@ def test_readiness_separates_shadow_research_breadth_from_paper_eligible_breadth
     assert scorecard["ready_for_paper"] is False
 
 
+def test_readiness_does_not_report_mixed_history_strategy_as_research_only():
+    now_ms = int(time.time() * 1000)
+    repo = FakeReadinessRepository(now_ms=now_ms)
+    repo.candidates.append(
+        {
+            **repo.candidates[0],
+            "candidate_id": "cand_legacy_shadow",
+            "source_integrity": {
+                "activation_scope": "shadow_only",
+                "paper_eligible": False,
+                "operator_promotion_required": True,
+            },
+        }
+    )
+    service = FakeReadinessService(now_ms=now_ms)
+    settings = readiness_settings()
+
+    async def run():
+        return await build_paper_readiness_scorecard(repo, settings, service, window_hours=1, limit=100)
+
+    scorecard = anyio.run(run)
+    diversity = scorecard["checks"]["strategy_diversity"]
+
+    assert "directional_momentum_v2" in diversity["raw_paper_eligible_strategies"]
+    assert "directional_momentum_v2" not in diversity["shadow_research_strategies"]
+
+
 def test_paper_readiness_blocks_paper_leak_missing_data_and_risk_spike():
     now_ms = int(time.time() * 1000)
     repo = FakeReadinessRepository(now_ms=now_ms, paper_leak=True, missing_data=True, risk_rejects=5)
