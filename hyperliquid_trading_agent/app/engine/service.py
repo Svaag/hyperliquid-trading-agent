@@ -162,11 +162,7 @@ class InstitutionalEngineService:
             "wave_policy": {
                 "wave1c_enabled": bool(getattr(self.settings, "engine_wave1c_enabled", False)),
                 "wave2_enabled": bool(getattr(self.settings, "engine_wave2_enabled", False)),
-                "wave2_status": (
-                    "early_shadow_only"
-                    if self.strategy_registry.catalog_mode in {"wave2_early_shadow", "shadow_full_catalog"}
-                    else "deferred_until_operator_enablement"
-                ),
+                "wave2_status": "first_class_integrated" if self.strategy_registry.catalog_mode == "integrated" else "disabled",
             },
         }
 

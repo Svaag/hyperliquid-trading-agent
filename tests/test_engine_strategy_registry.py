@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 
 from hyperliquid_trading_agent.app.engine.alpha.directional import DirectionalMomentumStrategy
+from hyperliquid_trading_agent.app.engine.alpha.wave2 import WAVE_2_IDS
 from hyperliquid_trading_agent.app.engine.strategy_registry import (
-    SHADOW_FULL_CATALOG_ACTIVE_IDS,
     WAVE_1A_NUCLEUS_IDS,
     StrategyRegistry,
     create_default_strategy_registry,
@@ -31,21 +31,16 @@ def test_default_strategy_registry_locks_wave_1a_nucleus_only():
     assert "microstructure_orderflow" in metadata["alpha_families"]
 
 
-def test_shadow_full_catalog_registers_runtime_shadow_only_breadth_without_paper_eligibility():
-    registry = create_default_strategy_registry(catalog_mode="shadow_full_catalog")
+def test_integrated_catalog_registers_wave2_as_normal_paper_eligible_breadth():
+    registry = create_default_strategy_registry(catalog_mode="integrated", news_event_alpha_mode="off")
     catalog = registry.catalog_summary()
 
     runtime_ids = {strategy.strategy_id for strategy in registry.strategies(enabled_only=True)}
-    assert SHADOW_FULL_CATALOG_ACTIVE_IDS <= runtime_ids
-    assert catalog["mode"] == "shadow_full_catalog"
-    assert catalog["total_specs"] == 30
-    assert catalog["runtime_enabled"] == len(SHADOW_FULL_CATALOG_ACTIVE_IDS)
-    assert catalog["paper_eligible"] == 0
-    assert catalog["shadow_only"] == len(SHADOW_FULL_CATALOG_ACTIVE_IDS)
-    assert catalog["spec_only_ids"] == ["equity_options_flow_v1", "legacy_signal_adapter_v1"]
-    assert registry.require_spec("cross_venue_lead_lag_v1").enabled is True
-    assert registry.require_spec("cross_venue_lead_lag_v1").counts_for_breadth is True
-    assert registry.require_spec("cross_venue_lead_lag_v1").metadata["paper_eligible"] is False
+    assert WAVE_2_IDS <= runtime_ids
+    assert catalog["mode"] == "integrated"
+    assert WAVE_2_IDS <= set(catalog["paper_eligible_ids"])
+    assert not (WAVE_2_IDS & set(catalog["shadow_only_ids"]))
+    assert all(registry.require_spec(strategy_id).counts_for_breadth for strategy_id in WAVE_2_IDS)
 
 
 def test_wave_1a_strategy_specs_are_valid_and_do_not_overcount_bridge_or_defensive():

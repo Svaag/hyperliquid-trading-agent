@@ -14,21 +14,13 @@ ENGINE_SHADOW_ENABLED=true
 ENGINE_PAPER_ENABLED=false
 ENGINE_EXECUTION_MODES=shadow
 ENGINE_LIVE_ENABLED=false
-ENGINE_ALPHA_CATALOG_MODE=wave1a_locked
-ENGINE_CROSS_VENUE_DEXES=
+ENGINE_ALPHA_CATALOG_MODE=integrated
+ENGINE_WAVE1C_ENABLED=true
+ENGINE_WAVE2_ENABLED=true
+ENGINE_CROSS_VENUE_DEXES=lighter,xyz,alpaca:paper
 ```
 
-For broader evidence collection without paper eligibility, operators may use:
-
-```env
-ENGINE_ALPHA_CATALOG_MODE=shadow_full_catalog
-ENGINE_SHADOW_ENABLED=true
-ENGINE_PAPER_ENABLED=false
-ENGINE_EXECUTION_MODES=shadow
-ENGINE_LIVE_ENABLED=false
-```
-
-`shadow_full_catalog` is rejected by settings validation unless the runtime is shadow-only. It exposes the full alpha catalog for candidate/outcome observation, but all emitted research strategies remain `paper_eligible=false` until separately promoted.
+This baseline evaluates Wave 1 and every Wave 2A/2B/2C strategy as one first-class portfolio. Their candidates share the same EV, allocation, RiskGateway, Council, replay, digest, and paper-readiness paths. Paper/live execution remains disabled until the promotion gate passes.
 
 ## Required checks before paper mode
 
@@ -47,7 +39,7 @@ Paper mode may be promoted only when all are true:
 - Candidate strategy metadata coverage is 100%.
 - RiskGateway coverage is 100% and Council review coverage is at least 95% for allocated candidates.
 - Strategy-regime evidence coverage is at least 95% with minimum score/sample thresholds.
-- Strategy breadth checks use **paper-eligible** active strategies/families; shadow-only research breadth is visible separately and does not satisfy paper promotion.
+- Strategy breadth checks use **paper-eligible** active strategies/families across the unified Wave 1/Wave 2 portfolio; intentionally shadow-only sources do not satisfy paper promotion.
 - Average simulated slippage is at most 8 bps.
 - Latest engine replay comparison is `passed` or `advisory_pass` for a >=24h, >=50-candidate window.
 - Discord engine validation digest is operational.
@@ -73,6 +65,7 @@ ENGINE_SHADOW_ENABLED=true
 ENGINE_PAPER_ENABLED=true
 ENGINE_EXECUTION_MODES=paper,shadow
 ENGINE_LIVE_ENABLED=false
+ENGINE_ALPHA_CATALOG_MODE=integrated
 ```
 
 Then rebuild/reload the service and immediately verify:

@@ -206,7 +206,7 @@ def _acceptance_criteria_for_state(state: str) -> list[str]:
         "GET /engine/readiness records the expected blocker or pass state",
         "Latest replay comparison is passed or advisory_pass before promotion",
         "No paper/live execution is enabled by the change",
-        "ENGINE_WAVE2_ENABLED remains false",
+        "Wave 2 remains integrated under the same RiskGateway and Council controls",
     ]
     if state == "wave1c_promotion_candidate":
         return [
@@ -258,13 +258,13 @@ def _verification_objectives_for_state(case_id: str, handoff_id: str, state: str
             "objective_id": f"vo_{stable_hash({'handoff': handoff_id, 'key': 'wave2'}, length=12)}",
             "case_id": case_id,
             "handoff_id": handoff_id,
-            "objective_key": "wave2-remains-disabled",
+            "objective_key": "wave2-remains-integrated",
             "objective_type": "config_guardrail",
-            "name": "Wave 2 remains disabled",
+            "name": "Wave 2 remains enabled in the integrated catalog",
             "required_status": "pass",
             "required": True,
             "required_consecutive_passes": 1,
-            "payload": {"setting": "ENGINE_WAVE2_ENABLED", "expected": False},
+            "payload": {"setting": "ENGINE_ALPHA_CATALOG_MODE", "expected": "integrated"},
         },
     ]
     if state == "wave1c_promotion_candidate":

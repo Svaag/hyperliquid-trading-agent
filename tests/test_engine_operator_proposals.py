@@ -221,3 +221,30 @@ def test_legacy_adapter_and_candidates_below_hard_floors_never_produce_proposals
         "feature_coverage_below_operator_minimum",
     } <= set(weak_result["blockers"])
     assert legacy_repo.proposals == weak_repo.proposals == {}
+
+
+def test_shadow_digest_collapses_research_governance_blockers_for_display() -> None:
+    async def run() -> _ProposalRepository:
+        context = _context(source_integrity={"activation_scope": "shadow_only", "paper_eligible": False})
+        repo = _ProposalRepository(context)
+        settings = _settings().model_copy(
+            update={
+                "engine_operator_shadow_digest_enabled": True,
+                "engine_operator_shadow_digest_interval_seconds": 60,
+            }
+        )
+        service = EngineOperatorProposalService(settings=settings, repository=repo)  # type: ignore[arg-type]
+        result = await service.process_candidate_book("book_1")
+        assert result["blockers"]["shadow_only_strategy"] == 1
+        assert result["blockers"]["not_paper_eligible"] == 1
+        return repo
+
+    repo = anyio.run(run)
+
+    assert len(repo.notifications) == 1
+    notification = repo.notifications[0]
+    assert notification["category"] == "engine_shadow_digest"
+    content = notification["payload"]["content"]
+    assert "blocked by `research_only`" in content
+    assert "shadow_only_strategy" not in content
+    assert "not_paper_eligible" not in content

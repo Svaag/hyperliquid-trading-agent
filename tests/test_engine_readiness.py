@@ -162,13 +162,14 @@ def test_engine_settings_defaults_are_shadow_only():
     assert settings.engine_paper_enabled is False
     assert settings.engine_live_enabled is False
     assert settings.engine_wave2_enabled is True
-    assert settings.engine_alpha_catalog_mode == "wave2_early_shadow"
+    assert settings.engine_alpha_catalog_mode == "integrated"
     assert settings.engine_execution_mode_list == ["shadow"]
 
 
-def test_engine_wave2_flag_is_allowed_only_in_safe_shadow_research_catalogs():
+def test_engine_wave2_flag_requires_a_wave2_capable_catalog():
     settings = Settings(environment="test", engine_wave2_enabled=True, _env_file=None)
     assert settings.engine_wave2_enabled is True
+    assert settings.engine_alpha_catalog_mode == "integrated"
 
     with pytest.raises(ValueError, match="ENGINE_WAVE2_ENABLED"):
         Settings(
@@ -178,17 +179,13 @@ def test_engine_wave2_flag_is_allowed_only_in_safe_shadow_research_catalogs():
             _env_file=None,
         )
 
-
-def test_shadow_full_alpha_catalog_mode_requires_shadow_only_runtime():
-    settings = Settings(environment="test", engine_alpha_catalog_mode="SHADOW_FULL_CATALOG", _env_file=None)
-    assert settings.engine_alpha_catalog_mode == "shadow_full_catalog"
-
-    with pytest.raises(ValueError, match="Wave 2 research catalogs require"):
-        Settings(environment="test", engine_alpha_catalog_mode="shadow_full_catalog", engine_paper_enabled=True, _env_file=None)
-    with pytest.raises(ValueError, match="Wave 2 research catalogs require"):
-        Settings(environment="test", engine_alpha_catalog_mode="shadow_full_catalog", engine_execution_modes="paper,shadow", _env_file=None)
-    with pytest.raises(ValueError, match="Wave 2 research catalogs require"):
-        Settings(environment="test", engine_alpha_catalog_mode="shadow_full_catalog", engine_shadow_enabled=False, _env_file=None)
+    with pytest.raises(ValueError, match="ENGINE_ALPHA_CATALOG_MODE=integrated"):
+        Settings(
+            environment="test",
+            engine_wave2_enabled=False,
+            engine_alpha_catalog_mode="integrated",
+            _env_file=None,
+        )
 
 
 def readiness_settings(**overrides) -> Settings:
@@ -322,7 +319,7 @@ def test_readiness_separates_shadow_research_breadth_from_paper_eligible_breadth
     for candidate in repo.candidates:
         candidate["source_integrity"] = {"activation_scope": "shadow_only", "paper_eligible": False, "operator_promotion_required": True}
     service = FakeReadinessService(now_ms=now_ms)
-    settings = readiness_settings(engine_alpha_catalog_mode="shadow_full_catalog")
+    settings = readiness_settings()
 
     async def run():
         return await build_paper_readiness_scorecard(repo, settings, service, window_hours=1, limit=100)

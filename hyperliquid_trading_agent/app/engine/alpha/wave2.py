@@ -18,8 +18,6 @@ PERP_DEX_VENUES = [
     "orderly",
     "alpaca:paper",
 ]
-WAVE_2_DISABLED_REASON = "deferred_until_wave1d_real_evidence"
-
 WAVE_2A_IDS = {
     "cross_venue_lead_lag_v1",
     "liquidity_vacuum_breakout_v1",
@@ -41,7 +39,7 @@ WAVE_2C_IDS = {
     "carry_risk_off_v1",
 }
 
-WAVE_2_DEFERRED_IDS = WAVE_2A_IDS | WAVE_2B_IDS | WAVE_2C_IDS
+WAVE_2_IDS = WAVE_2A_IDS | WAVE_2B_IDS | WAVE_2C_IDS
 
 
 def _spec(
@@ -64,37 +62,37 @@ def _spec(
         supported_horizons=horizons,
         required_features=features,
         valid_regimes=regimes,
-        max_candidates_per_run=0,
-        max_allocation_share_pct=0.0,
+        max_candidates_per_run=1,
+        max_allocation_share_pct=25.0,
         cooldown_ms=0,
-        min_confidence=1.0,
-        min_ev_bps=999.0,
+        min_confidence=0.35,
+        min_ev_bps=8.0,
         risk_tags=risk_tags,
-        enabled=False,
-        counts_for_breadth=False,
+        enabled=True,
+        counts_for_breadth=True,
         metadata={
             "wave": "2",
             "subwave": subwave,
-            "deferred": True,
-            "disabled_reason": WAVE_2_DISABLED_REASON,
-            "requires": ["wave1d_passed", "real_shadow_evidence", "operator_signed_enablement"],
-            "paper_only_until_promoted": True,
-            "execution_authority": "none",
+            "activation_scope": "paper_shadow",
+            "paper_eligible": True,
+            "operator_promotion_required": False,
+            "integration_status": "first_class",
+            "replayable": True,
         },
     )
 
 
-class DeferredWave2Strategy:
+class Wave2Strategy:
     spec: StrategySpec
     strategy_id: str
 
     def generate(self, snapshot: FeatureSnapshot | None, regime: RegimeVector | None, *, timestamp_ms: int) -> list[AlphaCandidate]:
         if not self.spec.enabled or snapshot is None or regime is None:
             return []
-        return _wave2_shadow_candidate(self.spec, snapshot, regime, timestamp_ms=timestamp_ms)
+        return _wave2_candidate(self.spec, snapshot, regime, timestamp_ms=timestamp_ms)
 
 
-class CrossVenueLeadLagStrategy(DeferredWave2Strategy):
+class CrossVenueLeadLagStrategy(Wave2Strategy):
     spec = _spec(
         strategy_id="cross_venue_lead_lag_v1",
         version="1.0.0",
@@ -108,7 +106,7 @@ class CrossVenueLeadLagStrategy(DeferredWave2Strategy):
     strategy_id = spec.strategy_id
 
 
-class LiquidityVacuumBreakoutStrategy(DeferredWave2Strategy):
+class LiquidityVacuumBreakoutStrategy(Wave2Strategy):
     spec = _spec(
         strategy_id="liquidity_vacuum_breakout_v1",
         version="1.0.0",
@@ -122,7 +120,7 @@ class LiquidityVacuumBreakoutStrategy(DeferredWave2Strategy):
     strategy_id = spec.strategy_id
 
 
-class StopClusterHuntStrategy(DeferredWave2Strategy):
+class StopClusterHuntStrategy(Wave2Strategy):
     spec = _spec(
         strategy_id="stop_cluster_hunt_v1",
         version="1.0.0",
@@ -136,7 +134,7 @@ class StopClusterHuntStrategy(DeferredWave2Strategy):
     strategy_id = spec.strategy_id
 
 
-class CrossVenueLiquidationDivergenceStrategy(DeferredWave2Strategy):
+class CrossVenueLiquidationDivergenceStrategy(Wave2Strategy):
     spec = _spec(
         strategy_id="cross_venue_liquidation_divergence_v1",
         version="1.0.0",
@@ -150,7 +148,7 @@ class CrossVenueLiquidationDivergenceStrategy(DeferredWave2Strategy):
     strategy_id = spec.strategy_id
 
 
-class CrowdedLongUnwindStrategy(DeferredWave2Strategy):
+class CrowdedLongUnwindStrategy(Wave2Strategy):
     spec = _spec(
         strategy_id="crowded_long_unwind_v1",
         version="1.0.0",
@@ -164,7 +162,7 @@ class CrowdedLongUnwindStrategy(DeferredWave2Strategy):
     strategy_id = spec.strategy_id
 
 
-class CrowdedShortSqueezeStrategy(DeferredWave2Strategy):
+class CrowdedShortSqueezeStrategy(Wave2Strategy):
     spec = _spec(
         strategy_id="crowded_short_squeeze_v1",
         version="1.0.0",
@@ -178,7 +176,7 @@ class CrowdedShortSqueezeStrategy(DeferredWave2Strategy):
     strategy_id = spec.strategy_id
 
 
-class LiquidationClusterFollowthroughStrategy(DeferredWave2Strategy):
+class LiquidationClusterFollowthroughStrategy(Wave2Strategy):
     spec = _spec(
         strategy_id="liquidation_cluster_followthrough_v1",
         version="1.0.0",
@@ -192,7 +190,7 @@ class LiquidationClusterFollowthroughStrategy(DeferredWave2Strategy):
     strategy_id = spec.strategy_id
 
 
-class LiquidationClusterExhaustionStrategy(DeferredWave2Strategy):
+class LiquidationClusterExhaustionStrategy(Wave2Strategy):
     spec = _spec(
         strategy_id="liquidation_cluster_exhaustion_v1",
         version="1.0.0",
@@ -206,7 +204,7 @@ class LiquidationClusterExhaustionStrategy(DeferredWave2Strategy):
     strategy_id = spec.strategy_id
 
 
-class PerpBasisMomentumStrategy(DeferredWave2Strategy):
+class PerpBasisMomentumStrategy(Wave2Strategy):
     spec = _spec(
         strategy_id="perp_basis_momentum_v1",
         version="1.0.0",
@@ -220,7 +218,7 @@ class PerpBasisMomentumStrategy(DeferredWave2Strategy):
     strategy_id = spec.strategy_id
 
 
-class PerpBasisReversionV2Strategy(DeferredWave2Strategy):
+class PerpBasisReversionV2Strategy(Wave2Strategy):
     spec = _spec(
         strategy_id="perp_basis_reversion_v2",
         version="2.0.0",
@@ -234,7 +232,7 @@ class PerpBasisReversionV2Strategy(DeferredWave2Strategy):
     strategy_id = spec.strategy_id
 
 
-class FundingCurveDislocationStrategy(DeferredWave2Strategy):
+class FundingCurveDislocationStrategy(Wave2Strategy):
     spec = _spec(
         strategy_id="funding_curve_dislocation_v1",
         version="1.0.0",
@@ -248,7 +246,7 @@ class FundingCurveDislocationStrategy(DeferredWave2Strategy):
     strategy_id = spec.strategy_id
 
 
-class CarryRiskOffStrategy(DeferredWave2Strategy):
+class CarryRiskOffStrategy(Wave2Strategy):
     spec = _spec(
         strategy_id="carry_risk_off_v1",
         version="1.0.0",
@@ -262,7 +260,7 @@ class CarryRiskOffStrategy(DeferredWave2Strategy):
     strategy_id = spec.strategy_id
 
 
-def _wave2_shadow_candidate(spec: StrategySpec, snapshot: FeatureSnapshot, regime: RegimeVector, *, timestamp_ms: int) -> list[AlphaCandidate]:
+def _wave2_candidate(spec: StrategySpec, snapshot: FeatureSnapshot, regime: RegimeVector, *, timestamp_ms: int) -> list[AlphaCandidate]:
     mid = _float(snapshot.features.get("mid"))
     if mid is None or mid <= 0:
         return []
@@ -289,8 +287,8 @@ def _wave2_shadow_candidate(spec: StrategySpec, snapshot: FeatureSnapshot, regim
             proposed_entry=mid,
             stop=stop,
             targets=[max(target, 0.00000001)],
-            thesis=f"{snapshot.asset} {side} Wave2 shadow: {thesis}",
-            invalidation_conditions=["Wave2 shadow feature edge decays", "RiskGateway/Council rejects shadow intent", f"Price trades through {stop:.6g}"],
+            thesis=f"{snapshot.asset} {side} Wave 2: {thesis}",
+            invalidation_conditions=["Wave 2 feature edge decays", "RiskGateway/Council rejects intent", f"Price trades through {stop:.6g}"],
             feature_snapshot_id=snapshot.snapshot_id,
             regime_snapshot_id=regime.regime_snapshot_id,
             source_event_ids=[],
@@ -502,5 +500,17 @@ def wave_2_strategy_instances() -> list[Any]:
     ]
 
 
-def wave_2_specs() -> list[StrategySpec]:
-    return [strategy.spec for strategy in wave_2_strategy_instances()]
+def wave_2_specs(*, enabled: bool = True) -> list[StrategySpec]:
+    specs = [strategy.spec for strategy in wave_2_strategy_instances()]
+    if enabled:
+        return specs
+    return [
+        spec.model_copy(
+            update={
+                "enabled": False,
+                "counts_for_breadth": False,
+                "metadata": {**spec.metadata, "runtime_enabled_reason": "catalog_excludes_wave2"},
+            }
+        )
+        for spec in specs
+    ]

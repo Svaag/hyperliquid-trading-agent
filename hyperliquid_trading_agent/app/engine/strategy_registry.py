@@ -20,9 +20,6 @@ from hyperliquid_trading_agent.app.engine.alpha.wave1c import (
     wave_1c_strategy_instances,
 )
 from hyperliquid_trading_agent.app.engine.alpha.wave2 import (
-    WAVE_2_DEFERRED_IDS as _WAVE_2_DEFERRED_IDS,
-)
-from hyperliquid_trading_agent.app.engine.alpha.wave2 import (
     WAVE_2A_IDS as _WAVE_2A_IDS,
 )
 from hyperliquid_trading_agent.app.engine.alpha.wave2 import (
@@ -69,16 +66,10 @@ WAVE_1C_OPTIONAL_IDS = {
 WAVE_2A_IDS = _WAVE_2A_IDS
 WAVE_2B_IDS = _WAVE_2B_IDS
 WAVE_2C_IDS = _WAVE_2C_IDS
-WAVE_2_DEFERRED_IDS = _WAVE_2_DEFERRED_IDS
 
-CatalogMode = Literal["wave1a_locked", "wave1c", "wave2_early_shadow", "shadow_full_catalog", "specs_only"]
-ALPHA_CATALOG_MODES = {"wave1a_locked", "wave1c", "wave2_early_shadow", "shadow_full_catalog", "specs_only"}
-PRE_WAVE1A_RUNTIME_IDS = PRE_WAVE1A_COMPARISON_IDS - {"equity_options_flow_v1"}
+CatalogMode = Literal["wave1a_locked", "wave1c", "integrated", "specs_only"]
+ALPHA_CATALOG_MODES = {"wave1a_locked", "wave1c", "integrated", "specs_only"}
 WAVE_1C_FULL_IDS = WAVE_1C_DETERMINISTIC_IDS | WAVE_1C_OPTIONAL_IDS
-SHADOW_FULL_CATALOG_ACTIVE_IDS = (
-    WAVE_1A_NUCLEUS_IDS | PRE_WAVE1A_RUNTIME_IDS | WAVE_1C_FULL_IDS | WAVE_2_DEFERRED_IDS
-)
-WAVE2_EARLY_SHADOW_ACTIVE_IDS = WAVE_1A_NUCLEUS_IDS | WAVE_1C_FULL_IDS | WAVE_2_DEFERRED_IDS
 
 
 @dataclass
@@ -216,19 +207,8 @@ def default_strategy_instances() -> list[AlphaStrategy]:
     return wave_1a_strategy_instances()
 
 
-def pre_wave1a_runtime_instances() -> list[AlphaStrategy]:
-    """Crypto-only pre-Wave1A strategies that can emit in full shadow catalog mode."""
-
-    return [
-        DirectionalMomentumStrategy(),
-        SupportResistanceReversionStrategy(),
-        MicrostructureOFIStrategy(),
-        NewsEventAlphaStrategy(),
-    ]
-
-
 def wave_1c_full_strategy_instances() -> list[AlphaStrategy]:
-    """Deterministic plus optional Wave1C strategies for the full shadow catalog."""
+    """Deterministic plus optional Wave 1C strategies for the integrated catalog."""
 
     return [*wave_1c_strategy_instances(), RangeRotationStrategy(), VolatilityCompressionBreakoutStrategy()]
 
@@ -277,7 +257,7 @@ def create_default_strategy_registry(
             news_event_alpha_mode=news_event_alpha_mode,
         )
     )
-    wave_1c_enabled = mode in {"wave1c", "wave2_early_shadow"}
+    wave_1c_enabled = mode in {"wave1c", "integrated"}
     if include_planned_wave_1a_specs:
         for spec in planned_wave_1a_specs():
             if registry.spec(spec.strategy_id) is None:
@@ -309,8 +289,8 @@ def runtime_strategy_instances(
     if effective_news_mode is None:
         # Preserve the historical direct-factory catalog shape. EngineService always
         # supplies the explicit operator setting, including "off".
-        effective_news_mode = "shadow" if mode in {"shadow_full_catalog", "wave2_early_shadow"} else "off"
-    news = _news_event_instances(effective_news_mode, shadow_only=mode in {"shadow_full_catalog", "wave2_early_shadow"})
+        effective_news_mode = "shadow" if mode == "integrated" else "off"
+    news = _news_event_instances(effective_news_mode)
     if mode in {"wave1a_locked", "specs_only"}:
         return [*default_strategy_instances(), *news]
     if mode == "wave1c":
@@ -319,44 +299,26 @@ def runtime_strategy_instances(
             *news,
             *[_active_instance(strategy, reason="wave1c_enabled") for strategy in wave_1c_strategy_instances()],
         ]
-    if mode == "wave2_early_shadow":
+    if mode == "integrated":
         return [
-            *[_active_instance(strategy, reason="wave2_early_shadow_wave1a") for strategy in default_strategy_instances()],
+            *[_active_instance(strategy, reason="integrated_wave1a") for strategy in default_strategy_instances()],
             *news,
-            *[_active_instance(strategy, reason="wave2_early_shadow_wave1c") for strategy in wave_1c_full_strategy_instances()],
-            *_shadow_only_instances(
-                wave_2_strategy_instances(),
-                reason="wave2_early_shadow_wave2",
-                force_breadth=True,
-            ),
+            *[_active_instance(strategy, reason="integrated_wave1c") for strategy in wave_1c_full_strategy_instances()],
+            *[_active_instance(strategy, reason="integrated_wave2") for strategy in wave_2_strategy_instances()],
         ]
-    if mode == "shadow_full_catalog":
-        strategies: list[AlphaStrategy] = []
-        strategies.extend(_shadow_only_instances(default_strategy_instances(), reason="shadow_full_catalog_wave1a"))
-        pre_wave = [strategy for strategy in pre_wave1a_runtime_instances() if strategy.strategy_id != "news_event_alpha_v2"]
-        strategies.extend(_shadow_only_instances(pre_wave, reason="shadow_full_catalog_pre_wave1a"))
-        strategies.extend(news)
-        strategies.extend(_shadow_only_instances(wave_1c_full_strategy_instances(), reason="shadow_full_catalog_wave1c"))
-        strategies.extend(_shadow_only_instances(wave_2_strategy_instances(), reason="shadow_full_catalog_wave2", force_breadth=True))
-        return strategies
     raise ValueError(f"unsupported catalog mode: {catalog_mode}")
 
 
-def _news_event_instances(
-    mode: Literal["off", "shadow", "paper"],
-    *,
-    shadow_only: bool,
-) -> list[AlphaStrategy]:
-    """Activate Newswire alpha independently of the historical wave catalog.
+def _news_event_instances(mode: Literal["off", "shadow", "paper"]) -> list[AlphaStrategy]:
+    """Activate Newswire alpha independently of the strategy catalog.
 
     News risk-state consumption is always independent of this switch.  The strategy is
-    opt-in at runtime (shadow by default in Settings), and the full-shadow catalog can
-    never make it paper eligible even when a conflicting operator setting is supplied.
+    opt-in at runtime and shadow by default in Settings.
     """
     if mode == "off":
         return []
     strategy: AlphaStrategy = NewsEventAlphaStrategy()
-    if mode == "shadow" or shadow_only:
+    if mode == "shadow":
         return _shadow_only_instances([strategy], reason="newswire_alpha_shadow")
     return [_active_instance(strategy, reason="newswire_alpha_paper")]
 
@@ -400,23 +362,20 @@ def _shadow_only_instances(
     strategies: Iterable[AlphaStrategy],
     *,
     reason: str,
-    force_breadth: bool = False,
 ) -> list[AlphaStrategy]:
-    return [_strategy_with_spec(strategy, _shadow_only_spec(_strategy_spec(strategy), reason=reason, force_breadth=force_breadth)) for strategy in strategies]
+    return [_strategy_with_spec(strategy, _shadow_only_spec(_strategy_spec(strategy), reason=reason)) for strategy in strategies]
 
 
-def _shadow_only_spec(spec: StrategySpec, *, reason: str, force_breadth: bool = False) -> StrategySpec:
-    catalog_mode = "wave2_early_shadow" if reason.startswith("wave2_early_shadow") else "shadow_full_catalog"
+def _shadow_only_spec(spec: StrategySpec, *, reason: str) -> StrategySpec:
     updates: dict[str, Any] = {
         "enabled": True,
-        "counts_for_breadth": bool(spec.counts_for_breadth or force_breadth),
+        "counts_for_breadth": spec.counts_for_breadth,
         "metadata": {
             **spec.metadata,
             "activation_scope": "shadow_only",
             "paper_eligible": False,
             "operator_promotion_required": True,
             "runtime_enabled_reason": reason,
-            "catalog_mode": catalog_mode,
         },
     }
     if spec.max_candidates_per_run <= 0:
@@ -449,6 +408,6 @@ def planned_wave_1c_specs(*, enabled: bool = False) -> list[StrategySpec]:
 
 
 def planned_wave_2_specs() -> list[StrategySpec]:
-    """Disabled specs for the deferred proprietary perp-DEX Wave 2 roadmap."""
+    """First-class Wave 2 specs, disabled only when the selected catalog excludes them."""
 
-    return wave_2_specs()
+    return wave_2_specs(enabled=False)

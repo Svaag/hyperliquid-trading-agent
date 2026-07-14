@@ -10,22 +10,14 @@ ENGINE_SHADOW_ENABLED=true
 ENGINE_PAPER_ENABLED=false
 ENGINE_EXECUTION_MODES=shadow
 ENGINE_LIVE_ENABLED=false
-ENGINE_ALPHA_CATALOG_MODE=wave1a_locked
-ENGINE_CROSS_VENUE_DEXES=
+ENGINE_ALPHA_CATALOG_MODE=integrated
+ENGINE_WAVE1C_ENABLED=true
+ENGINE_WAVE2_ENABLED=true
+ENGINE_CROSS_VENUE_DEXES=lighter,xyz,alpaca:paper
 ENGINE_READINESS_CLEAN_WINDOW_START_MS=<deployment_ms>
 ```
 
-To collect broad model evidence without granting paper eligibility, switch only the catalog mode:
-
-```env
-ENGINE_ALPHA_CATALOG_MODE=shadow_full_catalog
-ENGINE_SHADOW_ENABLED=true
-ENGINE_PAPER_ENABLED=false
-ENGINE_EXECUTION_MODES=shadow
-ENGINE_LIVE_ENABLED=false
-```
-
-This activates the full shadow alpha catalog and marks research candidates `paper_eligible=false`; `/engine/readiness` reports their shadow breadth separately from paper-eligible breadth.
+The integrated catalog evaluates Wave 1 and all Wave 2A/2B/2C strategies through one readiness and reporting path while global execution remains shadow-only.
 
 Enable read-only data feeds only:
 
@@ -63,18 +55,9 @@ GET /engine/readiness
 
 Bandit recommendations are report-only. Confirm every recommendation has `auto_apply_allowed=false`.
 
-## Full shadow alpha catalog observation
+## Unified catalog observation condition
 
-When `ENGINE_ALPHA_CATALOG_MODE=shadow_full_catalog` is active, verify:
-
-- `GET /engine/strategy-catalog` shows the expanded catalog and `shadow_only` runtime strategies.
-- `GET /engine/readiness` shows `active_shadow_strategy_count` / `active_shadow_family_count` separately from `paper_eligible_active_*`.
-- Paper/live settings remain disabled; RiskGateway and Council coverage remain mandatory.
-- No paper promotion is inferred from shadow-only research breadth.
-
-## Wave 1C canary condition
-
-Wave 1C canary remains blocked until the same shadow window proves the Wave 1B spine is reliable:
+Paper promotion remains blocked until the integrated Wave 1/Wave 2 shadow window proves the evidence spine is reliable:
 
 - `GET /engine/readiness` has no evidence-spine hard blocks.
 - Candidate evidence link coverage is 100%.
@@ -83,22 +66,11 @@ Wave 1C canary remains blocked until the same shadow window proves the Wave 1B s
 - Matured outcome attribution coverage is at least 95%.
 - Council packet coverage is at least 95%.
 - Latest replay is `passed` or `advisory_pass`.
-- Paper/live flags remain disabled during the canary.
+- Paper/live flags remain disabled during observation.
+- `GET /engine/strategy-catalog` shows every Wave 2A/2B/2C strategy as `paper_shadow`, `paper_eligible=true`, and first-class.
+- The normal digest and readiness reports include Wave 2 alongside Wave 1 rather than in a separate research population.
 
-Only after those checks pass may an operator canary Wave 1C by changing:
-
-```env
-ENGINE_WAVE1C_ENABLED=true
-ENGINE_PAPER_ENABLED=false
-ENGINE_EXECUTION_MODES=shadow
-ENGINE_WAVE2_ENABLED=false
-```
-
-If readiness hard-blocks, replay fails, or concentration breaches during canary, roll back with:
-
-```env
-ENGINE_WAVE1C_ENABLED=false
-```
+If readiness hard-blocks, replay fails, or concentration breaches, keep execution shadow-only and investigate the failing strategies or data feeds.
 
 ## Promotion condition
 

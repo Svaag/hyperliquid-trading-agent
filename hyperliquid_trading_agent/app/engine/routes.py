@@ -234,7 +234,7 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
             "wave_policy": {
                 "wave1c_enabled": bool(engine_runtime.get("wave1c_enabled", settings.engine_wave1c_enabled)),
                 "wave2_enabled": bool(engine_runtime.get("wave2_enabled", settings.engine_wave2_enabled)),
-                "wave2_status": "deferred_until_wave1_evidence_replay_readiness",
+                "wave2_status": "first_class_integrated" if settings.engine_alpha_catalog_mode == "integrated" else "disabled",
             },
             "repository_enabled": getattr(repository, "enabled", False),
             "service": engine_runtime,

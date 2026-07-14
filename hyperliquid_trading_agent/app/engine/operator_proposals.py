@@ -454,6 +454,21 @@ class EngineOperatorProposalService:
         replay_blocked = any("replay" in item for item in required)
         return not replay_blocked and set(evaluation.soft_blockers) <= allowed
 
+    @staticmethod
+    def _display_soft_blockers(blockers: list[str]) -> list[str]:
+        """Collapse research-governance details for the operator-facing digest.
+
+        The raw blocker codes remain on ``ProposalEvaluation`` for diagnostics and
+        auditability. To an operator, however, ``shadow_only_strategy`` and
+        ``not_paper_eligible`` describe the same actionable state: research only.
+        """
+
+        research_codes = {"shadow_only_strategy", "not_paper_eligible"}
+        display = [item for item in blockers if item not in research_codes]
+        if research_codes.intersection(blockers):
+            display.insert(0, "research_only")
+        return display
+
     async def _maybe_enqueue_shadow_digest(self, *, now_ms: int) -> None:
         if not self.settings.engine_operator_shadow_digest_enabled:
             return
@@ -476,11 +491,12 @@ class EngineOperatorProposalService:
             return
         lines = ["🔬 **Institutional engine shadow digest — research candidates**"]
         for item in ranked:
+            display_blockers = self._display_soft_blockers(item.soft_blockers)
             lines.append(
                 f"- `{item.candidate.get('asset')}` {str(item.candidate.get('side')).upper()} / "
                 f"`{item.candidate.get('strategy_id')}` — EV `{float(item.ev.get('net_ev_bps') or 0):.2f}` bps, "
                 f"utility `{float(item.ev.get('risk_adjusted_utility') or 0):.3f}`, blocked by "
-                f"`{','.join(item.soft_blockers)}`"
+                f"`{','.join(display_blockers)}`"
             )
         lines.extend(
             [
