@@ -24,6 +24,7 @@ V2 separates concepts that v1 conflated:
 Official baseline sources are keyless BLS and US Treasury nominal/real curves. FRED breadth is enabled only when `WORLD_MODEL_V2_FRED_API_KEY` is configured; otherwise the model reports partial coverage and does not synthesize missing inputs. Custom cross-asset exposure profiles use `WORLD_MODEL_V2_EXPOSURE_PROFILES_JSON` with factor weights restricted to `-1`, `0`, or `1`.
 
 Prediction discovery remains broad for paper/manual search, while the v2 feature subset is relevance-gated, volume ordered, quality checked, and capped. Sports, entertainment, celebrity, crime, and unmapped political markets cannot enter v2 forecasts.
+`WORLD_MODEL_V2_PREDICTION_SCAN_MARKETS` controls how many volume-ordered Polymarket rows are paged through for relevant contracts (default `1000`); `WORLD_MODEL_V2_PREDICTION_MAX_MARKETS` caps the admitted feature subset (default `100`).
 
 Set `WORLD_MODEL_V2_SHADOW_FEATURES_ENABLED=true` to persist v2 engine features for comparison. They bypass the active in-memory feature snapshot and cannot affect paper or live strategy decisions.
 

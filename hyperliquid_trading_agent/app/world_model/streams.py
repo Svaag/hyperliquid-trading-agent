@@ -5,12 +5,12 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
 import websockets
 
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.world_model.adapters import (
+    _fetch_polymarket_markets,
     _json_list,
     _safe_float,
     _stable_id,
@@ -131,7 +131,12 @@ class WorldModelStreamService:
                 adapter.status.error_count += 1
                 adapter.status.reconnect_count += 1
                 adapter.status.last_error = type(exc).__name__
-                log.warning("world_model_stream_restart", adapter=adapter.name, error=type(exc).__name__)
+                log.warning(
+                    "world_model_stream_restart",
+                    adapter=adapter.name,
+                    error=type(exc).__name__,
+                    detail=str(exc)[:500],
+                )
                 try:
                     await asyncio.sleep(backoff)
                 except asyncio.CancelledError:
@@ -201,16 +206,11 @@ class PolymarketWebSocketAdapter(WorldModelStreamAdapter):
             await ws.send("PING")
 
     async def _discover_subscriptions(self) -> list[PolymarketSubscription]:
-        url = self.settings.world_model_polymarket_base_url.rstrip("/") + "/markets"
         market_limit = self.settings.world_model_v2_prediction_max_markets if self.settings.world_model_v2_enabled else self.settings.world_model_adapter_max_items
-        params = {"active": "true", "closed": "false", "limit": min(500, max(100, market_limit * 4)), "order": "volume", "ascending": "false"}
-        async with httpx.AsyncClient(timeout=self.settings.world_model_adapter_timeout_seconds) as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-        markets = data.get("markets", data) if isinstance(data, dict) else data
+        scan_limit = self.settings.world_model_v2_prediction_scan_markets if self.settings.world_model_v2_enabled else max(100, market_limit)
+        markets = await _fetch_polymarket_markets(self.settings, scan_limit=scan_limit)
         out: list[PolymarketSubscription] = []
-        for market in list(markets or []):
+        for market in markets:
             if self.settings.world_model_v2_enabled:
                 mapped = map_prediction_market(
                     venue="polymarket", market_id=str(market.get("id") or market.get("conditionId") or market.get("slug") or ""),

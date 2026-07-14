@@ -11,6 +11,7 @@ from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.world_model.reducer import now_ms
 from hyperliquid_trading_agent.app.world_model.schemas import PredictionMarketSignal, WorldEvent
 from hyperliquid_trading_agent.app.world_model.service import WorldModelService
+from hyperliquid_trading_agent.app.world_model.v2_reducer import map_prediction_market
 
 
 @dataclass
@@ -104,18 +105,32 @@ class PolymarketAdapter(WorldSourceAdapter):
         return self.settings.world_model_adapters_enabled and self.settings.world_model_polymarket_enabled
 
     async def poll(self, service: WorldModelService) -> dict[str, int]:
-        url = self.settings.world_model_polymarket_base_url.rstrip("/") + "/markets"
         limit = self.settings.world_model_v2_prediction_max_markets if self.settings.world_model_v2_enabled else self.settings.world_model_adapter_max_items
-        params = {"active": "true", "closed": "false", "limit": min(500, max(100, limit * 4)), "order": "volume", "ascending": "false"}
-        async with httpx.AsyncClient(timeout=self.settings.world_model_adapter_timeout_seconds) as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-        markets = data.get("markets", data) if isinstance(data, dict) else data
+        scan_limit = self.settings.world_model_v2_prediction_scan_markets if self.settings.world_model_v2_enabled else max(100, limit)
+        markets = await _fetch_polymarket_markets(self.settings, scan_limit=scan_limit)
         count = 0
+        catalog_count = 0
         duplicate_count = 0
+        feature_market_count = 0
         seen_signal_ids: set[str] = set()
-        for market in list(markets or []):
+        desired_instruments = {item.strip().upper() for item in self.settings.world_model_v2_instruments.split(",") if item.strip()}
+        catalog_only = getattr(service, "observe_prediction_market_catalog_signal", None)
+        for market_index, market in enumerate(markets):
+            feature_candidate = False
+            if self.settings.world_model_v2_enabled:
+                mapped = map_prediction_market(
+                    venue="polymarket",
+                    market_id=str(market.get("id") or market.get("conditionId") or market.get("slug") or ""),
+                    question=str(market.get("question") or market.get("title") or ""),
+                    status="open",
+                    accepting_orders=bool(market.get("acceptingOrders", True)),
+                    liquidity_usd=_safe_float(market.get("liquidity") or market.get("liquidityNum")),
+                    volume_usd=_safe_float(market.get("volume") or market.get("volumeNum")),
+                    desired_instruments=desired_instruments,
+                )
+                feature_candidate = bool(mapped.factor_ids and mapped.instrument_ids) and feature_market_count < limit
+                if feature_candidate:
+                    feature_market_count += 1
             signals = _polymarket_signals(market, self.settings)
             for signal in signals:
                 if signal.signal_id in seen_signal_ids:
@@ -123,11 +138,22 @@ class PolymarketAdapter(WorldSourceAdapter):
                     continue
                 seen_signal_ids.add(signal.signal_id)
                 signal = _with_probability_delta(service, signal)
-                await service.observe_prediction_market_signal(signal)
-                count += 1
-            if count >= limit * 2:
+                if not self.settings.world_model_v2_enabled or feature_candidate:
+                    await service.observe_prediction_market_signal(signal)
+                    count += 1
+                elif market_index < limit and callable(catalog_only):
+                    await catalog_only(signal)
+                    catalog_count += 1
+            if not self.settings.world_model_v2_enabled and count >= limit * 2:
                 break
-        return {"events": 0, "prediction_signals": count, "duplicates_skipped": duplicate_count}
+        return {
+            "events": 0,
+            "prediction_signals": count,
+            "catalog_signals": catalog_count,
+            "feature_markets": feature_market_count,
+            "scanned_markets": len(markets),
+            "duplicates_skipped": duplicate_count,
+        }
 
 
 class KalshiAdapter(WorldSourceAdapter):
@@ -261,10 +287,13 @@ def _polymarket_signals(market: dict[str, Any], settings: Settings) -> list[Pred
     prices = _json_list(market.get("outcomePrices")) or _json_list(market.get("outcome_prices")) or []
     liquidity = _safe_float(market.get("liquidity") or market.get("liquidityNum"))
     volume = _safe_float(market.get("volume") or market.get("volumeNum"))
+    yes_bid = _bounded_probability(market.get("bestBid") if market.get("bestBid") is not None else market.get("best_bid"))
+    yes_ask = _bounded_probability(market.get("bestAsk") if market.get("bestAsk") is not None else market.get("best_ask"))
     ts = now_ms()
     signals = []
     for idx, outcome in enumerate(outcomes[:4]):
         probability = _safe_float(prices[idx]) if idx < len(prices) else None
+        best_bid, best_ask = _polymarket_outcome_book(idx, len(outcomes), yes_bid=yes_bid, yes_ask=yes_ask)
         source_id = f"polymarket:{market_id}:{idx}:{outcome}"
         signals.append(
             PredictionMarketSignal(
@@ -277,6 +306,8 @@ def _polymarket_signals(market: dict[str, Any], settings: Settings) -> list[Pred
                 symbols=_symbols_from_text(question, settings),
                 topics=["prediction_market", "polymarket", *_topics_from_text(question)],
                 implied_probability=probability,
+                best_bid=best_bid,
+                best_ask=best_ask,
                 liquidity_usd=liquidity,
                 volume_usd=volume,
                 status="open",
@@ -293,6 +324,50 @@ def _polymarket_signals(market: dict[str, Any], settings: Settings) -> list[Pred
             )
         )
     return signals
+
+
+async def _fetch_polymarket_markets(settings: Settings, *, scan_limit: int) -> list[dict[str, Any]]:
+    url = settings.world_model_polymarket_base_url.rstrip("/") + "/markets"
+    bounded_limit = max(1, min(5_000, int(scan_limit)))
+    markets: list[dict[str, Any]] = []
+    async with httpx.AsyncClient(timeout=settings.world_model_adapter_timeout_seconds) as client:
+        while len(markets) < bounded_limit:
+            page_size = min(100, bounded_limit - len(markets))
+            response = await client.get(
+                url,
+                params={
+                    "active": "true",
+                    "closed": "false",
+                    "limit": page_size,
+                    "offset": len(markets),
+                    "order": "volume",
+                    "ascending": "false",
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+            page = data.get("markets", data) if isinstance(data, dict) else data
+            rows = [item for item in list(page or []) if isinstance(item, dict)]
+            markets.extend(rows)
+            if len(rows) < page_size:
+                break
+    return markets
+
+
+def _polymarket_outcome_book(
+    outcome_index: int,
+    outcome_count: int,
+    *,
+    yes_bid: float | None,
+    yes_ask: float | None,
+) -> tuple[float | None, float | None]:
+    if outcome_count != 2:
+        return None, None
+    if outcome_index == 0:
+        return yes_bid, yes_ask
+    if outcome_index == 1:
+        return (None if yes_ask is None else 1.0 - yes_ask, None if yes_bid is None else 1.0 - yes_bid)
+    return None, None
 
 
 def _kalshi_signal(market: dict[str, Any], settings: Settings) -> PredictionMarketSignal | None:
@@ -442,6 +517,13 @@ def _safe_float(value: Any, default: float | None = None) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _bounded_probability(value: Any) -> float | None:
+    parsed = _safe_float(value)
+    if parsed is None:
+        return None
+    return max(0.0, min(1.0, parsed))
 
 
 def _cents_probability(value: Any) -> float | None:

@@ -299,6 +299,8 @@ def test_world_model_live_adapter_normalizers_are_advisory_only():
             "outcomes": '["Yes","No"]',
             "outcomePrices": '["0.62","0.38"]',
             "liquidity": "10000",
+            "bestBid": "0.60",
+            "bestAsk": "0.64",
         },
         settings,
     )
@@ -306,6 +308,10 @@ def test_world_model_live_adapter_normalizers_are_advisory_only():
 
     assert poly[0].venue == "polymarket"
     assert poly[0].metadata["execution_authority"] == "none"
+    assert poly[0].best_bid == pytest.approx(0.60)
+    assert poly[0].best_ask == pytest.approx(0.64)
+    assert poly[1].best_bid == pytest.approx(0.36)
+    assert poly[1].best_ask == pytest.approx(0.40)
     assert kalshi is not None
     assert kalshi.venue == "kalshi"
     assert kalshi.implied_probability == 0.625

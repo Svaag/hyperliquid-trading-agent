@@ -60,7 +60,7 @@ class WorldModelWorker(BaseWorker):
             tasks.append(asyncio.create_task(self._adapter_poll_loop(), name="world-model-adapter-poll"))
         if self.settings.world_model_v2_enabled:
             self.macro_baseline = OfficialMacroBaseline(settings=self.settings, service=self.service)
-            tasks.append(asyncio.create_task(self.macro_baseline.backfill(), name="world-model-v2-macro-baseline"))
+            tasks.append(asyncio.create_task(self._macro_backfill_once(), name="world-model-v2-macro-baseline"))
             tasks.append(asyncio.create_task(self._v2_maintenance_loop(), name="world-model-v2-maintenance"))
         try:
             await self.wait_until_stopped()
@@ -82,13 +82,28 @@ class WorldModelWorker(BaseWorker):
         payload = command.get("payload") or {}
         adapter_name = payload.get("adapter_name")
         result = await self.adapter_service.poll(adapter_name, force=bool(payload.get("force")))
+        await self._persist_v2_snapshot()
         return {"poll": result}
 
     async def _adapter_poll_loop(self) -> None:
         while True:
             if self.adapter_service is not None:
                 await self.adapter_service.poll()
+                await self._persist_v2_snapshot()
             await asyncio.sleep(max(10.0, float(self.settings.world_model_adapter_poll_interval_seconds)))
+
+    async def _macro_backfill_once(self) -> None:
+        if self.macro_baseline is None:
+            return
+        await self.macro_baseline.backfill()
+        await self._persist_v2_snapshot()
+
+    async def _persist_v2_snapshot(self) -> None:
+        if not self.settings.world_model_v2_enabled or self.service is None:
+            return
+        persist = getattr(self.service, "persist_snapshot", None)
+        if callable(persist):
+            await persist(force=True)
 
     async def _v2_maintenance_loop(self) -> None:
         while True:

@@ -5505,6 +5505,68 @@ class Repository:
         filters = [WorldModelV2AssetImpactRecord.instrument_id == instrument_id.upper()] if instrument_id else []
         return await self._list_world_model_v2(WorldModelV2AssetImpactRecord, WorldModelV2AssetImpactRecord.as_of_ms, limit, filters)
 
+    async def replace_world_model_v2_current_state(
+        self,
+        *,
+        markets: list[dict[str, Any]],
+        quotes: list[dict[str, Any]],
+        hypotheses: list[dict[str, Any]],
+        impacts: list[dict[str, Any]],
+    ) -> None:
+        """Atomically replace derived/current v2 rows while retaining history."""
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            for model in (
+                WorldModelV2HypothesisRecord,
+                WorldModelV2PredictionQuoteRecord,
+                WorldModelV2PredictionMarketRecord,
+                WorldModelV2AssetImpactRecord,
+            ):
+                await session.execute(delete(model))
+            session.add_all(
+                [
+                    WorldModelV2PredictionMarketRecord(
+                        market_key=str(item["market_key"]),
+                        venue=str(item["venue"]),
+                        market_id=str(item["market_id"]),
+                        admission_status=str(item["admission_status"]),
+                        payload_json=item,
+                    )
+                    for item in markets
+                ]
+                + [
+                    WorldModelV2PredictionQuoteRecord(
+                        quote_key=str(item["quote_key"]),
+                        market_key=str(item["market_key"]),
+                        outcome_id=str(item["outcome_id"]),
+                        observed_at_ms=int(item["observed_at_ms"]),
+                        payload_json=item,
+                    )
+                    for item in quotes
+                ]
+                + [
+                    WorldModelV2HypothesisRecord(
+                        hypothesis_id=str(item["hypothesis_id"]),
+                        market_key=str(item["market_key"]),
+                        as_of_ms=int(item["as_of_ms"]),
+                        payload_json=item,
+                    )
+                    for item in hypotheses
+                ]
+                + [
+                    WorldModelV2AssetImpactRecord(
+                        impact_id=str(item["impact_id"]),
+                        instrument_id=str(item["instrument_id"]),
+                        factor_id=str(item["factor_id"]),
+                        as_of_ms=int(item["as_of_ms"]),
+                        payload_json=item,
+                    )
+                    for item in impacts
+                ]
+            )
+            await session.commit()
+
     async def upsert_world_model_v2_snapshot(self, item: dict[str, Any]) -> None:
         await self._merge_world_model_v2(WorldModelV2SnapshotRecord(snapshot_id=str(item["snapshot_id"]), as_of_ms=int(item["as_of_ms"]), payload_json=item))
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections import defaultdict
@@ -62,6 +63,7 @@ class WorldModelV2Service:
         self.supervision: dict[str, SupervisionV2] = {}
         self._cached_snapshot = WorldModelSnapshotV2(snapshot_id="wm2_empty", as_of_ms=now_ms(), quality_flags=["not_hydrated"])
         self._last_snapshot_persisted_ms = 0
+        self._write_lock = asyncio.Lock()
         self.error_count = 0
 
     def status(self) -> dict[str, Any]:
@@ -91,10 +93,22 @@ class WorldModelV2Service:
                 self.observations[item.observation_id] = item
             for payload in await self.repository.list_world_model_v2_prediction_markets(limit=500, admission_status=None):
                 item = PredictionMarketV2.model_validate(payload)
-                self.markets[item.market_key] = item
+                if item.factor_ids and item.instrument_ids:
+                    self.markets[item.market_key] = item
             for payload in await self.repository.list_world_model_v2_prediction_quotes(limit=1000):
                 item = PredictionQuoteV2.model_validate(payload)
-                self.quotes[item.quote_key] = item
+                if item.market_key in self.markets:
+                    self.quotes[item.quote_key] = item
+            self.hypotheses = {}
+            timestamp = now_ms()
+            for market in self.markets.values():
+                hypothesis = canonical_hypothesis(
+                    market,
+                    [quote for quote in self.quotes.values() if quote.market_key == market.market_key],
+                    now_ms=timestamp,
+                )
+                if hypothesis is not None:
+                    self.hypotheses[hypothesis.hypothesis_id] = hypothesis
             await self.refresh_cache(persist=False)
         except Exception as exc:
             self._error(exc)
@@ -112,6 +126,23 @@ class WorldModelV2Service:
             self.hypotheses = {item.hypothesis_id: item for item in snapshot.forecasts}
             self.impacts = {item.impact_id: item for item in snapshot.asset_impacts}
             self.evidence = {item.evidence_id: item for item in snapshot.evidence}
+            observations: dict[str, MacroObservationV2] = {}
+            for payload in await self.repository.list_world_model_v2_macro_observations(limit=5000):
+                item = MacroObservationV2.model_validate(payload)
+                observations[item.observation_id] = item
+            self.observations = observations
+            markets: dict[str, PredictionMarketV2] = {}
+            for payload in await self.repository.list_world_model_v2_prediction_markets(limit=500, admission_status=None):
+                item = PredictionMarketV2.model_validate(payload)
+                if item.factor_ids and item.instrument_ids:
+                    markets[item.market_key] = item
+            self.markets = markets
+            quotes: dict[str, PredictionQuoteV2] = {}
+            for payload in await self.repository.list_world_model_v2_prediction_quotes(limit=1000):
+                item = PredictionQuoteV2.model_validate(payload)
+                if item.market_key in markets:
+                    quotes[item.quote_key] = item
+            self.quotes = quotes
             return True
         except Exception as exc:
             self._error(exc)
@@ -144,15 +175,23 @@ class WorldModelV2Service:
         return []
 
     async def observe_evidence(self, evidence: EvidenceV2) -> None:
+        async with self._write_lock:
+            await self._observe_evidence_unlocked(evidence)
+
+    async def _observe_evidence_unlocked(self, evidence: EvidenceV2) -> None:
         self.evidence[evidence.evidence_id] = evidence
         if self.repository is not None:
             await self.repository.upsert_world_model_v2_evidence(evidence.model_dump(mode="json"))
-        await self.refresh_cache()
+        await self._refresh_cache_unlocked()
 
     async def observe_macro_observation(self, observation: MacroObservationV2) -> None:
         await self.observe_macro_observations([observation])
 
     async def observe_macro_observations(self, observations: list[MacroObservationV2]) -> None:
+        async with self._write_lock:
+            await self._observe_macro_observations_unlocked(observations)
+
+    async def _observe_macro_observations_unlocked(self, observations: list[MacroObservationV2]) -> None:
         for observation in observations:
             self.observations[observation.observation_id] = observation
         if self.repository is not None:
@@ -163,9 +202,13 @@ class WorldModelV2Service:
             else:
                 for payload in payloads:
                     await self.repository.upsert_world_model_v2_macro_observation(payload)
-        await self.refresh_cache()
+        await self._refresh_cache_unlocked()
 
     async def observe_prediction_market_signal(self, signal: Any) -> ForecastHypothesisV2 | None:
+        async with self._write_lock:
+            return await self._observe_prediction_market_signal_unlocked(signal)
+
+    async def _observe_prediction_market_signal_unlocked(self, signal: Any) -> ForecastHypothesisV2 | None:
         # Keep the broad legacy catalog fresh for the independent paper/manual-search
         # subsystem. Only the deterministically admitted subset enters v2 state.
         persist_catalog = getattr(self.repository, "upsert_prediction_market_signal", None)
@@ -194,6 +237,7 @@ class WorldModelV2Service:
             self.markets[market.market_key] = market
             if self.repository is not None:
                 await self.repository.upsert_world_model_v2_prediction_market(market.model_dump(mode="json"))
+            self.hypotheses.pop(stable_key("forecast", market.market_key), None)
             return None
         bid, ask = getattr(signal, "best_bid", None), getattr(signal, "best_ask", None)
         quote = PredictionQuoteV2(
@@ -227,8 +271,8 @@ class WorldModelV2Service:
             await self.repository.upsert_world_model_v2_prediction_quote(quote.model_dump(mode="json"), write_history=history)
         if market.status in {"closed", "settled"}:
             self.hypotheses.pop(stable_key("forecast", market.market_key), None)
-            await self.refresh_cache()
-            await self.persist_snapshot(force=True)
+            await self._refresh_cache_unlocked()
+            await self._persist_snapshot_unlocked(force=True)
             return None
         market_quotes = [item for item in self.quotes.values() if item.market_key == market.market_key]
         hypothesis = canonical_hypothesis(market, market_quotes, now_ms=now_ms())
@@ -236,10 +280,23 @@ class WorldModelV2Service:
             self.hypotheses[hypothesis.hypothesis_id] = hypothesis
             if self.repository is not None:
                 await self.repository.upsert_world_model_v2_hypothesis(hypothesis.model_dump(mode="json"))
-        await self.refresh_cache()
+        else:
+            self.hypotheses.pop(stable_key("forecast", market.market_key), None)
+        await self._refresh_cache_unlocked(persist=False)
         return hypothesis
 
+    async def observe_prediction_market_catalog_signal(self, signal: Any) -> None:
+        """Persist broad discovery for manual/paper search without admitting v2 state."""
+        async with self._write_lock:
+            persist_catalog = getattr(self.repository, "upsert_prediction_market_signal", None)
+            if callable(persist_catalog) and callable(getattr(signal, "model_dump", None)):
+                await persist_catalog(signal.model_dump(mode="json"))
+
     async def refresh_cache(self, *, persist: bool = True, as_of_ms: int | None = None) -> WorldModelSnapshotV2:
+        async with self._write_lock:
+            return await self._refresh_cache_unlocked(persist=persist, as_of_ms=as_of_ms)
+
+    async def _refresh_cache_unlocked(self, *, persist: bool = True, as_of_ms: int | None = None) -> WorldModelSnapshotV2:
         ts = as_of_ms or now_ms()
         states = compute_macro_states(self.observations.values(), as_of_ms=ts)
         self.states = {item.factor_id: item for item in states}
@@ -333,8 +390,23 @@ class WorldModelV2Service:
         return {"version": 2, "snapshots": snapshots, "count": len(snapshots), "historical_v1_replay": False}
 
     async def persist_snapshot(self, snapshot: WorldModelSnapshotV2 | None = None, *, force: bool = False) -> None:
+        async with self._write_lock:
+            await self._persist_snapshot_unlocked(snapshot, force=force)
+
+    async def _persist_snapshot_unlocked(self, snapshot: WorldModelSnapshotV2 | None = None, *, force: bool = False) -> None:
         item = snapshot or self._cached_snapshot
         if self.repository is not None and (force or item.as_of_ms - self._last_snapshot_persisted_ms >= 300_000):
+            if force:
+                for state in self.states.values():
+                    await self.repository.upsert_world_model_v2_macro_state(state.model_dump(mode="json"))
+                replace_current = getattr(self.repository, "replace_world_model_v2_current_state", None)
+                if callable(replace_current):
+                    await replace_current(
+                        markets=[market.model_dump(mode="json") for market in self.markets.values()],
+                        quotes=[quote.model_dump(mode="json") for quote in self.quotes.values()],
+                        hypotheses=[hypothesis.model_dump(mode="json") for hypothesis in self.hypotheses.values()],
+                        impacts=[impact.model_dump(mode="json") for impact in self.impacts.values()],
+                    )
             await self.repository.upsert_world_model_v2_snapshot(item.model_dump(mode="json"))
             self._last_snapshot_persisted_ms = item.as_of_ms
 

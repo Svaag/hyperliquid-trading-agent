@@ -26,6 +26,7 @@ class OfficialMacroBaseline:
 
     async def backfill(self) -> dict[str, int]:
         cutover_ms = int(datetime.now(UTC).timestamp() * 1000)
+        self.last_error = None
         years = max(5, min(10, int(self.settings.world_model_v2_macro_backfill_years)))
         current_year = datetime.now(UTC).year
         timeout = float(self.settings.world_model_adapter_timeout_seconds)
@@ -41,8 +42,9 @@ class OfficialMacroBaseline:
                 counts["errors"] += 1
                 self.last_error = type(result).__name__
                 continue
-            source, observations = result
+            source, observations, source_errors = result
             counts[source] += len(observations)
+            counts["errors"] += source_errors
             all_observations.extend(observations)
         if all_observations:
             await self.service.observe_macro_observations(all_observations)
@@ -50,32 +52,46 @@ class OfficialMacroBaseline:
         self.counts = counts
         return counts
 
-    async def _bls(self, client: httpx.AsyncClient, start_year: int, end_year: int, available_at_ms: int) -> tuple[str, list[MacroObservationV2]]:
+    async def _bls(self, client: httpx.AsyncClient, start_year: int, end_year: int, available_at_ms: int) -> tuple[str, list[MacroObservationV2], int]:
         response = await client.post("https://api.bls.gov/publicAPI/v2/timeseries/data/", json={"seriesid": list(BLS_SERIES), "startyear": str(start_year), "endyear": str(end_year)})
         response.raise_for_status()
-        return "bls", parse_bls_response(response.json(), available_at_ms=available_at_ms)
+        return "bls", parse_bls_response(response.json(), available_at_ms=available_at_ms), 0
 
-    async def _treasury(self, client: httpx.AsyncClient, start_year: int, end_year: int, available_at_ms: int) -> tuple[str, list[MacroObservationV2]]:
+    async def _treasury(self, client: httpx.AsyncClient, start_year: int, end_year: int, available_at_ms: int) -> tuple[str, list[MacroObservationV2], int]:
         observations: list[MacroObservationV2] = []
+        errors = 0
         for year in range(start_year, end_year + 1):
             for dataset, factor in (("daily_treasury_yield_curve", "rates"), ("daily_treasury_real_yield_curve", "real_rates")):
-                response = await client.get("https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml", params={"data": dataset, "field_tdr_date_value": year})
-                response.raise_for_status()
-                observations.extend(parse_treasury_xml(response.text, available_at_ms=available_at_ms, factor_id=factor))
-        return "treasury", observations
+                for attempt in range(2):
+                    try:
+                        response = await client.get("https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml", params={"data": dataset, "field_tdr_date_value": year})
+                        response.raise_for_status()
+                        observations.extend(parse_treasury_xml(response.text, available_at_ms=available_at_ms, factor_id=factor))
+                        break
+                    except (httpx.HTTPError, ElementTree.ParseError) as exc:
+                        if attempt == 0:
+                            continue
+                        errors += 1
+                        self.last_error = type(exc).__name__
+        return "treasury", observations, errors
 
-    async def _fred(self, client: httpx.AsyncClient, available_at_ms: int) -> tuple[str, list[MacroObservationV2]]:
+    async def _fred(self, client: httpx.AsyncClient, available_at_ms: int) -> tuple[str, list[MacroObservationV2], int]:
         observations: list[MacroObservationV2] = []
+        errors = 0
         for series_id in FRED_SERIES:
             lookback_years = 5 if series_id in FRED_HIGH_FREQUENCY else 10
             observation_start = datetime(datetime.now(UTC).year - lookback_years, 1, 1, tzinfo=UTC).date().isoformat()
-            response = await client.get("https://api.stlouisfed.org/fred/series/observations", params={
-                "series_id": series_id, "api_key": self.settings.world_model_v2_fred_api_key,
-                "file_type": "json", "sort_order": "asc", "limit": 5000, "observation_start": observation_start,
-            })
-            response.raise_for_status()
-            observations.extend(parse_fred_response(series_id, response.json(), available_at_ms=available_at_ms))
-        return "fred", observations
+            try:
+                response = await client.get("https://api.stlouisfed.org/fred/series/observations", params={
+                    "series_id": series_id, "api_key": self.settings.world_model_v2_fred_api_key,
+                    "file_type": "json", "sort_order": "asc", "limit": 5000, "observation_start": observation_start,
+                })
+                response.raise_for_status()
+                observations.extend(parse_fred_response(series_id, response.json(), available_at_ms=available_at_ms))
+            except (httpx.HTTPError, ValueError) as exc:
+                errors += 1
+                self.last_error = type(exc).__name__
+        return "fred", observations, errors
 
     def status(self) -> dict[str, Any]:
         return {"last_poll_at_ms": self.last_poll_at_ms, "last_error": self.last_error, "counts": self.counts, "fred_enabled": bool(self.settings.world_model_v2_fred_api_key)}

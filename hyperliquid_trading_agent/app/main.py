@@ -126,6 +126,14 @@ class CandidatePromotionRequest(BaseModel):
     approved_for_role_injection_roles: list[str] = []
 
 
+async def _world_model_read_cache_loop(service: Any) -> None:
+    while True:
+        await asyncio.sleep(10)
+        refresh = getattr(service, "refresh_read_cache", None)
+        if callable(refresh):
+            await refresh()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
@@ -338,6 +346,12 @@ async def lifespan(app: FastAPI):
     ws_task: asyncio.Task | None = None
     tracking_task: asyncio.Task | None = None
     autonomy_task: asyncio.Task | None = None
+    world_model_cache_task: asyncio.Task | None = None
+    if settings.world_model_v2_enabled:
+        world_model_cache_task = asyncio.create_task(
+            _world_model_read_cache_loop(world_model_service),
+            name="api-world-model-v2-cache",
+        )
     if not restricted_runtime and (settings.hyperliquid_ws_enabled or settings.position_tracking_enabled or settings.autonomy_enabled or (settings.hip4_enabled and settings.hip4_ws_enabled)):
         ws_task = asyncio.create_task(ws_worker.start(), name="hyperliquid-ws")
         log.info("hyperliquid_ws_task_started")
@@ -407,7 +421,7 @@ async def lifespan(app: FastAPI):
             await tradfi_client.close()
         await hyperliquid.close()
         await engine.dispose()
-        for task in [bot_task, newswire_discord_task, autonomy_task, tracking_task, ws_task]:
+        for task in [bot_task, newswire_discord_task, autonomy_task, tracking_task, ws_task, world_model_cache_task]:
             if task is not None:
                 task.cancel()
                 try:

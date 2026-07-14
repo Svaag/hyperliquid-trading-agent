@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 import statistics
 from collections import defaultdict
 from typing import Iterable
@@ -100,12 +101,12 @@ def map_prediction_market(
     factors: tuple[str, ...] = ()
     instruments: tuple[str, ...] = ()
     reasons: list[str] = []
-    if any(term in text for term in EXCLUDED_PREDICTION_TERMS):
+    if any(_prediction_term_matches(text, term) for term in EXCLUDED_PREDICTION_TERMS):
         admission = "rejected"
         reasons.append("excluded_non_market_topic")
     else:
         for terms, mapped_factors, mapped_instruments in PREDICTION_RULES:
-            if any(term in text for term in terms):
+            if any(_prediction_term_matches(text, term) for term in terms):
                 factors = tuple(sorted(set(factors) | set(mapped_factors)))
                 instruments = tuple(sorted(set(instruments) | set(mapped_instruments)))
         if desired_instruments is not None:
@@ -147,6 +148,12 @@ def quote_is_feature_eligible(market: PredictionMarketV2, quote: PredictionQuote
 
 
 def canonical_hypothesis(market: PredictionMarketV2, quotes: list[PredictionQuoteV2], *, now_ms: int) -> ForecastHypothesisV2 | None:
+    if len(quotes) < 2:
+        return None
+    eligibility = [quote_is_feature_eligible(market, quote, now_ms=now_ms) for quote in quotes]
+    if not all(eligible for eligible, _ in eligibility):
+        return None
+    quality_reasons = sorted({reason for _, reasons in eligibility for reason in reasons})
     by_name = {quote.outcome_name.strip().lower(): quote for quote in quotes}
     if set(by_name) == {"yes", "no"}:
         yes = by_name["yes"]
@@ -155,20 +162,13 @@ def canonical_hypothesis(market: PredictionMarketV2, quotes: list[PredictionQuot
         if total <= 0:
             return None
         yes_probability = yes.probability / total
-        eligible_yes, reasons_yes = quote_is_feature_eligible(market, yes, now_ms=now_ms)
-        eligible_no, reasons_no = quote_is_feature_eligible(market, no, now_ms=now_ms)
-        reasons = sorted(set(reasons_yes + reasons_no))
-        if not eligible_yes or not eligible_no:
-            return None
         return ForecastHypothesisV2(
             hypothesis_id=stable_key("forecast", market.market_key), market_key=market.market_key,
             question=market.question, as_of_ms=max(yes.provider_at_ms, no.provider_at_ms), yes_probability=yes_probability,
             factor_ids=market.factor_ids, instrument_ids=market.instrument_ids,
             confidence=max(0.0, min(1.0, 1.0 - float(yes.spread or 0.0))),
-            evidence_ids=[], metadata={"quote_keys": [yes.quote_key, no.quote_key], "quality_reasons": reasons, "yes_scenario_factor_shocks": market.metadata.get("yes_scenario_factor_shocks", {})},
+            evidence_ids=[], metadata={"quote_keys": [yes.quote_key, no.quote_key], "quality_reasons": quality_reasons, "yes_scenario_factor_shocks": market.metadata.get("yes_scenario_factor_shocks", {})},
         )
-    if len(quotes) < 2:
-        return None
     total = sum(quote.probability for quote in quotes)
     if total <= 0:
         return None
@@ -178,7 +178,7 @@ def canonical_hypothesis(market: PredictionMarketV2, quotes: list[PredictionQuot
         outcome_probabilities={quote.outcome_name: quote.probability / total for quote in quotes},
         factor_ids=market.factor_ids, instrument_ids=market.instrument_ids,
         confidence=max(0.0, 1.0 - max(float(quote.spread or 0.0) for quote in quotes)),
-        metadata={"quote_keys": [quote.quote_key for quote in quotes], "yes_scenario_factor_shocks": market.metadata.get("yes_scenario_factor_shocks", {})},
+        metadata={"quote_keys": [quote.quote_key for quote in quotes], "quality_reasons": quality_reasons, "yes_scenario_factor_shocks": market.metadata.get("yes_scenario_factor_shocks", {})},
     )
 
 
@@ -304,14 +304,23 @@ def _normalized_surprise(series: list[MacroObservationV2], latest: MacroObservat
 
 
 def _prediction_scenario_shocks(text: str) -> dict[str, int]:
-    if "rate cut" in text or ("fed" in text and "cut" in text):
+    if _prediction_term_matches(text, "rate cut") or (_prediction_term_matches(text, "fed") and _prediction_term_matches(text, "cut")):
         return {"policy_stance": -1, "rates": -1}
-    if "rate hike" in text or ("fed" in text and "hike" in text):
+    if _prediction_term_matches(text, "rate hike") or (_prediction_term_matches(text, "fed") and _prediction_term_matches(text, "hike")):
         return {"policy_stance": 1, "rates": 1}
-    if "recession" in text:
+    if _prediction_term_matches(text, "recession"):
         return {"growth": -1, "labor": -1, "financial_conditions": 1}
-    if "taiwan" in text and any(term in text for term in ("invasion", "invade", "war")):
+    if _prediction_term_matches(text, "taiwan") and any(_prediction_term_matches(text, term) for term in ("invasion", "invade", "war")):
         return {"growth": -1, "financial_conditions": 1}
-    if any(term in text for term in ("inflation above", "cpi above", "inflation rise", "inflation higher")):
+    if any(_prediction_term_matches(text, term) for term in ("inflation above", "cpi above", "inflation rise", "inflation higher")):
         return {"inflation": 1, "policy_stance": 1}
     return {}
+
+
+def _prediction_term_matches(text: str, term: str) -> bool:
+    """Match complete words/phrases so short symbols never hit inside names."""
+    words = [re.escape(item) for item in term.lower().split() if item]
+    if not words:
+        return False
+    pattern = r"(?<![a-z0-9])" + r"\s+".join(words) + r"(?![a-z0-9])"
+    return re.search(pattern, text.lower()) is not None

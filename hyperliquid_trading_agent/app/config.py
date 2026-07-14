@@ -603,6 +603,7 @@ class Settings(BaseSettings):
     world_model_v2_fred_api_key: str | None = None
     world_model_v2_macro_backfill_years: int = 10
     world_model_v2_prediction_max_markets: int = 100
+    world_model_v2_prediction_scan_markets: int = 1000
     world_model_v2_shadow_features_enabled: bool = False
 
     # Alpaca News WebSocket (free, Benzinga-sourced)

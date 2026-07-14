@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -10,6 +11,7 @@ from pydantic import ValidationError
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.db.models import Base
 from hyperliquid_trading_agent.app.engine.feature_store import FeatureStore
+from hyperliquid_trading_agent.app.main import _world_model_read_cache_loop
 from hyperliquid_trading_agent.app.world_model.routes import register_world_model_routes
 from hyperliquid_trading_agent.app.world_model.schemas import PredictionMarketSignal
 from hyperliquid_trading_agent.app.world_model.streams import PolymarketSubscription, _polymarket_ws_signals
@@ -24,6 +26,7 @@ from hyperliquid_trading_agent.app.world_model.v2_schemas import (
     PredictionQuoteV2,
 )
 from hyperliquid_trading_agent.app.world_model.v2_service import WorldModelV2Service
+from hyperliquid_trading_agent.app.world_model.v2_sources import OfficialMacroBaseline
 
 
 def _observation(index: int, *, available_at_ms: int | None = None) -> MacroObservationV2:
@@ -33,6 +36,39 @@ def _observation(index: int, *, available_at_ms: int | None = None) -> MacroObse
         vintage="cutover", event_at_ms=1_000 + index, available_at_ms=available_at_ms or 2_000 + index,
         source="bls",
     )
+
+
+def test_api_world_model_cache_loop_remains_a_coroutine() -> None:
+    import inspect
+
+    assert inspect.iscoroutinefunction(_world_model_read_cache_loop)
+
+
+@pytest.mark.asyncio
+async def test_treasury_backfill_keeps_successful_datasets_after_partial_timeout() -> None:
+    xml = """<feed xmlns:m="urn:m" xmlns:d="urn:d"><entry><content><m:properties>
+    <d:NEW_DATE>2026-01-02T00:00:00Z</d:NEW_DATE><d:BC_2YEAR>4.2</d:BC_2YEAR>
+    <d:BC_5YEAR>4.3</d:BC_5YEAR><d:BC_10YEAR>4.4</d:BC_10YEAR><d:BC_30YEAR>4.5</d:BC_30YEAR>
+    </m:properties></content></entry></feed>"""
+
+    class Response:
+        text = xml
+
+        def raise_for_status(self) -> None:
+            pass
+
+    class Client:
+        async def get(self, url: str, *, params: dict):
+            if params["data"] == "daily_treasury_real_yield_curve":
+                raise httpx.ReadTimeout("real curve timed out")
+            return Response()
+
+    baseline = OfficialMacroBaseline(settings=Settings(environment="test"), service=None)
+    source, observations, errors = await baseline._treasury(Client(), 2026, 2026, 10_000)
+
+    assert source == "treasury" and errors == 1
+    assert len(observations) == 4
+    assert {item.factor_id for item in observations} == {"rates"}
 
 
 def test_v2_tables_are_additive_and_leave_v1_and_paper_tables_present() -> None:
@@ -63,9 +99,13 @@ def test_surprise_requires_a_separately_sourced_forecast() -> None:
 def test_prediction_relevance_rejects_sports_and_maps_macro() -> None:
     sports = map_prediction_market(venue="polymarket", market_id="sports", question="Will Spain win the 2026 FIFA World Cup?", liquidity_usd=1_000_000)
     macro = map_prediction_market(venue="polymarket", market_id="fed", question="Will the Fed cut interest rates in September?", liquidity_usd=1_000_000)
+    name_with_eth = map_prediction_market(venue="polymarket", market_id="name", question="Will Pete Hegseth win the nomination?", liquidity_usd=1_000_000)
+    name_with_fed = map_prediction_market(venue="polymarket", market_id="tennis", question="Croatia Open: Federico Gomez vs Niels McDonald", liquidity_usd=1_000_000)
     assert sports.admission_status == "rejected"
     assert macro.admission_status == "admitted"
     assert "policy_stance" in macro.factor_ids
+    assert name_with_eth.admission_status == "quarantined" and not name_with_eth.factor_ids
+    assert name_with_fed.admission_status == "quarantined" and not name_with_fed.factor_ids
 
 
 def test_binary_market_produces_one_canonical_yes_hypothesis() -> None:
@@ -79,6 +119,21 @@ def test_binary_market_produces_one_canonical_yes_hypothesis() -> None:
     assert hypothesis.yes_probability == pytest.approx(0.4)
     assert hypothesis.outcome_probabilities == {}
     assert not hasattr(hypothesis, "direction")
+
+
+def test_unmapped_multi_outcome_market_cannot_bypass_feature_admission() -> None:
+    market = map_prediction_market(
+        venue="polymarket",
+        market_id="tennis",
+        question="Isabella Kruger vs Jenny Duerst",
+        liquidity_usd=100_000,
+    )
+    quotes = [
+        PredictionQuoteV2(quote_key="p:tennis:a", market_key=market.market_key, venue="polymarket", market_id="tennis", outcome_id="a", outcome_name="Isabella Kruger", probability=0.48, best_bid=0.47, best_ask=0.49, spread=0.02, provider_at_ms=10_000, observed_at_ms=10_000),
+        PredictionQuoteV2(quote_key="p:tennis:b", market_key=market.market_key, venue="polymarket", market_id="tennis", outcome_id="b", outcome_name="Jenny Duerst", probability=0.52, best_bid=0.51, best_ask=0.53, spread=0.02, provider_at_ms=10_000, observed_at_ms=10_000),
+    ]
+    assert market.admission_status == "quarantined"
+    assert canonical_hypothesis(market, quotes, now_ms=11_000) is None
 
 
 def test_prediction_asset_effect_is_conditional_on_yes_scenario_semantics() -> None:
@@ -127,6 +182,79 @@ async def test_service_never_creates_yes_no_duplicate_beliefs() -> None:
         liquidity_usd=100_000, status="settled", as_of_ms=timestamp + 1, confidence=1.0,
     ))
     assert service.hypotheses == {}
+
+
+@pytest.mark.asyncio
+async def test_force_snapshot_replaces_current_derived_rows() -> None:
+    class Repo:
+        def __init__(self) -> None:
+            self.replacement: dict | None = None
+            self.snapshot: dict | None = None
+
+        async def upsert_world_model_v2_macro_state(self, item: dict) -> None:
+            pass
+
+        async def replace_world_model_v2_current_state(self, **items) -> None:
+            self.replacement = items
+
+        async def upsert_world_model_v2_snapshot(self, item: dict) -> None:
+            self.snapshot = item
+
+    repo = Repo()
+    service = WorldModelV2Service(settings=Settings(environment="test", world_model_v2_enabled=True), repository=repo)
+    await service.refresh_cache(persist=False)
+    await service.persist_snapshot(force=True)
+
+    assert repo.replacement is not None
+    assert set(repo.replacement) == {"markets", "quotes", "hypotheses", "impacts"}
+    assert repo.snapshot is not None and repo.snapshot["metadata"]["execution_authority"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_prediction_catalog_writes_and_snapshot_replacement_are_serialized() -> None:
+    import asyncio
+
+    class Repo:
+        def __init__(self) -> None:
+            self.active = 0
+            self.overlap = False
+
+        async def _touch(self) -> None:
+            self.active += 1
+            self.overlap = self.overlap or self.active > 1
+            await asyncio.sleep(0)
+            self.active -= 1
+
+        async def upsert_prediction_market_signal(self, item: dict) -> None:
+            await self._touch()
+
+        async def upsert_world_model_v2_macro_state(self, item: dict) -> None:
+            await self._touch()
+
+        async def replace_world_model_v2_current_state(self, **items) -> None:
+            await self._touch()
+
+        async def upsert_world_model_v2_snapshot(self, item: dict) -> None:
+            await self._touch()
+
+    repo = Repo()
+    service = WorldModelV2Service(settings=Settings(environment="test", world_model_v2_enabled=True), repository=repo)
+    await service.refresh_cache(persist=False)
+    signal = PredictionMarketSignal(
+        signal_id="catalog",
+        venue="polymarket",
+        market_id="catalog",
+        question="Unmapped catalog item",
+        outcome_name="Yes",
+        implied_probability=0.5,
+        as_of_ms=10_000,
+    )
+    await asyncio.gather(
+        service.observe_prediction_market_catalog_signal(signal),
+        service.persist_snapshot(force=True),
+    )
+
+    assert repo.overlap is False
 
 
 @pytest.mark.asyncio
