@@ -5,7 +5,7 @@ from collections import defaultdict
 from typing import Any
 from uuid import uuid4
 
-from hyperliquid_trading_agent.app.autonomy.schemas import AlphaEventEvaluation, SignalEvaluation, TuningProposal
+from hyperliquid_trading_agent.app.autonomy.schemas import AlphaEventEvaluation, TuningProposal
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.governance.schemas import CandidateConfigDiff
 from hyperliquid_trading_agent.app.metrics import TUNING_PROPOSALS_CREATED
@@ -32,26 +32,6 @@ class TuningProposalService:
             "active_count": len([item for item in self.proposals.values() if item.status == "proposed"]),
             "auto_apply_enabled": False,
         }
-
-    async def generate_from_evaluations(self, evaluations: list[SignalEvaluation]) -> list[TuningProposal]:
-        if not self.settings.autonomy_tuning_proposals_enabled:
-            return []
-        grouped: dict[tuple[str, str], list[SignalEvaluation]] = defaultdict(list)
-        for evaluation in evaluations:
-            if evaluation.status == "complete":
-                grouped[(evaluation.symbol, evaluation.signal_type)].append(evaluation)
-        proposals: list[TuningProposal] = []
-        for (symbol, signal_type), items in grouped.items():
-            if len(items) < 3:
-                continue
-            avg_r = _avg([item.realized_or_marked_r for item in items]) or 0.0
-            stop_rate = len([item for item in items if item.terminal_outcome == "stop_hit"]) / len(items)
-            missed = _avg([item.opportunity_cost_r for item in items if item.opportunity_cost_r is not None]) or 0.0
-            if avg_r <= -0.25 or stop_rate >= 0.5:
-                proposals.append(await self._upsert_proposal(_threshold_proposal(settings=self.settings, symbol=symbol, signal_type=signal_type, items=items, avg_r=avg_r, stop_rate=stop_rate)))
-            if missed >= 1.0 and len([item for item in items if item.rejected]) >= 2:
-                proposals.append(await self._upsert_proposal(_review_rejection_proposal(settings=self.settings, symbol=symbol, signal_type=signal_type, items=items, missed=missed)))
-        return proposals
 
     async def generate_from_event_evaluations(self, evaluations: list[AlphaEventEvaluation]) -> list[TuningProposal]:
         if not self.settings.autonomy_tuning_proposals_enabled:
@@ -202,11 +182,10 @@ def _known_risks_from_text(value: str) -> list[str]:
 
 def _evidence_links(proposal: TuningProposal) -> list[str]:
     links: list[str] = []
-    links.extend(str(item) for item in proposal.source_signal_ids)
     links.extend(str(item) for item in proposal.source_lesson_ids)
     for item in proposal.evidence:
         if isinstance(item, dict):
-            for key in ("evaluation_id", "signal_id", "event_id", "id"):
+            for key in ("evaluation_id", "event_id", "id"):
                 if item.get(key):
                     links.append(str(item[key]))
                     break
@@ -219,62 +198,6 @@ def _evidence_links(proposal: TuningProposal) -> list[str]:
             seen.add(link)
             out.append(link)
     return out
-
-
-def _threshold_proposal(*, settings: Settings, symbol: str, signal_type: str, items: list[SignalEvaluation], avg_r: float, stop_rate: float) -> TuningProposal:
-    now_ms = _now_ms()
-    current_min = settings.autonomy_min_signal_score
-    proposed = min(95.0, current_min + 7)
-    evidence = [_evaluation_evidence(item) for item in items[-10:]]
-    return TuningProposal(
-        id=f"tp_{uuid4().hex}",
-        proposal_type="threshold_change",
-        status="proposed",
-        title=f"Raise {symbol} {signal_type} minimum score to {proposed:.0f} for 7 days",
-        summary=f"{symbol} {signal_type} completed weakly: avg {avg_r:.2f}R, stop rate {stop_rate:.0%}. Recommendation only; do not auto-apply.",
-        affected_scope={"symbol": symbol, "signal_type": signal_type},
-        current_behavior={"autonomy_min_signal_score": current_min},
-        proposed_diff={f"asset_overrides.{symbol}.{signal_type}.min_signal_score": proposed},
-        evidence=evidence,
-        source_signal_ids=[item.signal_id for item in items],
-        expected_impact="Reduce low-quality alerts for this scoped setup while evidence is weak.",
-        risk_assessment="May miss valid rebound signals if the sample is regime-specific or too small.",
-        blast_radius="low",
-        rollback_plan=f"Remove asset override or reset {symbol} {signal_type} min signal score to {current_min}.",
-        confidence=min(0.85, 0.55 + len(items) * 0.04 + max(0.0, -avg_r) * 0.1),
-        sample_size=len(items),
-        created_at_ms=now_ms,
-        expires_at_ms=now_ms + settings.autonomy_tuning_proposal_ttl_days * 86_400_000,
-        evaluation_window="7d",
-        metadata={"observe_and_recommend_only": True, "auto_apply_enabled": False, "exchange_actions": []},
-    )
-
-
-def _review_rejection_proposal(*, settings: Settings, symbol: str, signal_type: str, items: list[SignalEvaluation], missed: float) -> TuningProposal:
-    now_ms = _now_ms()
-    evidence = [_evaluation_evidence(item) for item in items[-10:]]
-    return TuningProposal(
-        id=f"tp_{uuid4().hex}",
-        proposal_type="data_quality_gate",
-        status="proposed",
-        title=f"Review rejection criteria for {symbol} {signal_type}",
-        summary=f"Rejected/expired {symbol} {signal_type} signals averaged {missed:.2f}R opportunity cost before stop.",
-        affected_scope={"symbol": symbol, "signal_type": signal_type, "decision": "rejection_filter"},
-        current_behavior={"human_reject_or_expiry": "evaluated but not traded"},
-        proposed_diff={"review_required": "Audit rejection reasons before tightening this scoped filter"},
-        evidence=evidence,
-        source_signal_ids=[item.signal_id for item in items],
-        expected_impact="Improve operator calibration by separating good rejections from missed asymmetric setups.",
-        risk_assessment="Could overfit to missed opportunities; do not loosen filters without larger sample and human review.",
-        blast_radius="low",
-        rollback_plan="Keep current rejection process unchanged.",
-        confidence=min(0.80, 0.50 + len(items) * 0.04 + missed * 0.05),
-        sample_size=len(items),
-        created_at_ms=now_ms,
-        expires_at_ms=now_ms + settings.autonomy_tuning_proposal_ttl_days * 86_400_000,
-        evaluation_window="7d",
-        metadata={"observe_and_recommend_only": True, "auto_apply_enabled": False, "exchange_actions": []},
-    )
 
 
 def _lesson_review_proposal(settings: Settings, candidate: dict[str, Any]) -> TuningProposal:
@@ -290,7 +213,6 @@ def _lesson_review_proposal(settings: Settings, candidate: dict[str, Any]) -> Tu
         proposed_diff={"manual_review": candidate.get("expected_future_behavior_change") or candidate.get("claim")},
         evidence=list(candidate.get("evidence") or []),
         source_lesson_ids=[str(candidate.get("id"))],
-        source_signal_ids=list(candidate.get("source_signal_ids") or []),
         expected_impact="Convert validated lesson into a manually reviewed prompt/rule/config update if approved.",
         risk_assessment="Strategy/risk/execution/capital-affecting; must not be applied automatically.",
         blast_radius="medium" if candidate.get("risk_affecting") else "low",
@@ -318,7 +240,6 @@ def _event_confirmation_gate_proposal(settings: Settings, scope: tuple[str, str,
         current_behavior={"news_event_weighting": "eligible high-signal catalysts can contribute to signal evidence"},
         proposed_diff={"confirmation_required": True, "candidate_change": "reduce standalone catalyst confidence until price/orderflow confirms"},
         evidence=evidence,
-        source_signal_ids=[signal_id for item in items for signal_id in item.linked_signal_ids],
         expected_impact="Reduce false-positive catalyst influence while preserving event tracking.",
         risk_assessment="May underweight genuinely important catalysts if the sample is regime-specific; requires manual review and canary.",
         blast_radius="low",
@@ -346,7 +267,6 @@ def _event_weight_review_proposal(settings: Settings, scope: tuple[str, str, str
         current_behavior={"news_event_weighting": "default deterministic evidence weight"},
         proposed_diff={"review_weight_change": "Consider modest scoped catalyst evidence increase after manual review and canary"},
         evidence=evidence,
-        source_signal_ids=[signal_id for item in items for signal_id in item.linked_signal_ids],
         expected_impact="Improve capture of repeatedly validated catalyst classes without changing execution behavior automatically.",
         risk_assessment="Could overfit source/type samples; any change needs tests, approval, canary, monitoring, and rollback.",
         blast_radius="low",
@@ -373,26 +293,7 @@ def _event_evaluation_evidence(item: AlphaEventEvaluation) -> dict[str, Any]:
         "max_favorable_bps": item.max_favorable_bps,
         "max_adverse_bps": item.max_adverse_bps,
         "max_abs_move_bps": item.max_abs_move_bps,
-        "linked_signal_ids": item.linked_signal_ids,
     }
-
-
-def _evaluation_evidence(item: SignalEvaluation) -> dict[str, Any]:
-    return {
-        "signal_id": item.signal_id,
-        "symbol": item.symbol,
-        "signal_type": item.signal_type,
-        "terminal_outcome": item.terminal_outcome,
-        "realized_or_marked_r": item.realized_or_marked_r,
-        "max_favorable_r": item.max_favorable_r,
-        "max_adverse_r": item.max_adverse_r,
-        "opportunity_cost_r": item.opportunity_cost_r,
-    }
-
-
-def _avg(values: list[float | None]) -> float | None:
-    clean = [float(item) for item in values if item is not None]
-    return sum(clean) / len(clean) if clean else None
 
 
 def _now_ms() -> int:

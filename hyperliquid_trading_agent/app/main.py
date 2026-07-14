@@ -22,8 +22,6 @@ from hyperliquid_trading_agent.app.agent.model_gateway import ModelGateway
 from hyperliquid_trading_agent.app.agent.runner import TradingAgentRunner
 from hyperliquid_trading_agent.app.agent.tools import AgentTools
 from hyperliquid_trading_agent.app.autonomy.discord import DiscordAutonomyAlertSink
-from hyperliquid_trading_agent.app.autonomy.equity_features import EquitySignalGenerator
-from hyperliquid_trading_agent.app.autonomy.evaluation import SignalEvaluationService
 from hyperliquid_trading_agent.app.autonomy.event_evaluation import AlphaEventEvaluationService
 from hyperliquid_trading_agent.app.autonomy.memory import MemoryService
 from hyperliquid_trading_agent.app.autonomy.reports import AutonomyReportService
@@ -39,7 +37,6 @@ from hyperliquid_trading_agent.app.discord_bot import DiscordTradingBot
 from hyperliquid_trading_agent.app.discord_publish import SendOnlyDiscordClient, SendOnlyDiscordSink
 from hyperliquid_trading_agent.app.engine.monitor import EngineValidationMonitorService
 from hyperliquid_trading_agent.app.engine.newswire_bridge import EngineNewsConsumer
-from hyperliquid_trading_agent.app.engine.operator_proposals import project_operator_proposal_to_trade_signal
 from hyperliquid_trading_agent.app.engine.pnl_loop import EnginePnLAttributionLoopService
 from hyperliquid_trading_agent.app.engine.routes import register_engine_routes
 from hyperliquid_trading_agent.app.engine.runtime import resolve_engine_runtime
@@ -114,7 +111,7 @@ class AutonomyActionRequest(BaseModel):
 
 
 class AutonomyFeedbackRequest(BaseModel):
-    target_type: str = "signal"
+    target_type: str = "bot"
     target_id: str
     rating: str
     note: str = ""
@@ -160,7 +157,6 @@ async def lifespan(app: FastAPI):
     options_flow_detector: OptionsFlowDetector | None = None
     flow_enricher: FlowEnricher | None = None
     equity_paper: EquityPaperSimulator | None = None
-    equity_signal_generator: EquitySignalGenerator | None = None
     if settings.tradfi_enabled and (not restricted_runtime or settings.environment.lower() in {"dev", "local", "test"}):
         try:
             tradfi_client = await build_tradfi_client(settings)
@@ -187,12 +183,6 @@ async def lifespan(app: FastAPI):
             tradfi_client=tradfi_client,
             repository=repository,
         )
-        equity_signal_generator = EquitySignalGenerator(
-            min_signal_score=settings.autonomy_equity_min_signal_score,
-            max_signals_per_day=settings.autonomy_equity_max_signals_per_day,
-            signal_ttl_minutes=settings.autonomy_equity_signal_ttl_minutes,
-            flow_detector=options_flow_detector,
-        )
 
     tools = AgentTools(
         hyperliquid=hyperliquid,
@@ -202,13 +192,11 @@ async def lifespan(app: FastAPI):
         options_flow=options_flow_detector,
     )
     memory_service = MemoryService(settings=settings, repository=repository)
-    evaluation_service = SignalEvaluationService(settings=settings, repository=repository, memory_service=memory_service, world_model_service=world_model_service)
     event_evaluation_service = AlphaEventEvaluationService(settings=settings, repository=repository, memory_service=memory_service, world_model_service=world_model_service)
     tuning_service = TuningProposalService(settings=settings, repository=repository, memory_service=memory_service)
     report_service = AutonomyReportService(
         settings=settings,
         repository=repository,
-        evaluation_service=evaluation_service,
         event_evaluation_service=event_evaluation_service,
         memory_service=memory_service,
         tuning_service=tuning_service,
@@ -225,19 +213,10 @@ async def lifespan(app: FastAPI):
         hyperliquid=hyperliquid,
         news=news,
         ws_worker=ws_worker,
-        model_gateway=model_gateway,
-        evaluation_service=evaluation_service,
         event_evaluation_service=event_evaluation_service,
         memory_service=memory_service,
         report_service=report_service,
         tuning_service=tuning_service,
-        tradfi=tradfi_client,
-        equity_portfolio=equity_paper,
-        equity_signal_generator=equity_signal_generator,
-        options_flow=options_flow_detector,
-        flow_enricher=flow_enricher,
-        decision_context_recorder=decision_context_recorder,
-        risk_gateway=risk_gateway,
         world_model_service=world_model_service,
     )
     engine_service = InstitutionalEngineService(
@@ -249,7 +228,6 @@ async def lifespan(app: FastAPI):
         world_model_service=world_model_service,
         liquidation_bridge=liquidation_signal_bridge,
     )
-    autonomy_service.engine_service = engine_service
     report_service.portfolio_service = autonomy_service.portfolio
     report_service.equity_portfolio_service = equity_paper
     high_stakes_graph = HighStakesDebateGraph(
@@ -333,7 +311,6 @@ async def lifespan(app: FastAPI):
     app.state.engine_service = engine_service
     app.state.engine_validation_monitor = engine_validation_monitor
     app.state.engine_pnl_attribution = engine_pnl_attribution
-    app.state.evaluation_service = evaluation_service
     app.state.event_evaluation_service = event_evaluation_service
     app.state.memory_service = memory_service
     app.state.report_service = report_service
@@ -351,7 +328,6 @@ async def lifespan(app: FastAPI):
     app.state.options_flow_detector = options_flow_detector
     app.state.flow_enricher = flow_enricher
     app.state.equity_paper = equity_paper
-    app.state.equity_signal_generator = equity_signal_generator
     app.state.wave_supervisor = wave_supervisor
 
     bot_task: asyncio.Task | None = None
@@ -1017,129 +993,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="symbol not found")
         return state.model_dump(mode="json")
 
-    @app.get("/autonomy/signals")
-    async def autonomy_signals(status: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_agent_api(settings, authorization)
-        await app.state.repository.expire_engine_operator_proposals(now_ms=int(time.time() * 1000))
-        proposals = await app.state.repository.list_engine_operator_proposals(limit=500)
-        projected = [project_operator_proposal_to_trade_signal(item) for item in proposals]
-        legacy_rows = await app.state.repository.list_autonomy_trade_signals(status=status, limit=100)
-        legacy = [
-            {
-                **item,
-                "metadata": {
-                    **(item.get("metadata") or {}),
-                    "source": "legacy_signal_engine",
-                },
-            }
-            for item in legacy_rows
-        ]
-        items = [*projected, *legacy]
-        if status:
-            items = [item for item in items if str(item.get("status") or "") == status]
-        items.sort(key=lambda item: int(item.get("created_at_ms") or 0), reverse=True)
-        return {
-            "items": items,
-            "count": len(items),
-            "canonical_source": "institutional_engine_operator_proposals",
-            "legacy_history_read_only": not settings.autonomy_signals_run_with_engine_enabled,
-            "legacy_mutations_enabled": settings.autonomy_signals_run_with_engine_enabled,
-        }
-
-    @app.get("/autonomy/signals/{signal_id}")
-    async def autonomy_signal(signal_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_agent_api(settings, authorization)
-        if signal_id.startswith("sig_eng_"):
-            proposal = await app.state.repository.get_engine_operator_proposal(signal_id)
-            if proposal is None:
-                raise HTTPException(status_code=404, detail="signal not found")
-            return project_operator_proposal_to_trade_signal(proposal)
-        signal = await app.state.autonomy_service._get_signal(signal_id)
-        if signal is None:
-            raise HTTPException(status_code=404, detail="signal not found")
-        return signal.model_dump(mode="json")
-
-    @app.post("/autonomy/signals/{signal_id}/approve")
-    async def approve_autonomy_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_agent_api(settings, authorization)
-        if not signal_id.startswith("sig_eng_"):
-            if not settings.autonomy_signals_run_with_engine_enabled:
-                raise HTTPException(status_code=410, detail="legacy signal mutations are disabled; historical signals are read-only")
-            if await app.state.repository.get_autonomy_trade_signal(signal_id) is None:
-                raise HTTPException(status_code=404, detail="signal not found")
-            command = await app.state.repository.enqueue_worker_command(
-                target_role="trader",
-                command_type="autonomy_signal_approve",
-                payload={"signal_id": signal_id, **(request.model_dump(mode="json") if request else {})},
-                requested_by="api",
-            )
-            return {**_accepted_command(command), "source": "legacy_signal_engine", "paper_only": True}
-        if await app.state.repository.get_engine_operator_proposal(signal_id) is None:
-            raise HTTPException(status_code=404, detail="signal not found")
-        command = await app.state.repository.enqueue_worker_command(
-            target_role="trader",
-            command_type="engine_operator_proposal_ack",
-            payload={"proposal_id": signal_id, **(request.model_dump(mode="json") if request else {})},
-            requested_by="api",
-        )
-        return {**_accepted_command(command), "acknowledgment_only": True, "paper_order_created": False}
-
-    @app.post("/autonomy/signals/{signal_id}/reject")
-    async def reject_autonomy_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_agent_api(settings, authorization)
-        if not signal_id.startswith("sig_eng_"):
-            if not settings.autonomy_signals_run_with_engine_enabled:
-                raise HTTPException(status_code=410, detail="legacy signal mutations are disabled; historical signals are read-only")
-            if await app.state.repository.get_autonomy_trade_signal(signal_id) is None:
-                raise HTTPException(status_code=404, detail="signal not found")
-            command = await app.state.repository.enqueue_worker_command(
-                target_role="trader",
-                command_type="autonomy_signal_reject",
-                payload={"signal_id": signal_id, **(request.model_dump(mode="json") if request else {})},
-                requested_by="api",
-            )
-            return {**_accepted_command(command), "source": "legacy_signal_engine", "paper_order_created": False}
-        if await app.state.repository.get_engine_operator_proposal(signal_id) is None:
-            raise HTTPException(status_code=404, detail="signal not found")
-        command = await app.state.repository.enqueue_worker_command(
-            target_role="trader",
-            command_type="engine_operator_proposal_reject",
-            payload={"proposal_id": signal_id, **(request.model_dump(mode="json") if request else {})},
-            requested_by="api",
-        )
-        return {**_accepted_command(command), "paper_order_created": False}
-
-    @app.post("/autonomy/signals/{signal_id}/expire")
-    async def expire_autonomy_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_agent_api(settings, authorization)
-        if not signal_id.startswith("sig_eng_"):
-            if not settings.autonomy_signals_run_with_engine_enabled:
-                raise HTTPException(status_code=410, detail="legacy signal mutations are disabled; historical signals are read-only")
-            if await app.state.repository.get_autonomy_trade_signal(signal_id) is None:
-                raise HTTPException(status_code=404, detail="signal not found")
-            command = await app.state.repository.enqueue_worker_command(
-                target_role="trader",
-                command_type="autonomy_signal_expire",
-                payload={"signal_id": signal_id, **(request.model_dump(mode="json") if request else {})},
-                requested_by="api",
-            )
-            return {**_accepted_command(command), "source": "legacy_signal_engine", "paper_order_created": False}
-        if await app.state.repository.get_engine_operator_proposal(signal_id) is None:
-            raise HTTPException(status_code=404, detail="signal not found")
-        command = await app.state.repository.enqueue_worker_command(
-            target_role="trader",
-            command_type="engine_operator_proposal_expire",
-            payload={"proposal_id": signal_id, **(request.model_dump(mode="json") if request else {})},
-            requested_by="api",
-        )
-        return {**_accepted_command(command), "paper_order_created": False}
-
-    @app.post("/admin/debug/seed-flip-demo")
-    async def seed_flip_demo(request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_agent_api(settings, authorization)
-        command = await app.state.repository.enqueue_worker_command(target_role="trader", command_type="admin_debug_seed_flip_demo", payload=(request.model_dump(mode="json") if request else {}), requested_by="api")
-        return _accepted_command(command)
-
     @app.get("/autonomy/portfolio")
     async def autonomy_portfolio(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
@@ -1277,28 +1130,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "count": len(events),
         }
 
-    @app.get("/autonomy/equity/signals")
-    async def autonomy_equity_signals(status: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_agent_api(settings, authorization)
-        items = [item.model_dump(mode="json") for item in app.state.autonomy_service.list_equity_signals(status=status)]
-        return {"items": items, "count": len(items)}
-
-    @app.post("/autonomy/equity/signals/{signal_id}/approve")
-    async def approve_autonomy_equity_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_agent_api(settings, authorization)
-        command = await app.state.repository.enqueue_worker_command(target_role="trader", command_type="autonomy_equity_signal_approve", payload={"signal_id": signal_id, **(request.model_dump(mode="json") if request else {})}, requested_by="api")
-        return _accepted_command(command)
-
-    @app.post("/autonomy/equity/signals/{signal_id}/reject")
-    async def reject_autonomy_equity_signal(signal_id: str, request: AutonomyActionRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_agent_api(settings, authorization)
-        command = await app.state.repository.enqueue_worker_command(target_role="trader", command_type="autonomy_equity_signal_reject", payload={"signal_id": signal_id, **(request.model_dump(mode="json") if request else {})}, requested_by="api")
-        return _accepted_command(command)
-
     @app.get("/autonomy/equity/portfolio")
     async def autonomy_equity_portfolio(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        equity_paper = getattr(app.state.autonomy_service, "equity_portfolio", None)
+        equity_paper = app.state.equity_paper
         if equity_paper is None:
             raise HTTPException(status_code=409, detail="equity paper portfolio is not configured")
         latest = equity_paper.snapshots[-1] if equity_paper.snapshots else equity_paper.snapshot()
@@ -1307,7 +1142,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/autonomy/equity/positions")
     async def autonomy_equity_positions(status: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        equity_paper = getattr(app.state.autonomy_service, "equity_portfolio", None)
+        equity_paper = app.state.equity_paper
         if equity_paper is None:
             raise HTTPException(status_code=409, detail="equity paper portfolio is not configured")
         positions = list(equity_paper.positions.values())
@@ -1318,7 +1153,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/autonomy/equity/orders")
     async def autonomy_equity_orders(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        equity_paper = getattr(app.state.autonomy_service, "equity_portfolio", None)
+        equity_paper = app.state.equity_paper
         if equity_paper is None:
             raise HTTPException(status_code=409, detail="equity paper portfolio is not configured")
         orders = list(equity_paper.orders.values())
@@ -1327,7 +1162,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/autonomy/equity/fills")
     async def autonomy_equity_fills(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_agent_api(settings, authorization)
-        equity_paper = getattr(app.state.autonomy_service, "equity_portfolio", None)
+        equity_paper = app.state.equity_paper
         if equity_paper is None:
             raise HTTPException(status_code=409, detail="equity paper portfolio is not configured")
         fills = list(equity_paper.fills.values())
@@ -1355,32 +1190,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "count": len(events),
             "view": "newswire_story_compatibility",
         }
-
-    @app.get("/autonomy/evaluations/signals")
-    async def autonomy_signal_evaluations(status: str | None = None, symbol: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_agent_api(settings, authorization)
-        items = await app.state.evaluation_service.list_evaluations(status=status, symbol=symbol, limit=200)
-        return {"items": [item.model_dump(mode="json") for item in items], "count": len(items)}
-
-    @app.get("/autonomy/evaluations/signals/{signal_id}")
-    async def autonomy_signal_evaluation(signal_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_agent_api(settings, authorization)
-        item = await app.state.evaluation_service.get_by_signal_id(signal_id)
-        if item is None:
-            raise HTTPException(status_code=404, detail="signal evaluation not found")
-        return item.model_dump(mode="json")
-
-    @app.post("/autonomy/evaluations/run")
-    async def autonomy_evaluations_run(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_agent_api(settings, authorization)
-        command = await app.state.repository.enqueue_worker_command(target_role="scheduler", command_type="autonomy_evaluations_run", payload={}, requested_by="api")
-        return _accepted_command(command)
-
-    @app.post("/autonomy/evaluations/backfill")
-    async def autonomy_evaluations_backfill(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_agent_api(settings, authorization)
-        command = await app.state.repository.enqueue_worker_command(target_role="scheduler", command_type="autonomy_evaluations_backfill", payload={}, requested_by="api")
-        return _accepted_command(command)
 
     @app.get("/autonomy/evaluations/events")
     async def autonomy_event_evaluations(status: str | None = None, symbol: str | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -1462,7 +1271,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         fallback = app.state.report_service.scorer.compute(
             window="daily",
             timestamp_ms=int(time.time() * 1000),
-            evaluations=[],
             portfolio_snapshot=None,
             event_evaluations=[],
             memory_counts={},
@@ -1745,15 +1553,12 @@ def _root_html(settings: Settings) -> str:
 
 
 def _autonomy_learning_degraded(autonomy_status: dict[str, Any], now_ms: int) -> bool:
-    evaluation = autonomy_status.get("evaluation") or {}
     event_evaluation = autonomy_status.get("event_evaluation") or {}
     reports = autonomy_status.get("reports") or {}
     memory = autonomy_status.get("memory") or {}
-    open_evaluations = int(evaluation.get("open_evaluations") or 0)
-    last_mark_at = evaluation.get("last_mark_at_ms")
+    open_evaluations = int(event_evaluation.get("open_evaluations") or 0)
+    last_mark_at = event_evaluation.get("last_mark_at_ms")
     if open_evaluations > 0 and last_mark_at and now_ms - int(last_mark_at) > 2 * 60 * 60 * 1000:
-        return True
-    if int(evaluation.get("error_count") or 0) >= 5:
         return True
     if int(event_evaluation.get("error_count") or 0) >= 5:
         return True
@@ -1798,7 +1603,6 @@ def _autonomy_config_status(app: FastAPI) -> dict[str, Any]:
         "enabled": settings.autonomy_enabled,
         "mode": settings.autonomy_mode,
         "alert_channel_id_configured": settings.autonomy_alert_channel_configured,
-        "require_human_signoff": settings.autonomy_require_human_signoff,
         "admin_user_count": len(settings.autonomy_admin_users),
         "admin_role_count": len(settings.autonomy_admin_roles),
         "universe": {
@@ -1817,11 +1621,7 @@ def _autonomy_config_status(app: FastAPI) -> dict[str, Any]:
             "news_refresh": settings.autonomy_news_refresh_seconds,
             "portfolio_snapshot": settings.autonomy_portfolio_snapshot_seconds,
         },
-        "signals": {
-            "max_per_day": settings.autonomy_max_signals_per_day,
-            "ttl_minutes": settings.autonomy_signal_ttl_minutes,
-            "min_score": settings.autonomy_min_signal_score,
-        },
+        "candidate_source": "institutional_engine",
         "paper": {
             "initial_equity_usd": settings.autonomy_paper_initial_equity_usd,
             "risk_pct_per_trade": settings.autonomy_paper_risk_pct_per_trade,
@@ -1830,18 +1630,6 @@ def _autonomy_config_status(app: FastAPI) -> dict[str, Any]:
             "taker_fee_bps": settings.autonomy_paper_taker_fee_bps,
             "maker_fee_bps": settings.autonomy_paper_maker_fee_bps,
             "default_slippage_bps": settings.autonomy_paper_default_slippage_bps,
-        },
-        "model_insights": {
-            "enabled": settings.autonomy_model_insights_enabled,
-            "min_score": settings.autonomy_model_insight_min_score,
-            "max_calls_per_hour": settings.autonomy_model_max_calls_per_hour,
-        },
-        "evaluation": {
-            "enabled": settings.autonomy_evaluation_enabled,
-            "effective_enabled": settings.autonomy_evaluation_effective_enabled,
-            "horizons": settings.autonomy_eval_horizon_list,
-            "max_open_signals": settings.autonomy_eval_max_open_signals,
-            "price_source": settings.autonomy_eval_price_source,
         },
         "event_evaluation": {
             "enabled": settings.autonomy_event_evaluation_enabled,
@@ -1876,7 +1664,6 @@ def _autonomy_config_status(app: FastAPI) -> dict[str, Any]:
             "promotion": {
                 "role_lesson_min_samples": settings.autonomy_role_lesson_min_samples,
                 "operator_lesson_min_samples": settings.autonomy_operator_lesson_min_samples,
-                "signal_lesson_min_samples": settings.autonomy_signal_lesson_min_samples,
                 "lesson_min_confidence": settings.autonomy_lesson_min_confidence,
                 "strategy_lesson_min_confidence": settings.autonomy_strategy_lesson_min_confidence,
                 "strategy_affecting_requires_human_review": True,
@@ -1908,7 +1695,7 @@ def _autonomy_config_status(app: FastAPI) -> dict[str, Any]:
             "live_execution_enabled": False,
             "exchange_actions_enabled": settings.hyperliquid_exchange_enabled,
             "paper_only": True,
-            "human_signoff_required": settings.autonomy_require_human_signoff,
+            "operator_proposals_are_acknowledgment_only": True,
             "strategy_mutation_enabled": False,
             "risk_limit_mutation_enabled": False,
             "tuning_auto_apply_enabled": False,
@@ -1942,8 +1729,6 @@ def _tradfi_config_status(app: FastAPI) -> dict[str, Any]:
             "enabled": settings.autonomy_equity_enabled,
             "effective_enabled": settings.autonomy_equity_effective_enabled,
             "universe": settings.autonomy_equity_symbols,
-            "max_signals_per_day": settings.autonomy_equity_max_signals_per_day,
-            "min_signal_score": settings.autonomy_equity_min_signal_score,
         },
         "equity_paper": equity_paper.status() if equity_paper is not None else {},
         "options_flow": {

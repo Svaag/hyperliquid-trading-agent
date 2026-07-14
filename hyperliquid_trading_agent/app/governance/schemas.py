@@ -85,7 +85,7 @@ class RiskGatewayDecision(BaseModel):
 
 class TradeIntent(BaseModel):
     intent_id: str
-    source_type: Literal["autonomy_signal", "high_stakes_proposal", "operator", "shadow"]
+    source_type: Literal["high_stakes_proposal", "operator", "shadow"]
     source_id: str
     strategy_id: str = "autonomy_v1"
     asset_class: Literal["crypto", "equity", "unknown"] = "crypto"
@@ -112,7 +112,6 @@ class PaperTradeOutcome(BaseModel):
     outcome_id: str
     paper_order_id: str | None = None
     paper_position_id: str | None = None
-    signal_id: str | None = None
     strategy_id: str
     symbol: str
     venue: str

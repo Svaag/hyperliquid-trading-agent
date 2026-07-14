@@ -22,11 +22,12 @@ design.
   - `GET /tracking/positions/{tracker_id}`
   - `GET /tracking/positions/{tracker_id}/events`
   - `POST /tracking/positions/{tracker_id}/pause|resume|stop`
-  - `GET /autonomy/status|universe|market-map|signals|portfolio|positions|orders|fills|news`
-  - `GET /autonomy/evaluations/signals`, `/autonomy/evaluations/events`, `/autonomy/token-capital`, `/autonomy/reports/daily|weekly`, `/autonomy/memory/*`, `/autonomy/tuning-proposals`
+  - `GET /autonomy/status|universe|market-map|portfolio|positions|orders|fills|news`
+  - `GET /autonomy/evaluations/events`, `/autonomy/token-capital`, `/autonomy/reports/daily|weekly`, `/autonomy/memory/*`, `/autonomy/tuning-proposals`
   - `POST /autonomy/pause|resume`
-  - `POST /autonomy/signals/{signal_id}/approve|reject|expire`
-  - `POST /autonomy/evaluations/run`, `/autonomy/reports/daily/run`, `/autonomy/reports/weekly/run`, `/autonomy/feedback`
+  - `POST /autonomy/evaluations/events/backfill`, `/autonomy/reports/daily/run`, `/autonomy/reports/weekly/run`, `/autonomy/feedback`
+  - `GET /engine/operator-proposals`, `GET /engine/operator-proposals/{proposal_id}`
+  - `POST /engine/operator-proposals/{proposal_id}/acknowledge|reject`
   - `GET /newswire/feed|stories/{story_id}|risk-state|events|events/{event_id}|status|sources`, `WS /newswire/stream`
   - `GET /metrics`
 - Discord mention bot with guild/channel/role allowlists and threaded answers.
@@ -42,7 +43,7 @@ design.
 - RSS news, optional Tavily/SerpAPI/NewsAPI/Perplexity search, optional X recent search.
 - Free-standing **Newswire V2.1**: adapters normalize raw news, resolve a dynamic watch set and audience scope, cluster it into durable story revisions, and emit explainable feed/engine actions. Canonical stories drive the REST/WS product feed, a retry-safe Discord outbox, World Model beliefs, and a shadow-by-default engine risk overlay. Optional model classification is a bounded one-attempt review of fresh boundary cases; deterministic rules remain authoritative and news never grants execution authority. Calibration, safe reclassification, timestamp-preserving replay, runtime health, and continuous soak evidence are first-class operator surfaces. See [docs/newswire-v2.md](docs/newswire-v2.md) and [docs/newswire-v2.1-operations.md](docs/newswire-v2.1-operations.md).
 - Semantic tool gathering for market snapshots, funding, candles, account public state, fills, docs, news, and paper trades.
-- PostgreSQL persistence for audit events, tool calls, conversations, cache, news, paper trades, debate runs, role outputs, state snapshots, trade proposals, autonomous market state, signals, paper orders/fills/positions, and portfolio snapshots.
+- PostgreSQL persistence for audit events, tool calls, conversations, cache, news, paper trades, debate runs, role outputs, state snapshots, engine candidates/proposals, autonomous market state, paper orders/fills/positions, and portfolio snapshots.
 - Paper/shadow-only institutional engine scaffolding: normalized event ledger, point-in-time feature store, regime vector, alpha candidates, EV estimates, allocation decisions, EvidencePacks, debate decisions, OrderIntents, execution reports, position theses, reconciliation/attribution/model registry tables, and read-only `/engine/*` inspection endpoints.
 - Canonical multi-provider market universe with 85 seeded provider instruments / 62 requested underlyings, Discord-admin watchlist edits, TradeXYZ HIP-3 snapshots, official Lighter SDK market data, Alpaca-hosted Paper execution, and pairwise cross-venue features.
 - Alembic migrations through `0030_canonical_market_universe`.
@@ -171,30 +172,22 @@ POSITION_TRACKING_ALERT_RETRY_COUNT=3
 
 When enabled, high-stakes position reviews with coin/side/entry/stop auto-arm low-overhead WebSocket level alerts. Discord users can say `tracking status`, `tracking events`, `pause tracking`, `resume tracking`, `stop tracking`, or `track until 24h/7d` inside the bot-created thread.
 
-Autonomous loop (disabled by default; paper + human signoff only):
+Market-observation loop (disabled by default; it does not generate trade proposals):
 
 ```env
 AUTONOMY_ENABLED=false
-AUTONOMY_MODE=paper_signoff
+AUTONOMY_MODE=observation
 AUTONOMY_ALERT_CHANNEL_ID=
-AUTONOMY_REQUIRE_HUMAN_SIGNOFF=true
 AUTONOMY_CORE_UNIVERSE=BTC,ETH,HYPE,SOL,ZEC,LIT,AAVE,XMR,AERO
 AUTONOMY_UNIVERSE_TOP_N_PERPS=20
 AUTONOMY_MAX_TRACKED_ASSETS=100
 AUTONOMY_MAX_HOT_L2_ASSETS=5
-AUTONOMY_MAX_SIGNALS_PER_DAY=10
-AUTONOMY_MIN_SIGNAL_SCORE=75
 AUTONOMY_PAPER_INITIAL_EQUITY_USD=100000
 AUTONOMY_PAPER_RISK_PCT_PER_TRADE=0.25
-AUTONOMY_MODEL_INSIGHTS_ENABLED=true
 
-# Persistent Alpha Memory / signal evaluation loop (observe-and-recommend only)
-AUTONOMY_EVALUATION_ENABLED=true
+# Persistent Alpha Memory / catalyst evaluation loop (observe-and-recommend only)
 AUTONOMY_MEMORY_ENABLED=true
 AUTONOMY_REPORTS_ENABLED=true
-AUTONOMY_EVAL_HORIZONS=15m,1h,4h,24h,expiry
-AUTONOMY_EVAL_MAX_OPEN_SIGNALS=500
-AUTONOMY_EVAL_PRICE_SOURCE=allMids
 AUTONOMY_EVENT_EVALUATION_ENABLED=true
 AUTONOMY_EVENT_EVAL_HORIZONS=15m,1h,4h,24h,72h
 AUTONOMY_EVENT_EVAL_MIN_IMPORTANCE=50
@@ -216,7 +209,6 @@ AUTONOMY_MEMORY_PROCESS_TTL_DAYS=90
 AUTONOMY_MEMORY_INCIDENT_TTL_DAYS=14
 AUTONOMY_ROLE_LESSON_MIN_SAMPLES=5
 AUTONOMY_OPERATOR_LESSON_MIN_SAMPLES=3
-AUTONOMY_SIGNAL_LESSON_MIN_SAMPLES=20
 AUTONOMY_LESSON_MIN_CONFIDENCE=0.70
 AUTONOMY_STRATEGY_LESSON_MIN_CONFIDENCE=0.75
 AUTONOMY_TUNING_PROPOSALS_ENABLED=true
@@ -229,9 +221,6 @@ NEWSWIRE_NEWS_CHANNEL_ID=<discord-news-channel-id>
 NEWSWIRE_NEWS_MIN_IMPORTANCE=60
 NEWSWIRE_BREAKING_MIN_IMPORTANCE=80
 NEWSWIRE_DIGEST_INTERVAL_SECONDS=300
-AUTONOMY_LEGACY_NEWS_POLL_ENABLED=false
-NEWS_SIGNAL_GENERATION_ENABLED=true
-NEWS_EVENT_RISK_BLOCKS_ENABLED=true
 NEWSWIRE_QUERIES=BTC,ETH,HYPE,Hyperliquid,Fed,CPI,FOMC,crypto liquidation
 
 # Institutional engine scaffold (shadow-first; paper requires readiness promotion; live execution remains rejected)
@@ -268,19 +257,18 @@ ENGINE_STRATEGY_MAX_ALLOCATIONS_PER_LOOP=3
 ENGINE_PNL_ATTRIBUTION_ENABLED=true
 ENGINE_PNL_ATTRIBUTION_INTERVAL_SECONDS=300
 
-# Optional TradFi data enrichment and equity paper loop
+# Optional TradFi data enrichment and manual equity paper portfolio
 TRADFI_ENABLED=true
 TRADFI_PROVIDER_ORDER=alpha_vantage,alpaca
 ALPHA_VANTAGE_ENABLED=true
 ALPHA_VANTAGE_API_KEY=<alpha-vantage-key>
 AUTONOMY_EQUITY_ENABLED=true
 AUTONOMY_EQUITY_UNIVERSE=SPY,QQQ,NVDA,AAPL,MSFT,TSLA,COIN,MSTR
-AUTONOMY_EQUITY_MAX_SIGNALS_PER_DAY=3
 ```
 
 When `DISCORD_CHART_COMMAND_ENABLED=true`, authorized Discord users can request a deterministic chart without mentioning the bot: `;;TSLA h`, `;;TSLA d`, `;;TSLA m`, or `;;TSLA y`. The bot fetches normalized candles from the configured TradFi stack, falls back to Hyperliquid for crypto/namespaced symbols, renders a PNG candlestick chart, and includes simple technical-analysis labels. The command is informational only and never creates a trade or paper position.
 
-When `AUTONOMY_ENABLED=true`, the service watches the configured universe, builds a deterministic market mental map, generates scored signals, posts qualifying alerts to `AUTONOMY_ALERT_CHANNEL_ID`, and waits for human signoff. Discord alert-channel commands: `approve signal <id>`, `reject signal <id>`, `signal <id>`, `signals`, `portfolio`, `positions`, `orders`, `market map`, `pause autonomy`, `resume autonomy`, `daily report`, `weekly report`, `token capital`, `signal outcome <id>`, `event outcome <event_id>`, `mark signal <id> good|bad|unclear|too_noisy|useful|wrong`, `memories [role]`, and `tuning proposals`. Approvals create paper orders/fills/positions only; no live trade is placed. If an approved signal opposes an existing open position (single-name exposure cap exhausted), the bot **autonomously closes the opposing paper position** and posts a flip-request alert: confirm with `approve flip <id>` (or `cancel flip <id>` to reject and keep the original position). The new side opens only on the second human approval. The persistent memory/evaluation knobs are shadow-safe: they evaluate and recommend, but never auto-apply strategy, risk, execution, or sizing changes. High-signal newswire catalysts are evaluated as first-class alpha events and linked to signals when they become evidence. See [docs/autonomy-memory.md](docs/autonomy-memory.md).
+When `AUTONOMY_ENABLED=true`, the service watches the configured universe and maintains the deterministic market map, event evaluations, reports, memory, and manual paper portfolio. It does not generate or publish trade ideas. Institutional candidates and bounded Discord proposal samples come only from the canonical engine; inspect them at `/engine/operator-proposals`. Proposal acknowledgment records operator review and never creates a paper or live order. See [docs/autonomy-memory.md](docs/autonomy-memory.md).
 
 The institutional engine now uses a persistent provider-specific watchlist rather than treating ticker text as identity. Discord admins can list, add or bulk-add, move, remove, inspect unresolved instruments, review history, and stage an official SPY large-cap holdings import with `watchlist ...` commands; destructive/bulk changes require confirmation. The pinned seed maps 85 provider instruments to 62 requested underlyings across Hyperliquid main, TradeXYZ HIP-3, and Alpaca Paper. Lighter is available as a read-only cross-venue source through the official SDK. See [docs/institutional-engine.md](docs/institutional-engine.md#canonical-watchlist-and-provider-identities).
 
@@ -318,7 +306,7 @@ Important docs-backed rules embedded in the agent:
 - No mainnet trading in the MVP.
 - High-stakes debate produces manual/paper proposals only; `exchange_actions` is intentionally empty.
 - Live tracking only emits alerts/events; it does not place orders and keeps `exchange_actions=[]` for future autonomous-trading hooks.
-- Autonomous V1 is paper-signoff only: every signal requires human approval, and approval creates simulated paper orders/fills/positions only.
+- The observation loop has no proposal-generation or execution authority. Engine operator proposals are acknowledgment-only.
 - Inferred stop/liquidation clusters are labeled inferred; only configured public-account liquidation prices are direct.
 - Local paper simulation only.
 - Direct trade coaching is allowed, but every answer should include risk,

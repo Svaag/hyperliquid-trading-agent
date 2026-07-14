@@ -26,20 +26,20 @@ class FakeReviewExportRepository:
             "tp_ready": {
                 "proposal_id": "tp_ready",
                 "status": "review_ready",
-                "strategy_id": "autonomy_v1",
+                "strategy_id": "news_event_alpha_v2",
                 "risk_direction": "tightens_risk",
                 "requires_human_approval": True,
                 "auto_apply_allowed": False,
                 "current_value": {"threshold": 80, "api_key": "must-not-export"},
                 "proposed_value": {"threshold": 85},
-                "evidence": ["sig_eval_1", "news_1", "missing_1"],
+                "evidence": ["event_eval_1", "news_1", "missing_1"],
                 "metadata": {"decision_id": "dcx_1"},
             },
             "tp_proposed": {
                 "proposal_id": "tp_proposed",
                 "status": "proposed",
                 "risk_direction": "neutral",
-                "evidence": ["sig_eval_1"],
+                "evidence": ["event_eval_1"],
             },
         }
 
@@ -102,17 +102,20 @@ class FakeReviewExportRepository:
     async def list_promotion_decisions(self, proposal_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         return []
 
-    async def get_signal_evaluation(self, evaluation_id: str) -> dict[str, Any] | None:
-        if evaluation_id != "sig_eval_1":
+    async def get_alpha_event_evaluation(self, evaluation_id: str) -> dict[str, Any] | None:
+        if evaluation_id != "event_eval_1":
             return None
         return {
             "id": evaluation_id,
-            "signal_id": "signal_1",
+            "event_id": "event_1",
+            "event_source": "coindesk",
+            "event_type": "headline",
             "symbol": "BTC",
-            "status": "completed",
-            "terminal_outcome": "win",
-            "realized_or_marked_r": 1.2,
-            "evidence_snapshot": {"private_key": "must-not-export"},
+            "direction": "long",
+            "status": "complete",
+            "terminal_outcome": "worked",
+            "realized_or_marked_bps": 120.0,
+            "metadata": {"private_key": "must-not-export"},
         }
 
     async def get_newswire_event(self, event_id: str) -> dict[str, Any] | None:
@@ -172,7 +175,7 @@ async def test_review_export_is_complete_redacted_and_non_mutating() -> None:
     assert bundle["rollback_plan"]["previous_version_id"] == "cfg_previous"
     assert bundle["runtime_references"]["active"]["model_route_version_id"] == "model_1"
     assert {item["evidence_type"] for item in bundle["evidence"]["items"]} == {
-        "signal_evaluation",
+        "alpha_event_evaluation",
         "newswire_event",
     }
     assert bundle["evidence"]["unresolved_ids"] == ["missing_1"]
@@ -258,7 +261,7 @@ async def test_repository_reads_rollback_plans_and_promotion_decisions() -> None
             "reviewer": "operator",
             "decision": "rejected",
             "rationale": "paper drill",
-            "evidence_reviewed": ["signal_1"],
+            "evidence_reviewed": ["event_1"],
             "tests_reviewed": ["replay_1"],
             "proposer_actor": "autonomy_tuning",
             "approver_actor": "operator",
@@ -275,5 +278,5 @@ async def test_repository_reads_rollback_plans_and_promotion_decisions() -> None
     assert rollback is not None
     assert rollback["rollback_steps"] == ["Restore cfg_previous manually."]
     assert decisions[0]["decision"] == "rejected"
-    assert decisions[0]["evidence_reviewed"] == ["signal_1"]
+    assert decisions[0]["evidence_reviewed"] == ["event_1"]
     await engine.dispose()

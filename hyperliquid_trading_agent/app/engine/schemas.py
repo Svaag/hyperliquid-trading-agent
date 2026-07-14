@@ -217,9 +217,9 @@ class StrategySpec(BaseModel):
     """Declarative contract for an institutional alpha strategy.
 
     The registry uses this metadata for breadth accounting, allocation caps,
-    readiness evidence, and deterministic replay.  Defaults are intentionally
-    conservative so legacy candidates can be adapted without silently counting
-    as independent alpha breadth.
+    readiness evidence, and deterministic replay. Defaults are intentionally
+    conservative so incomplete candidates cannot silently count as independent
+    alpha breadth.
     """
 
     strategy_id: str
@@ -333,7 +333,7 @@ class AlphaCandidate(BaseModel):
     underlying_id: str = ""
     venue_id: str = ""
     provider_symbol: str = ""
-    evidence_epoch_id: str = "legacy"
+    evidence_epoch_id: str = "unversioned"
     side: EngineSide
     horizon: str
     proposed_entry: float = Field(gt=0)

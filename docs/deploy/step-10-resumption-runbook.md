@@ -115,22 +115,17 @@ POSITION_TRACKING_MAX_ACTIVE=250
 POSITION_TRACKING_ALERT_RETRY_COUNT=3
 
 AUTONOMY_ENABLED=false
-AUTONOMY_MODE=paper_signoff
+AUTONOMY_MODE=observation
 AUTONOMY_ALERT_CHANNEL_ID=
-AUTONOMY_REQUIRE_HUMAN_SIGNOFF=true
 AUTONOMY_CORE_UNIVERSE=BTC,ETH,HYPE
 AUTONOMY_UNIVERSE_TOP_N_PERPS=20
 AUTONOMY_MAX_TRACKED_ASSETS=40
 AUTONOMY_MAX_HOT_L2_ASSETS=5
-AUTONOMY_MAX_SIGNALS_PER_DAY=10
-AUTONOMY_MIN_SIGNAL_SCORE=75
 AUTONOMY_PAPER_INITIAL_EQUITY_USD=100000
 AUTONOMY_PAPER_RISK_PCT_PER_TRADE=0.25
-AUTONOMY_MODEL_INSIGHTS_ENABLED=true
-AUTONOMY_EVALUATION_ENABLED=true
 AUTONOMY_MEMORY_ENABLED=true
 AUTONOMY_REPORTS_ENABLED=true
-AUTONOMY_EVAL_HORIZONS=15m,1h,4h,24h,expiry
+AUTONOMY_EVENT_EVALUATION_ENABLED=true
 AUTONOMY_DAILY_REPORT_UTC=00:05
 AUTONOMY_WEEKLY_REPORT_DAY=MON
 AUTONOMY_WEEKLY_REPORT_UTC=00:30
@@ -311,18 +306,16 @@ Data persists in the `postgres_data` Docker volume. To destroy all state:
 docker compose down -v
 ```
 
-## Autonomous loop rollout
+## Market-observation loop rollout
 
-Autonomy is disabled by default. To run paper/signoff mode locally or on a VM, enable the flags for the `trader` worker; the public `api` process remains passive:
+The observation loop is disabled by default. To run the market map and catalyst-evaluation services locally or on a VM, enable the flags for the `trader` worker; the public `api` process remains passive:
 
 ```env
 AUTONOMY_ENABLED=true
-AUTONOMY_MODE=paper_signoff
+AUTONOMY_MODE=observation
 AUTONOMY_ALERT_CHANNEL_ID=<discord-ai-bot-alerts-channel-id>
-AUTONOMY_REQUIRE_HUMAN_SIGNOFF=true
 AUTONOMY_CORE_UNIVERSE=BTC,ETH,HYPE
 AUTONOMY_UNIVERSE_TOP_N_PERPS=5
-AUTONOMY_MAX_SIGNALS_PER_DAY=3
 ```
 
 Validate:
@@ -331,17 +324,14 @@ Validate:
 curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8081/autonomy/status
 curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8081/autonomy/market-map
 curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8081/autonomy/portfolio
-curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8081/autonomy/evaluations/signals
+curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8081/autonomy/evaluations/events
 curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8081/autonomy/token-capital
 curl -H "Authorization: Bearer $AGENT_API_BEARER_TOKEN" http://127.0.0.1:8081/autonomy/tuning-proposals
 ```
 
-Discord `#ai-bot-alerts` commands:
+Discord observation commands:
 
 ```text
-approve signal <id>
-reject signal <id>
-signals
 portfolio
 positions
 orders
@@ -351,13 +341,11 @@ resume autonomy
 daily report
 weekly report
 token capital
-signal outcome <signal_id>
-mark signal <signal_id> good|bad|unclear
 memories risk
 tuning proposals
 ```
 
-All approvals are paper-only. `HYPERLIQUID_EXCHANGE_ENABLED=true` remains rejected by config validation.
+Engine proposals are acknowledgment-only. `HYPERLIQUID_EXCHANGE_ENABLED=true` remains rejected by config validation.
 
 ## Completion checklist
 
@@ -375,8 +363,8 @@ All approvals are paper-only. `HYPERLIQUID_EXCHANGE_ENABLED=true` remains reject
 - [ ] Off-topic refusal works.
 - [ ] Metrics access is protected or internal-only.
 - [ ] If autonomy is enabled, `AUTONOMY_ALERT_CHANNEL_ID` points to `#ai-bot-alerts`.
-- [ ] `/autonomy/status` shows `mode=paper_signoff` and no live execution path.
-- [ ] `/health/config` shows evaluation, memory, reports, and tuning proposals enabled with `auto_apply_enabled=false`.
+- [ ] `/autonomy/status` shows `mode=observation` and no live execution path.
+- [ ] `/health/config` shows catalyst-event evaluation, memory, reports, and tuning proposals enabled with `auto_apply_enabled=false`.
 - [ ] `/autonomy/token-capital` returns a component breakdown.
 - [ ] `/autonomy/tuning-proposals` shows recommendations only; no endpoint or Discord command applies them.
-- [ ] A Discord signal approval creates a paper order/fill/position only.
+- [ ] A manually confirmed paper-trade draft creates a paper order/fill/position only.

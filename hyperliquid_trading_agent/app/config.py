@@ -91,7 +91,6 @@ DEFAULT_NEWSWIRE_RSS_FEEDS = (
     ",https://www.coindesk.com/arc/outboundfeeds/rss/"
     ",https://cointelegraph.com/rss"
 )
-DEFAULT_AUTONOMY_EVAL_HORIZONS = "15m,1h,4h,24h,expiry"
 DEFAULT_AUTONOMY_EVENT_EVAL_HORIZONS = "15m,1h,4h,24h,72h"
 DEFAULT_AUTONOMY_MEMORY_PROMPT_ROLES = "analyst,quant,research,adversary,judge"
 AUTONOMY_ALLOWED_EVAL_HORIZONS = {"5m", "15m", "1h", "4h", "24h", "72h", "expiry"}
@@ -308,9 +307,8 @@ class Settings(BaseSettings):
     prediction_market_search_max_staleness_seconds: int = 604_800
 
     autonomy_enabled: bool = False
-    autonomy_mode: Literal["paper_signoff"] = "paper_signoff"
+    autonomy_mode: Literal["observation"] = "observation"
     autonomy_alert_channel_id: str = ""
-    autonomy_require_human_signoff: bool = True
     autonomy_admin_user_ids: str = ""
     autonomy_admin_role_ids: str = ""
     autonomy_core_universe: str = "BTC,ETH,HYPE,SOL,ZEC,LIT,AAVE,XMR,AERO"
@@ -319,16 +317,12 @@ class Settings(BaseSettings):
     autonomy_hip3_index_aliases: str = "SP500:SPX|SP500|SPY,NASDAQ100:NDX|NASDAQ|QQQ,NIKKEI225:NIKKEI|NKY,KOSPI:KOSPI"
     autonomy_loop_interval_seconds: int = 5
     autonomy_deep_scan_interval_seconds: int = 60
-    autonomy_signals_run_with_engine_enabled: bool = False
     autonomy_l2_refresh_seconds: int = 15
     autonomy_candle_refresh_seconds: int = 60
     autonomy_news_refresh_seconds: int = 60
     autonomy_portfolio_snapshot_seconds: int = 60
     autonomy_max_tracked_assets: int = 100
     autonomy_max_hot_l2_assets: int = 5
-    autonomy_max_signals_per_day: int = 10
-    autonomy_signal_ttl_minutes: int = 30
-    autonomy_min_signal_score: float = 75.0
     autonomy_paper_initial_equity_usd: float = 100_000.0
     autonomy_paper_risk_pct_per_trade: float = 0.25
     autonomy_paper_max_gross_leverage: float = 3.0
@@ -336,9 +330,6 @@ class Settings(BaseSettings):
     autonomy_paper_taker_fee_bps: float = 4.5
     autonomy_paper_maker_fee_bps: float = 1.5
     autonomy_paper_default_slippage_bps: float = 2.0
-    autonomy_model_insights_enabled: bool = True
-    autonomy_model_insight_min_score: float = 80.0
-    autonomy_model_max_calls_per_hour: int = 12
 
     engine_enabled: bool = False
     engine_mode: Literal["paper_shadow"] = "paper_shadow"
@@ -511,13 +502,9 @@ class Settings(BaseSettings):
     agent_core_trace_collector_url: str = ""
     agent_core_trace_collector_token: str = ""
 
-    autonomy_evaluation_enabled: bool = True
     autonomy_event_evaluation_enabled: bool = True
     autonomy_memory_enabled: bool = True
     autonomy_reports_enabled: bool = True
-    autonomy_eval_horizons: str = DEFAULT_AUTONOMY_EVAL_HORIZONS
-    autonomy_eval_max_open_signals: int = 500
-    autonomy_eval_price_source: Literal["allMids"] = "allMids"
     autonomy_event_eval_horizons: str = DEFAULT_AUTONOMY_EVENT_EVAL_HORIZONS
     autonomy_event_eval_min_importance: float = 50.0
     autonomy_event_eval_min_source_score: float = 0.4
@@ -541,7 +528,6 @@ class Settings(BaseSettings):
     autonomy_memory_incident_ttl_days: int = 14
     autonomy_role_lesson_min_samples: int = 5
     autonomy_operator_lesson_min_samples: int = 3
-    autonomy_signal_lesson_min_samples: int = 20
     autonomy_lesson_min_confidence: float = 0.70
     autonomy_strategy_lesson_min_confidence: float = 0.75
     autonomy_tuning_proposals_enabled: bool = True
@@ -551,9 +537,6 @@ class Settings(BaseSettings):
 
     newswire_enabled: bool = False
     newswire_gateway_enabled: bool = True
-    autonomy_legacy_news_poll_enabled: bool = False
-    news_signal_generation_enabled: bool = True
-    news_event_risk_blocks_enabled: bool = True
     newswire_queries: str = "BTC,ETH,HYPE,Hyperliquid,Fed,CPI,FOMC,crypto liquidation"
     newswire_watchlist: str = ""
     newswire_watch_refresh_seconds: int = 30
@@ -675,11 +658,6 @@ class Settings(BaseSettings):
     autonomy_equity_enabled: bool = False
     autonomy_equity_universe: str = ""  # e.g. AAPL,NVDA,MSFT,SPY,QQQ
     autonomy_equity_max_tracked_assets: int = 20
-    autonomy_equity_max_signals_per_day: int = 5
-    autonomy_equity_min_signal_score: float = 75.0
-    autonomy_equity_signal_ttl_minutes: int = 60
-    autonomy_equity_loop_interval_seconds: int = 30
-    autonomy_equity_deep_scan_interval_seconds: int = 300
 
     # Equity paper portfolio (separate from crypto paper)
     autonomy_equity_paper_initial_equity_usd: float = 100_000.0
@@ -1018,10 +996,6 @@ class Settings(BaseSettings):
         return _csv_ints(self.autonomy_admin_role_ids)
 
     @property
-    def autonomy_eval_horizon_list(self) -> list[str]:
-        return [item.lower() for item in _csv(self.autonomy_eval_horizons)]
-
-    @property
     def autonomy_event_eval_horizon_list(self) -> list[str]:
         return [item.lower() for item in _csv(self.autonomy_event_eval_horizons)]
 
@@ -1050,10 +1024,6 @@ class Settings(BaseSettings):
     @property
     def engine_cross_venue_dex_list(self) -> list[str]:
         return [dex.lower() for dex in _csv(self.engine_cross_venue_dexes)]
-
-    @property
-    def autonomy_evaluation_effective_enabled(self) -> bool:
-        return self.autonomy_enabled and self.autonomy_evaluation_enabled
 
     @property
     def autonomy_event_evaluation_effective_enabled(self) -> bool:
@@ -1199,22 +1169,10 @@ class Settings(BaseSettings):
 
     def autonomy_config_warnings(self) -> list[str]:
         warnings: list[str] = []
-        if self.autonomy_enabled and not self.autonomy_alert_channel_configured:
-            warnings.append("AUTONOMY_ALERT_CHANNEL_ID is required to post signals to #ai-bot-alerts")
-        if self.autonomy_enabled and not self.autonomy_require_human_signoff:
-            warnings.append("AUTONOMY_REQUIRE_HUMAN_SIGNOFF=false is unsafe for V1 paper-signoff mode")
         if self.autonomy_max_hot_l2_assets > self.autonomy_max_tracked_assets:
             warnings.append("AUTONOMY_MAX_HOT_L2_ASSETS exceeds AUTONOMY_MAX_TRACKED_ASSETS")
         if not self.autonomy_core_symbols:
             warnings.append("AUTONOMY_CORE_UNIVERSE is empty")
-        if self.autonomy_evaluation_enabled:
-            invalid_horizons = [item for item in self.autonomy_eval_horizon_list if item not in AUTONOMY_ALLOWED_EVAL_HORIZONS]
-            if not self.autonomy_eval_horizon_list:
-                warnings.append("AUTONOMY_EVAL_HORIZONS is empty")
-            if invalid_horizons:
-                warnings.append(f"AUTONOMY_EVAL_HORIZONS contains unsupported horizons: {','.join(invalid_horizons)}")
-            if self.autonomy_eval_max_open_signals <= 0:
-                warnings.append("AUTONOMY_EVAL_MAX_OPEN_SIGNALS must be positive")
         if self.autonomy_event_evaluation_enabled:
             invalid_event_horizons = [item for item in self.autonomy_event_eval_horizon_list if item not in AUTONOMY_ALLOWED_EVAL_HORIZONS or item == "expiry"]
             if not self.autonomy_event_eval_horizon_list:

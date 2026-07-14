@@ -9,7 +9,7 @@ class FakeAlphaGraphRepo:
     async def list_strategy_specs(self, **kwargs):
         return [
             {"strategy_id": "microstructure_ofi_v2", "version": "2.0.0", "family": "microstructure_orderflow", "enabled": True, "counts_for_breadth": True},
-            {"strategy_id": "legacy_signal_adapter_v1", "version": "1.0.0", "family": "legacy_bridge", "enabled": True, "counts_for_breadth": False},
+            {"strategy_id": "regime_defensive_flat_v1", "version": "1.0.0", "family": "defensive_control", "enabled": True, "counts_for_breadth": False},
         ]
 
     async def list_alpha_candidates(self, **kwargs):

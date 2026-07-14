@@ -8,14 +8,6 @@ from hyperliquid_trading_agent.app.config import ServiceRole, Settings
 from hyperliquid_trading_agent.app.workers.trader_worker import TraderWorker
 
 
-class _Dumpable:
-    def __init__(self, **data: object) -> None:
-        self.data = data
-
-    def model_dump(self, mode: str = "json") -> dict[str, object]:
-        return self.data
-
-
 class _DummyAutonomyService:
     def __init__(self) -> None:
         self.paused: bool | None = None
@@ -42,19 +34,6 @@ class _DummyAutonomyService:
     async def resume(self, actor: str = "api") -> None:
         self.paused = False
         self.calls.append(("resume", (), {"actor": actor}))
-
-    async def approve_signal(self, signal_id: str, actor: str, mid: float | None = None) -> dict[str, object]:
-        self.calls.append(("approve_signal", (signal_id,), {"actor": actor, "mid": mid}))
-        return {"signal": {"id": signal_id, "status": "paper_ordered"}}
-
-    async def reject_signal(self, signal_id: str, actor: str, reason: str = "") -> _Dumpable:
-        self.calls.append(("reject_signal", (signal_id,), {"actor": actor, "reason": reason}))
-        return _Dumpable(id=signal_id, status="rejected")
-
-    async def expire_signal(self, signal_id: str, actor: str = "api") -> _Dumpable:
-        self.calls.append(("expire_signal", (signal_id,), {"actor": actor}))
-        return _Dumpable(id=signal_id, status="expired")
-
 
 class _DummyHip4Service:
     async def run_proactive_cycle(self, manual: bool = False) -> dict[str, object]:
@@ -87,17 +66,16 @@ def test_trader_autonomy_handlers_delegate_to_real_service_methods() -> None:
         service = _DummyAutonomyService()
         worker._autonomy_service = service
 
-        approve = await worker._handle_autonomy_signal_approve({"command_type": "autonomy_signal_approve", "requested_by": "api", "payload": {"signal_id": "s1", "mid": 101}})
-        reject = await worker._handle_autonomy_signal_reject({"command_type": "autonomy_signal_reject", "payload": {"signal_id": "s1", "reason": "nope"}})
         pause = await worker._handle_autonomy_pause({"command_type": "autonomy_pause", "payload": {"actor": "operator"}})
         resume = await worker._handle_autonomy_resume({"command_type": "autonomy_resume", "payload": {"actor": "operator"}})
 
-        assert approve["result"] == {"signal": {"id": "s1", "status": "paper_ordered"}}
-        assert reject["signal"]["status"] == "rejected"
         assert pause["paused"] is True
         assert resume["paused"] is False
-        assert service.calls[0] == ("approve_signal", ("s1",), {"actor": "api", "mid": 101.0})
-        assert worker.heartbeat_metadata()["trader"]["command_count"] == 4
+        assert service.calls == [
+            ("pause", (), {"actor": "operator"}),
+            ("resume", (), {"actor": "operator"}),
+        ]
+        assert worker.heartbeat_metadata()["trader"]["command_count"] == 2
 
     anyio.run(run)
 
@@ -204,13 +182,12 @@ def test_trader_engine_loop_starts_with_shared_engine_service() -> None:
     anyio.run(run)
 
 
-def test_trader_owns_optional_legacy_autonomy_loop_and_reports_runtime() -> None:
+def test_trader_owns_optional_observation_loop_and_reports_runtime() -> None:
     async def run() -> None:
         worker = TraderWorker(
             Settings(
                 environment="test",
                 autonomy_enabled=True,
-                autonomy_signals_run_with_engine_enabled=True,
                 _env_file=None,
             )
         )

@@ -1,8 +1,6 @@
 """Institutional trading engine package.
 
-The engine is a paper/shadow-only, audit-first replacement path for the legacy
-TradeSignal loop.  Step 1 exposes schemas only; runtime services are added in
-subsequent milestones.
+The engine is paper/shadow-only and audit-first.
 """
 
 from hyperliquid_trading_agent.app.engine.schemas import (

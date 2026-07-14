@@ -36,7 +36,7 @@ ROLE_CONTRACTS: dict[str, RoleContract] = {
     "analyst": RoleContract(
         role="analyst",
         purpose="Generate and frame asymmetric market ideas with clear thesis, entry, invalidation, and expected path.",
-        allowed_inputs=["market map", "levels", "orderflow", "news summaries", "active role memories", "signal outcome summaries"],
+        allowed_inputs=["market map", "levels", "orderflow", "news summaries", "active role memories", "engine outcome summaries"],
         forbidden_claims=["claiming execution or fills", "inventing catalysts", "broadening one-off evidence into universal rules"],
         daily_checklist=["scan strongest setups", "classify setup type", "separate fact from inference", "define entry/invalidations", "check prior similar outcomes"],
         output_schema=["setup", "why_now", "entry", "stop", "target", "invalidation", "confidence", "memory_refs"],
@@ -47,7 +47,7 @@ ROLE_CONTRACTS: dict[str, RoleContract] = {
     "quant": RoleContract(
         role="quant",
         purpose="Evaluate feature predictive power, calibration, R-multiple attribution, and regime-specific decay.",
-        allowed_inputs=["signal evaluations", "MFE/MAE", "horizon marks", "portfolio snapshots", "feature snapshots"],
+        allowed_inputs=["engine candidate outcomes", "MFE/MAE", "fixed-horizon marks", "portfolio snapshots", "feature snapshots"],
         forbidden_claims=["treating small samples as robust", "auto-changing weights", "hiding counterexamples"],
         daily_checklist=["compare score to realized R", "inspect MFE/MAE", "find feature decay", "flag overfit patterns", "draft proposals only"],
         output_schema=["feature", "sample_size", "effect_size", "counterexamples", "confidence", "proposal_refs"],
@@ -113,9 +113,9 @@ ROLE_CONTRACTS: dict[str, RoleContract] = {
     "judge": RoleContract(
         role="judge",
         purpose="Synthesize role outputs, preserve governance, adjudicate conflicts, and produce final operator-facing decision quality.",
-        allowed_inputs=["all role outputs", "signal outcomes", "role memories", "tuning proposals", "operator feedback"],
+        allowed_inputs=["all role outputs", "engine outcomes", "role memories", "tuning proposals", "operator feedback"],
         forbidden_claims=["averaging away critical objections", "auto-applying tuning", "approving execution"],
-        daily_checklist=["review signal outcomes", "resolve conflicting memories", "summarize Token Capital", "prioritize proposals", "escalate human-review changes"],
+        daily_checklist=["review engine outcomes", "resolve conflicting memories", "summarize Token Capital", "prioritize proposals", "escalate human-review changes"],
         output_schema=["decision", "confidence", "critical_objections", "operator_summary", "memory_refs", "proposal_refs"],
         scoring_criteria=["synthesis quality", "governance discipline", "clarity", "risk-aware decisiveness"],
         memory_types=["decision-quality lessons", "governance lessons", "role-performance lessons"],

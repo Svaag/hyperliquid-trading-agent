@@ -104,10 +104,7 @@ class ReviewExportService:
 
     async def _resolve_evidence_item(self, evidence_id: str) -> dict[str, Any] | None:
         lookups = (
-            ("signal_evaluation", "get_signal_evaluation", _signal_evaluation_summary),
-            ("signal_evaluation", "get_signal_evaluation_by_signal_id", _signal_evaluation_summary),
             ("alpha_event_evaluation", "get_alpha_event_evaluation", _alpha_evaluation_summary),
-            ("autonomy_trade_signal", "get_autonomy_trade_signal", _trade_signal_summary),
             ("newswire_event", "get_newswire_event", _newswire_summary),
             ("normalized_event", "get_normalized_event", _normalized_event_summary),
         )
@@ -165,24 +162,6 @@ def _pick(item: dict[str, Any], *keys: str) -> dict[str, Any]:
     return {key: item[key] for key in keys if key in item}
 
 
-def _signal_evaluation_summary(item: dict[str, Any]) -> dict[str, Any]:
-    return _pick(
-        item,
-        "id",
-        "signal_id",
-        "symbol",
-        "side",
-        "signal_type",
-        "status",
-        "terminal_outcome",
-        "realized_or_marked_r",
-        "signal_score",
-        "signal_confidence",
-        "created_at_ms",
-        "completed_at_ms",
-    )
-
-
 def _alpha_evaluation_summary(item: dict[str, Any]) -> dict[str, Any]:
     return _pick(
         item,
@@ -201,10 +180,6 @@ def _alpha_evaluation_summary(item: dict[str, Any]) -> dict[str, Any]:
         "received_at_ms",
         "completed_at_ms",
     )
-
-
-def _trade_signal_summary(item: dict[str, Any]) -> dict[str, Any]:
-    return _pick(item, "id", "symbol", "side", "signal_type", "status", "score", "confidence", "created_at_ms", "expires_at_ms")
 
 
 def _newswire_summary(item: dict[str, Any]) -> dict[str, Any]:

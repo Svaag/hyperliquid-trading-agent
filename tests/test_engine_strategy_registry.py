@@ -43,7 +43,7 @@ def test_integrated_catalog_registers_wave2_as_normal_paper_eligible_breadth():
     assert all(registry.require_spec(strategy_id).counts_for_breadth for strategy_id in WAVE_2_IDS)
 
 
-def test_wave_1a_strategy_specs_are_valid_and_do_not_overcount_bridge_or_defensive():
+def test_wave_1a_strategy_specs_are_valid_and_do_not_overcount_defensive_control():
     specs = {spec.strategy_id: spec for spec in planned_wave_1a_specs()}
 
     assert {
@@ -52,10 +52,8 @@ def test_wave_1a_strategy_specs_are_valid_and_do_not_overcount_bridge_or_defensi
         "liquidation_mean_revert_v1",
         "funding_carry_v1",
         "oi_breakout_v1",
-        "legacy_signal_adapter_v1",
         "regime_defensive_flat_v1",
     } <= set(specs)
-    assert specs["legacy_signal_adapter_v1"].counts_for_breadth is False
     assert specs["regime_defensive_flat_v1"].counts_for_breadth is False
     assert specs["regime_defensive_flat_v1"].max_allocation_share_pct == 0.0
     assert all(spec.required_features for spec in specs.values())

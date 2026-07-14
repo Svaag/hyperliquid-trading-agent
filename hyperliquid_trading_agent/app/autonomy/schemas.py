@@ -20,17 +20,14 @@ LevelSource = Literal["candles", "l2", "public_account", "inferred"]
 Trend = Literal["up", "down", "range", "unknown"]
 VolatilityRegime = Literal["low", "normal", "high", "unknown"]
 RiskRegime = Literal["risk_on", "risk_off", "mixed", "unknown"]
-SignalStatus = Literal["candidate", "posted", "approved", "rejected", "expired", "paper_ordered", "cancelled", "flip_requested"]
-SignalSide = Literal["long", "short"]
-SignalEvaluationStatus = Literal["open", "complete", "partial", "expired_no_data", "error"]
-SignalTerminalOutcome = Literal["tp_hit", "stop_hit", "expired_positive", "expired_negative", "expired_flat", "insufficient_data", "open"]
-SignalEvaluationMarkStatus = Literal["pending", "marked", "missed_no_price", "error"]
+TradeSide = Literal["long", "short"]
+EvaluationMarkStatus = Literal["pending", "marked", "missed_no_price", "error"]
 AlphaEventEvaluationStatus = Literal["open", "complete", "partial", "expired_no_data", "skipped", "error"]
 AlphaEventDirection = Literal["long", "short", "neutral"]
 AlphaEventTerminalOutcome = Literal["worked", "failed", "mixed", "volatility_only", "insufficient_data", "open"]
 EvaluationHorizon = Literal["5m", "15m", "1h", "4h", "24h", "72h", "expiry"]
 RoleName = Literal["analyst", "quant", "research", "risk", "treasury", "execution", "adversary", "judge"]
-LessonType = Literal["role_behavior", "signal_quality", "risk_discipline", "operator_output", "data_quality", "incident_warning", "catalyst_quality"]
+LessonType = Literal["role_behavior", "risk_discipline", "operator_output", "data_quality", "incident_warning", "catalyst_quality"]
 LessonValidationStatus = Literal["active", "needs_human_review", "shadow", "archived", "expired", "rejected"]
 MemoryLifecycleStatus = Literal["candidate", "validated_advisory", "approved_policy", "deprecated", "reverted"]
 TuningProposalStatus = Literal["draft", "proposed", "accepted_manually", "reviewed_no_apply", "rejected", "expired", "superseded"]
@@ -149,60 +146,6 @@ class GlobalMarketMap(BaseModel):
     assets: dict[str, AssetMarketState] = Field(default_factory=dict)
 
 
-class SignalEvidence(BaseModel):
-    category: str
-    label: str
-    value: str | float | int | bool | None = None
-    weight: float = 0.0
-    source: Literal[
-        "market_structure",
-        "orderflow",
-        "funding",
-        "news",
-        "risk",
-        "execution",
-        "model",
-        "equity",
-        "options_flow",
-    ] = "market_structure"
-    kind: Literal["number", "pct", "bps", "ratio", "funding_hourly", "text"] = "number"
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class ModelMarketInsight(BaseModel):
-    stance: Literal["support", "oppose", "needs_more_data"] = "needs_more_data"
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-    thesis_quality: float = Field(default=0.0, ge=0.0, le=1.0)
-    hidden_risks: list[str] = Field(default_factory=list)
-    what_would_invalidate: list[str] = Field(default_factory=list)
-    suggested_adjustments: list[str] = Field(default_factory=list)
-    summary: str = ""
-
-
-class TradeSignal(BaseModel):
-    id: str
-    symbol: str
-    side: SignalSide
-    signal_type: str
-    status: SignalStatus = "candidate"
-    score: float = Field(ge=0.0, le=100.0)
-    confidence: float = Field(ge=0.0, le=1.0)
-    created_at_ms: int
-    expires_at_ms: int
-    entry: float
-    stop: float
-    take_profit: float | None = None
-    invalidation: str
-    thesis: str
-    evidence: list[SignalEvidence] = Field(default_factory=list)
-    feature_snapshot: dict[str, Any] = Field(default_factory=dict)
-    risk_plan: dict[str, Any] = Field(default_factory=dict)
-    model_insight: dict[str, Any] | None = None
-    discord_channel_id: str | None = None
-    discord_message_id: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
 class PaperPortfolio(BaseModel):
     id: str
     name: str = "default"
@@ -218,9 +161,8 @@ class PaperPortfolio(BaseModel):
 class PaperOrder(BaseModel):
     id: str
     portfolio_id: str
-    signal_id: str | None = None
     symbol: str
-    side: SignalSide
+    side: TradeSide
     order_type: Literal["market"] = "market"
     status: OrderStatus = "new"
     quantity: float
@@ -241,7 +183,7 @@ class PaperFill(BaseModel):
     order_id: str
     portfolio_id: str
     symbol: str
-    side: SignalSide
+    side: TradeSide
     quantity: float
     price: float
     fee_usd: float
@@ -253,9 +195,8 @@ class PaperFill(BaseModel):
 class PaperPosition(BaseModel):
     id: str
     portfolio_id: str
-    signal_id: str | None = None
     symbol: str
-    side: SignalSide
+    side: TradeSide
     status: PositionStatus = "open"
     quantity: float
     avg_entry_px: float
@@ -287,10 +228,6 @@ class PortfolioSnapshot(BaseModel):
 
 class AutonomyCommand(BaseModel):
     action: Literal[
-        "approve",
-        "reject",
-        "signal",
-        "signals",
         "portfolio",
         "positions",
         "orders",
@@ -300,18 +237,15 @@ class AutonomyCommand(BaseModel):
         "daily_report",
         "weekly_report",
         "token_capital",
-        "signal_outcome",
         "event_outcome",
-        "feedback_signal",
         "feedback_bot",
         "memories",
         "memory",
         "tuning_proposals",
         "tuning_proposal",
         "apply_tuning_proposal",
-        "approve_flip",
     ]
-    signal_id: str | None = None
+    target_id: str | None = None
     lesson_id: str | None = None
     proposal_id: str | None = None
     role: str | None = None
@@ -326,76 +260,11 @@ class AutonomyServiceStatus(BaseModel):
     mode: str
     universe_count: int = 0
     hot_l2_assets: list[str] = Field(default_factory=list)
-    signals_today: int = 0
     open_positions: int = 0
     last_market_data_at_ms: int | None = None
     last_iteration_at_ms: int | None = None
     last_error: str | None = None
     paper_portfolio_id: str | None = None
-
-
-class SignalEvaluationMark(BaseModel):
-    id: str
-    evaluation_id: str
-    signal_id: str
-    symbol: str
-    horizon: str
-    due_at_ms: int
-    marked_at_ms: int | None = None
-    price: float | None = None
-    direction_adjusted_return_bps: float | None = None
-    r_multiple: float | None = None
-    mfe_bps_until_mark: float | None = None
-    mae_bps_until_mark: float | None = None
-    mfe_r_until_mark: float | None = None
-    mae_r_until_mark: float | None = None
-    stop_hit_before_mark: bool = False
-    take_profit_hit_before_mark: bool = False
-    status: SignalEvaluationMarkStatus = "pending"
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class SignalEvaluation(BaseModel):
-    id: str
-    signal_id: str
-    symbol: str
-    side: SignalSide
-    signal_type: str
-    status: SignalEvaluationStatus = "open"
-    created_at_ms: int
-    completed_at_ms: int | None = None
-    entry: float
-    stop: float
-    take_profit: float | None = None
-    signal_score: float
-    signal_confidence: float
-    signal_status_at_eval_start: str
-    first_price: float | None = None
-    latest_price: float | None = None
-    latest_price_at_ms: int | None = None
-    max_favorable_price: float | None = None
-    max_adverse_price: float | None = None
-    max_favorable_bps: float | None = None
-    max_adverse_bps: float | None = None
-    max_favorable_r: float | None = None
-    max_adverse_r: float | None = None
-    stop_hit: bool = False
-    stop_hit_at_ms: int | None = None
-    take_profit_hit: bool = False
-    take_profit_hit_at_ms: int | None = None
-    terminal_outcome: SignalTerminalOutcome = "open"
-    realized_or_marked_r: float | None = None
-    opportunity_cost_r: float | None = None
-    approved: bool = False
-    rejected: bool = False
-    paper_ordered: bool = False
-    paper_position_id: str | None = None
-    feature_snapshot: dict[str, Any] = Field(default_factory=dict)
-    evidence_snapshot: list[dict[str, Any]] = Field(default_factory=list)
-    market_regime: str = "unknown"
-    error: str = ""
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    marks: list[SignalEvaluationMark] = Field(default_factory=list)
 
 
 class AlphaEventEvaluationMark(BaseModel):
@@ -413,7 +282,7 @@ class AlphaEventEvaluationMark(BaseModel):
     max_favorable_bps_until_mark: float | None = None
     max_adverse_bps_until_mark: float | None = None
     max_abs_move_bps_until_mark: float | None = None
-    status: SignalEvaluationMarkStatus = "pending"
+    status: EvaluationMarkStatus = "pending"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -448,7 +317,6 @@ class AlphaEventEvaluation(BaseModel):
     max_adverse_bps: float | None = None
     max_abs_move_bps: float | None = None
     realized_or_marked_bps: float | None = None
-    linked_signal_ids: list[str] = Field(default_factory=list)
     error: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
     marks: list[AlphaEventEvaluationMark] = Field(default_factory=list)
@@ -456,7 +324,7 @@ class AlphaEventEvaluation(BaseModel):
 
 class MemoryObservation(BaseModel):
     id: str
-    source_type: Literal["signal_evaluation", "event_evaluation", "daily_report", "weekly_report", "operator_feedback", "role_output", "schema_validation", "incident"]
+    source_type: Literal["event_evaluation", "daily_report", "weekly_report", "operator_feedback", "role_output", "schema_validation", "incident"]
     source_id: str
     role: str | None = None
     symbol: str | None = None
@@ -478,7 +346,6 @@ class CandidateLesson(BaseModel):
     evidence: list[dict[str, Any]] = Field(default_factory=list)
     source_observation_ids: list[str] = Field(default_factory=list)
     source_run_ids: list[str] = Field(default_factory=list)
-    source_signal_ids: list[str] = Field(default_factory=list)
     sample_size: int = 0
     counterexamples: list[dict[str, Any]] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -503,7 +370,6 @@ class RoleLessonMemory(BaseModel):
     evidence: list[dict[str, Any]] = Field(default_factory=list)
     source_candidate_id: str | None = None
     source_run_ids: list[str] = Field(default_factory=list)
-    source_signal_ids: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     sample_size: int = 0
     counterexamples: list[dict[str, Any]] = Field(default_factory=list)
@@ -543,7 +409,7 @@ class OperatorFeedback(BaseModel):
     id: str
     source: Literal["discord", "api"] = "api"
     actor_id: str | None = None
-    target_type: Literal["signal", "report", "lesson", "discord_message", "tuning_proposal", "bot"]
+    target_type: Literal["report", "lesson", "discord_message", "tuning_proposal", "bot"]
     target_id: str
     rating: Literal["good", "bad", "unclear", "too_noisy", "useful", "wrong"]
     note: str = ""
@@ -562,7 +428,6 @@ class TuningProposal(BaseModel):
     proposed_diff: dict[str, Any] = Field(default_factory=dict)
     evidence: list[dict[str, Any]] = Field(default_factory=list)
     source_lesson_ids: list[str] = Field(default_factory=list)
-    source_signal_ids: list[str] = Field(default_factory=list)
     strategy_id: str = "autonomy_v1"
     change_type: str = "proposal"
     risk_direction: Literal["tightens_risk", "relaxes_risk", "increases_exposure", "decreases_exposure", "neutral", "unknown"] = "unknown"

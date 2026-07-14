@@ -140,7 +140,7 @@ def test_autonomy_settings_defaults_and_alias_parsing():
     )
 
     assert settings.autonomy_enabled is False
-    assert settings.autonomy_mode == "paper_signoff"
+    assert settings.autonomy_mode == "observation"
     assert settings.autonomy_core_symbols == [
         "BTC",
         "ETH",
@@ -156,19 +156,19 @@ def test_autonomy_settings_defaults_and_alias_parsing():
     assert settings.autonomy_index_aliases["NASDAQ100"] == ["NASDAQ100", "NDX", "QQQ"]
     assert settings.autonomy_admin_users == {1, 2}
     assert settings.autonomy_admin_roles == {9}
-    assert settings.autonomy_eval_horizon_list == ["15m", "1h", "4h", "24h", "expiry"]
+    assert settings.autonomy_event_eval_horizon_list == ["15m", "1h", "4h", "24h", "72h"]
     assert settings.autonomy_weekly_report_day_normalized == "MON"
-    assert settings.autonomy_evaluation_effective_enabled is False
+    assert settings.autonomy_event_evaluation_effective_enabled is False
     assert settings.autonomy_memory_effective_enabled is False
     assert settings.autonomy_reports_effective_enabled is False
     assert settings.autonomy_tuning_proposals_effective_enabled is False
     assert settings.newswire_query_terms[:3] == ["BTC", "ETH", "HYPE"]
 
 
-def test_autonomy_config_warnings_when_enabled_without_alert_channel():
+def test_autonomy_observation_mode_does_not_require_alert_channel():
     settings = Settings(autonomy_enabled=True, autonomy_alert_channel_id="")
 
-    assert "AUTONOMY_ALERT_CHANNEL_ID" in settings.autonomy_config_warnings()[0]
+    assert settings.autonomy_config_warnings() == []
 
 
 def test_health_config_exposes_autonomy_without_starting_service():
@@ -179,15 +179,21 @@ def test_health_config_exposes_autonomy_without_starting_service():
     assert response.status_code == 200
     autonomy = response.json()["autonomy"]
     assert autonomy["enabled"] is True
-    assert autonomy["mode"] == "paper_signoff"
+    assert autonomy["mode"] == "observation"
     assert autonomy["alert_channel_id_configured"] is True
     assert autonomy["universe"]["core_symbols"] == ["BTC", "HYPE"]
-    assert autonomy["evaluation"] == {
+    assert autonomy["event_evaluation"] == {
         "enabled": True,
         "effective_enabled": True,
-        "horizons": ["15m", "1h", "4h", "24h", "expiry"],
-        "max_open_signals": 500,
-        "price_source": "allMids",
+        "horizons": ["15m", "1h", "4h", "24h", "72h"],
+        "min_importance": 50.0,
+        "min_source_score": 0.4,
+        "max_open_events": 1000,
+        "symbols_per_event": 5,
+        "macro_proxies": ["BTC", "ETH", "SPY", "QQQ"],
+        "worked_bps": 50.0,
+        "failed_bps": -35.0,
+        "volatility_bps": 75.0,
     }
     assert autonomy["memory"]["enabled"] is True
     assert autonomy["memory"]["promotion"]["strategy_affecting_requires_human_review"] is True
@@ -220,7 +226,7 @@ def test_manual_paper_routes_are_command_backed_and_gated():
 
 def test_autonomy_config_warnings_invalid_memory_loop_settings():
     settings = Settings(
-        autonomy_eval_horizons="15m,bad",
+        autonomy_event_eval_horizons="15m,bad",
         autonomy_daily_report_utc="25:00",
         autonomy_weekly_report_day="FUNDAY",
         autonomy_lesson_min_confidence=1.5,
@@ -228,7 +234,7 @@ def test_autonomy_config_warnings_invalid_memory_loop_settings():
 
     warnings = settings.autonomy_config_warnings()
 
-    assert "AUTONOMY_EVAL_HORIZONS contains unsupported horizons: bad" in warnings
+    assert "AUTONOMY_EVENT_EVAL_HORIZONS contains unsupported horizons: bad" in warnings
     assert "AUTONOMY_DAILY_REPORT_UTC must be HH:MM" in warnings
     assert "AUTONOMY_WEEKLY_REPORT_DAY must be one of MON,TUE,WED,THU,FRI,SAT,SUN" in warnings
     assert "AUTONOMY_LESSON_MIN_CONFIDENCE must be between 0 and 1" in warnings

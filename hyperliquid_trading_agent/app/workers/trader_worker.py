@@ -6,7 +6,6 @@ import time
 from typing import Any
 
 from hyperliquid_trading_agent.app.autonomy.memory import MemoryService
-from hyperliquid_trading_agent.app.autonomy.schemas import SignalEvidence, TradeSignal
 from hyperliquid_trading_agent.app.autonomy.service import AutonomousTradingLoopService
 from hyperliquid_trading_agent.app.config import ServiceRole, Settings
 from hyperliquid_trading_agent.app.engine.bandit import OfflineContextualBanditReporter
@@ -108,7 +107,6 @@ class TraderWorker(BaseWorker):
             "engine_newswire_replay": self._handle_engine_newswire_replay,
             "engine_operator_proposal_ack": self._handle_engine_operator_proposal_ack,
             "engine_operator_proposal_reject": self._handle_engine_operator_proposal_reject,
-            "engine_operator_proposal_expire": self._handle_engine_operator_proposal_expire,
             "engine_validation_monitor_run_once": self._handle_engine_validation_monitor_run_once,
             "hip4_loop_run_once": self._handle_hip4_loop_run_once,
             "hip4_scan_run": self._handle_hip4_scan_run,
@@ -117,11 +115,6 @@ class TraderWorker(BaseWorker):
             "hip4_manual_ticket": self._handle_hip4_manual_ticket,
             "autonomy_pause": self._handle_autonomy_pause,
             "autonomy_resume": self._handle_autonomy_resume,
-            "autonomy_signal_approve": self._handle_autonomy_signal_approve,
-            "autonomy_signal_reject": self._handle_autonomy_signal_reject,
-            "autonomy_signal_expire": self._handle_autonomy_signal_expire,
-            "autonomy_equity_signal_approve": self._handle_autonomy_equity_signal_approve,
-            "autonomy_equity_signal_reject": self._handle_autonomy_equity_signal_reject,
             "paper_trade_draft": self._handle_paper_trade_draft,
             "paper_trade_confirm": self._handle_paper_trade_confirm,
             "paper_trade_cancel": self._handle_paper_trade_cancel,
@@ -135,7 +128,6 @@ class TraderWorker(BaseWorker):
             "tracking_pause": self._handle_tracking_pause,
             "tracking_resume": self._handle_tracking_resume,
             "tracking_stop": self._handle_tracking_stop,
-            "admin_debug_seed_flip_demo": self._handle_admin_debug_seed_flip_demo,
         }
 
     async def _start_engine_newsfeed(self) -> None:
@@ -449,17 +441,6 @@ class TraderWorker(BaseWorker):
             raise KeyError("engine operator proposal not found")
         return self._result(command, proposal=proposal, paper_order_created=False)
 
-    async def _handle_engine_operator_proposal_expire(self, command: dict[str, Any]) -> dict[str, Any]:
-        self._record_command(command)
-        payload = self._payload(command)
-        proposal = await self._get_engine_operator_proposal_service().expire(
-            self._required_str(payload, "proposal_id"),
-            actor=self._actor(command),
-        )
-        if proposal is None:
-            raise KeyError("engine operator proposal not found")
-        return self._result(command, proposal=proposal, paper_order_created=False)
-
     async def _handle_engine_validation_monitor_run_once(self, command: dict[str, Any]) -> dict[str, Any]:
         self._record_command(command)
         if self._engine_validation_monitor is None:
@@ -510,36 +491,6 @@ class TraderWorker(BaseWorker):
         actor = self._actor(command)
         await self._get_autonomy_service().resume(actor=actor)
         return self._result(command, actor=actor, paused=False)
-
-    async def _handle_autonomy_signal_approve(self, command: dict[str, Any]) -> dict[str, Any]:
-        self._record_command(command)
-        payload = self._payload(command)
-        result = await self._get_autonomy_service().approve_signal(self._required_str(payload, "signal_id"), actor=self._actor(command), mid=self._optional_float(payload.get("mid")))
-        return self._result(command, result=result)
-
-    async def _handle_autonomy_signal_reject(self, command: dict[str, Any]) -> dict[str, Any]:
-        self._record_command(command)
-        payload = self._payload(command)
-        signal = await self._get_autonomy_service().reject_signal(self._required_str(payload, "signal_id"), actor=self._actor(command), reason=str(payload.get("reason") or ""))
-        return self._result(command, signal=signal.model_dump(mode="json"))
-
-    async def _handle_autonomy_signal_expire(self, command: dict[str, Any]) -> dict[str, Any]:
-        self._record_command(command)
-        payload = self._payload(command)
-        signal = await self._get_autonomy_service().expire_signal(self._required_str(payload, "signal_id"), actor=self._actor(command))
-        return self._result(command, signal=signal.model_dump(mode="json"))
-
-    async def _handle_autonomy_equity_signal_approve(self, command: dict[str, Any]) -> dict[str, Any]:
-        self._record_command(command)
-        payload = self._payload(command)
-        result = await self._get_autonomy_service().approve_equity_signal(self._required_str(payload, "signal_id"), actor=self._actor(command))
-        return self._result(command, result=result)
-
-    async def _handle_autonomy_equity_signal_reject(self, command: dict[str, Any]) -> dict[str, Any]:
-        self._record_command(command)
-        payload = self._payload(command)
-        signal = await self._get_autonomy_service().reject_equity_signal(self._required_str(payload, "signal_id"), actor=self._actor(command), reason=str(payload.get("reason") or ""))
-        return self._result(command, signal=signal.model_dump(mode="json"))
 
     async def _handle_paper_trade_draft(self, command: dict[str, Any]) -> dict[str, Any]:
         self._record_command(command)
@@ -660,45 +611,6 @@ class TraderWorker(BaseWorker):
         self._record_command(command)
         return await self._set_tracker_status(command, "stopped")
 
-    async def _handle_admin_debug_seed_flip_demo(self, command: dict[str, Any]) -> dict[str, Any]:
-        self._record_command(command)
-        payload = self._payload(command)
-        now = int(time.time() * 1000)
-        symbol = str(payload.get("symbol") or "BTC").upper()
-        entry = float(payload.get("entry") or 50_000.0)
-        opposing_side = str(payload.get("opposing_side") or "short")
-        signal_side = "long" if opposing_side == "short" else "short"
-        signal = TradeSignal(
-            id=f"debug_flip_{now}",
-            symbol=symbol,
-            side=signal_side,  # type: ignore[arg-type]
-            signal_type="debug_flip_demo",
-            status="candidate",
-            score=75.0,
-            confidence=0.75,
-            created_at_ms=now,
-            expires_at_ms=now + 30 * 60 * 1000,
-            entry=entry,
-            stop=entry * (0.98 if signal_side == "long" else 1.02),
-            take_profit=entry * (1.04 if signal_side == "long" else 0.96),
-            invalidation="debug demo invalidation",
-            thesis="Debug flip-demo signal for paper-only command-boundary testing.",
-            evidence=[SignalEvidence(category="debug", label="seeded_by", value="trader worker", weight=0.5, source="risk", kind="text")],
-            metadata={"debug_demo": True, "opposing_side": opposing_side, "exchange_actions": []},
-        )
-        service = self._get_autonomy_service()
-        service.signals[signal.id] = signal
-        if callable(getattr(service, "_persist_signal", None)):
-            await service._persist_signal(signal)
-        if callable(getattr(self.repository, "record_autonomy_event", None)):
-            await self.repository.record_autonomy_event(
-                "debug_flip_demo_seeded",
-                actor=self._actor(command),
-                symbol=symbol,
-                payload={"signal_id": signal.id, "opposing_side": opposing_side, "paper_only": True, "exchange_actions": []},
-            )
-        return self._result(command, signal=signal.model_dump(mode="json"), paper_only=True)
-
     async def _set_tracker_status(self, command: dict[str, Any], status: str) -> dict[str, Any]:
         payload = self._payload(command)
         tracker_id = self._required_str(payload, "tracker_id")
@@ -790,14 +702,6 @@ class TraderWorker(BaseWorker):
     def _get_autonomy_service(self) -> AutonomousTradingLoopService:
         if self._autonomy_service is None:
             memory = self._get_memory_service()
-            if self.settings.alpaca_paper_trading_enabled and self._alpaca_paper_execution is None:
-                self._alpaca_paper_execution = AlpacaPaperExecutionAdapter(
-                    api_key=self.settings.alpaca_paper_api_key,
-                    api_secret=self.settings.alpaca_paper_api_secret,
-                    repository=self.repository,
-                    base_url=self.settings.alpaca_paper_base_url,
-                    data_feed=self.settings.alpaca_data_feed,
-                )
             self._autonomy_service = AutonomousTradingLoopService(
                 settings=self.settings,
                 repository=self.repository,
@@ -805,9 +709,6 @@ class TraderWorker(BaseWorker):
                 news=None,
                 memory_service=memory,
                 alert_sink=None,
-                model_gateway=None,
-                risk_gateway=None,
-                equity_paper_execution=self._alpaca_paper_execution,
             )
         return self._autonomy_service
 
@@ -834,7 +735,7 @@ class TraderWorker(BaseWorker):
                     "running": False,
                     "owner_role": "trader",
                     "runtime_source": "trader_heartbeat",
-                    "signals_run_with_engine_enabled": self.settings.autonomy_signals_run_with_engine_enabled,
+                    "candidate_source": "institutional_engine",
                 }
             ),
             "engine_loop": self._engine_loop_metadata(),

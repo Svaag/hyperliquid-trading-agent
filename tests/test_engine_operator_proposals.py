@@ -7,10 +7,7 @@ from typing import Any
 import anyio
 
 from hyperliquid_trading_agent.app.config import Settings
-from hyperliquid_trading_agent.app.engine.operator_proposals import (
-    EngineOperatorProposalService,
-    project_operator_proposal_to_trade_signal,
-)
+from hyperliquid_trading_agent.app.engine.operator_proposals import EngineOperatorProposalService
 
 
 class _ProposalRepository:
@@ -155,7 +152,7 @@ def _settings(**updates: Any) -> Settings:
     )
 
 
-def test_institutional_candidate_becomes_deduplicated_shadow_only_operator_proposal() -> None:
+def test_institutional_candidate_becomes_deduplicated_operator_proposal() -> None:
     async def run() -> tuple[dict[str, Any], dict[str, Any], _ProposalRepository]:
         repo = _ProposalRepository(_context())
         service = EngineOperatorProposalService(settings=_settings(), repository=repo)  # type: ignore[arg-type]
@@ -168,42 +165,42 @@ def test_institutional_candidate_becomes_deduplicated_shadow_only_operator_propo
     assert first["created"] == 1
     assert second["created"] == 0
     proposal = next(iter(repo.proposals.values()))
-    assert proposal["proposal_id"].startswith("sig_eng_")
+    assert proposal["proposal_id"].startswith("eng_prop_")
     assert proposal["metadata"]["paper_execution_allowed"] is False
-    assert proposal["payload"]["signal"]["metadata"]["execution_authority"] == "none"
+    assert proposal["payload"]["candidate"]["candidate_id"] == "cand_eligible"
+    assert "signal" not in proposal["payload"]
     assert len(repo.notifications) == 1
     assert repo.notifications[0]["category"] == "engine_operator_proposal"
     assert "does not create a paper or live order" in repo.notifications[0]["payload"]["content"]
 
 
 def test_operator_acknowledgment_changes_review_state_without_order_side_effect() -> None:
-    async def run() -> tuple[dict[str, Any], dict[str, Any]]:
+    async def run() -> dict[str, Any]:
         repo = _ProposalRepository(_context())
         service = EngineOperatorProposalService(settings=_settings(), repository=repo)  # type: ignore[arg-type]
         await service.process_candidate_book("book_1")
         proposal_id = next(iter(repo.proposals))
         acknowledged = await service.acknowledge(proposal_id, actor="operator-1")
         assert acknowledged is not None
-        return acknowledged, project_operator_proposal_to_trade_signal(acknowledged)
+        return acknowledged
 
-    acknowledged, signal = anyio.run(run)
+    acknowledged = anyio.run(run)
 
     assert acknowledged["status"] == "acknowledged"
     assert "order" not in acknowledged
-    assert signal["status"] == "approved"
-    assert signal["metadata"]["acknowledgment_only"] is True
-    assert signal["metadata"]["paper_execution_created"] is False
+    assert acknowledged["metadata"]["acknowledgment_only"] is True
+    assert acknowledged["metadata"]["paper_execution_allowed"] is False
 
 
-def test_legacy_adapter_and_candidates_below_hard_floors_never_produce_proposals() -> None:
+def test_non_breadth_and_candidates_below_hard_floors_never_produce_proposals() -> None:
     async def run(context: dict[str, Any]) -> tuple[dict[str, Any], _ProposalRepository]:
         repo = _ProposalRepository(context)
         service = EngineOperatorProposalService(settings=_settings(), repository=repo)  # type: ignore[arg-type]
         return await service.process_candidate_book("book_1"), repo
 
-    legacy_result, legacy_repo = anyio.run(
+    non_breadth_result, non_breadth_repo = anyio.run(
         run,
-        _context(strategy_id="legacy_signal_adapter_v1", counts_for_breadth=False),
+        _context(counts_for_breadth=False),
     )
     weak = _context(confidence=0.4, feature_coverage_pct=70.0)
     weak["ev"]["net_ev_bps"] = 11.0
@@ -211,8 +208,8 @@ def test_legacy_adapter_and_candidates_below_hard_floors_never_produce_proposals
     weak["packet"]["ev_estimate"] = weak["ev"]
     weak_result, weak_repo = anyio.run(run, weak)
 
-    assert legacy_result["created"] == 0
-    assert "legacy_signal_adapter" in legacy_result["blockers"]
+    assert non_breadth_result["created"] == 0
+    assert "not_alpha_breadth" in non_breadth_result["blockers"]
     assert weak_result["created"] == 0
     assert {
         "net_ev_below_operator_minimum",
@@ -220,7 +217,7 @@ def test_legacy_adapter_and_candidates_below_hard_floors_never_produce_proposals
         "confidence_below_operator_minimum",
         "feature_coverage_below_operator_minimum",
     } <= set(weak_result["blockers"])
-    assert legacy_repo.proposals == weak_repo.proposals == {}
+    assert non_breadth_repo.proposals == weak_repo.proposals == {}
 
 
 def test_shadow_digest_collapses_research_governance_blockers_for_display() -> None:

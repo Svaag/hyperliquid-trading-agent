@@ -13,9 +13,8 @@ log = get_logger(__name__)
 class AgentNewsConsumer:
     """Push-feeds newswire events into the autonomy market map (replacing the 60s poll).
 
-    Bridges the canonical ``NewswireEvent`` back to the legacy ``NewsEvent`` the reducer
-    and signal engine already understand, so news-sourced ``SignalEvidence`` keeps flowing
-    unchanged — just push-driven now.
+    Bridges the canonical ``NewswireEvent`` to the market-map ``NewsEvent`` schema so
+    news-sourced evidence keeps flowing unchanged — just push-driven now.
     """
 
     def __init__(

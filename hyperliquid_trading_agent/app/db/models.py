@@ -2212,42 +2212,6 @@ class RetentionRunRecord(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
-class TradeSignalRecord(TimestampMixin, Base):
-    __tablename__ = "trade_signals"
-    __table_args__ = (
-        Index("ix_trade_signals_symbol", "symbol"),
-        Index("ix_trade_signals_status", "status"),
-        Index("ix_trade_signals_created_at_ms", "created_at_ms"),
-    )
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
-    side: Mapped[str] = mapped_column(String(16), nullable=False)
-    signal_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
-    score: Mapped[float] = mapped_column(Float, nullable=False)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False)
-    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    expires_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    entry_px: Mapped[float] = mapped_column(Float, nullable=False)
-    stop_px: Mapped[float] = mapped_column(Float, nullable=False)
-    take_profit_px: Mapped[float | None] = mapped_column(Float)
-    thesis: Mapped[str] = mapped_column(Text, default="")
-    invalidation: Mapped[str] = mapped_column(Text, default="")
-    evidence_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    feature_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    risk_plan_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    model_insight_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    discord_channel_id: Mapped[str | None] = mapped_column(String(64))
-    discord_message_id: Mapped[str | None] = mapped_column(String(64))
-    asset_class: Mapped[str] = mapped_column(String(32), default="crypto", nullable=False)
-    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    approved_by_discord_user_id: Mapped[str | None] = mapped_column(String(64))
-    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    rejected_by_discord_user_id: Mapped[str | None] = mapped_column(String(64))
-    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
 class PaperPortfolioRecord(TimestampMixin, Base):
     __tablename__ = "paper_portfolios"
     __table_args__ = (Index("uq_paper_portfolios_name", "name", unique=True),)
@@ -2267,12 +2231,10 @@ class PaperOrderRecord(TimestampMixin, Base):
     __table_args__ = (
         Index("ix_paper_orders_symbol", "symbol"),
         Index("ix_paper_orders_status", "status"),
-        Index("ix_paper_orders_signal_id", "signal_id"),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     portfolio_id: Mapped[str] = mapped_column(ForeignKey("paper_portfolios.id"), nullable=False)
-    signal_id: Mapped[str | None] = mapped_column(ForeignKey("trade_signals.id"))
     symbol: Mapped[str] = mapped_column(String(64), nullable=False)
     side: Mapped[str] = mapped_column(String(16), nullable=False)
     order_type: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -2314,7 +2276,6 @@ class PaperPositionRecord(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     portfolio_id: Mapped[str] = mapped_column(ForeignKey("paper_portfolios.id"), nullable=False)
-    signal_id: Mapped[str | None] = mapped_column(ForeignKey("trade_signals.id"))
     symbol: Mapped[str] = mapped_column(String(64), nullable=False)
     side: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -2347,85 +2308,6 @@ class PortfolioSnapshotRecord(TimestampMixin, Base):
     drawdown_pct: Mapped[float] = mapped_column(Float, nullable=False)
     sharpe: Mapped[float | None] = mapped_column(Float)
     metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-
-
-class SignalEvaluationRecord(TimestampMixin, Base):
-    __tablename__ = "signal_evaluations"
-    __table_args__ = (
-        Index("uq_signal_evaluations_signal_id", "signal_id", unique=True),
-        Index("ix_signal_evaluations_status_symbol", "status", "symbol"),
-        Index("ix_signal_evaluations_symbol_created_at_ms", "symbol", "created_at_ms"),
-    )
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    signal_id: Mapped[str] = mapped_column(ForeignKey("trade_signals.id"), nullable=False)
-    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
-    side: Mapped[str] = mapped_column(String(16), nullable=False)
-    signal_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
-    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    completed_at_ms: Mapped[int | None] = mapped_column(BigInteger)
-    entry_px: Mapped[float] = mapped_column(Float, nullable=False)
-    stop_px: Mapped[float] = mapped_column(Float, nullable=False)
-    take_profit_px: Mapped[float | None] = mapped_column(Float)
-    signal_score: Mapped[float] = mapped_column(Float, nullable=False)
-    signal_confidence: Mapped[float] = mapped_column(Float, nullable=False)
-    signal_status_at_eval_start: Mapped[str] = mapped_column(String(32), nullable=False)
-    first_price: Mapped[float | None] = mapped_column(Float)
-    latest_price: Mapped[float | None] = mapped_column(Float)
-    latest_price_at_ms: Mapped[int | None] = mapped_column(BigInteger)
-    max_favorable_price: Mapped[float | None] = mapped_column(Float)
-    max_adverse_price: Mapped[float | None] = mapped_column(Float)
-    max_favorable_bps: Mapped[float | None] = mapped_column(Float)
-    max_adverse_bps: Mapped[float | None] = mapped_column(Float)
-    max_favorable_r: Mapped[float | None] = mapped_column(Float)
-    max_adverse_r: Mapped[float | None] = mapped_column(Float)
-    stop_hit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    stop_hit_at_ms: Mapped[int | None] = mapped_column(BigInteger)
-    take_profit_hit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    take_profit_hit_at_ms: Mapped[int | None] = mapped_column(BigInteger)
-    terminal_outcome: Mapped[str] = mapped_column(String(64), nullable=False)
-    realized_or_marked_r: Mapped[float | None] = mapped_column(Float)
-    opportunity_cost_r: Mapped[float | None] = mapped_column(Float)
-    approved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    rejected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    paper_ordered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    paper_position_id: Mapped[str | None] = mapped_column(String(64))
-    feature_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    evidence_snapshot_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    market_regime: Mapped[str] = mapped_column(String(64), default="unknown", nullable=False)
-    error: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-class SignalEvaluationMarkRecord(TimestampMixin, Base):
-    __tablename__ = "signal_evaluation_marks"
-    __table_args__ = (
-        Index("uq_signal_evaluation_marks_signal_horizon", "signal_id", "horizon", unique=True),
-        Index("ix_signal_evaluation_marks_eval", "evaluation_id"),
-        Index("ix_signal_evaluation_marks_due_status", "status", "due_at_ms"),
-        Index("ix_signal_evaluation_marks_symbol_due", "symbol", "due_at_ms"),
-    )
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    evaluation_id: Mapped[str] = mapped_column(ForeignKey("signal_evaluations.id"), nullable=False)
-    signal_id: Mapped[str] = mapped_column(ForeignKey("trade_signals.id"), nullable=False)
-    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
-    horizon: Mapped[str] = mapped_column(String(32), nullable=False)
-    due_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    marked_at_ms: Mapped[int | None] = mapped_column(BigInteger)
-    price: Mapped[float | None] = mapped_column(Float)
-    direction_adjusted_return_bps: Mapped[float | None] = mapped_column(Float)
-    r_multiple: Mapped[float | None] = mapped_column(Float)
-    mfe_bps_until_mark: Mapped[float | None] = mapped_column(Float)
-    mae_bps_until_mark: Mapped[float | None] = mapped_column(Float)
-    mfe_r_until_mark: Mapped[float | None] = mapped_column(Float)
-    mae_r_until_mark: Mapped[float | None] = mapped_column(Float)
-    stop_hit_before_mark: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    take_profit_hit_before_mark: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
-    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class AlphaEventEvaluationRecord(TimestampMixin, Base):
@@ -2467,7 +2349,6 @@ class AlphaEventEvaluationRecord(TimestampMixin, Base):
     max_adverse_bps: Mapped[float | None] = mapped_column(Float)
     max_abs_move_bps: Mapped[float | None] = mapped_column(Float)
     realized_or_marked_bps: Mapped[float | None] = mapped_column(Float)
-    linked_signal_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     error: Mapped[str] = mapped_column(Text, default="", nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -2537,7 +2418,6 @@ class CandidateLessonRecord(TimestampMixin, Base):
     evidence_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     source_observation_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     source_run_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
-    source_signal_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     sample_size: Mapped[int] = mapped_column(Integer, nullable=False)
     counterexamples_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
@@ -2568,7 +2448,6 @@ class ShadowRoleLessonRecord(TimestampMixin, Base):
     evidence_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     source_candidate_id: Mapped[str | None] = mapped_column(String(64))
     source_run_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
-    source_signal_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     sample_size: Mapped[int] = mapped_column(Integer, nullable=False)
     counterexamples_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
@@ -2605,7 +2484,6 @@ class RoleLessonRecord(TimestampMixin, Base):
     evidence_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     source_candidate_id: Mapped[str | None] = mapped_column(String(64))
     source_run_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
-    source_signal_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     sample_size: Mapped[int] = mapped_column(Integer, nullable=False)
     counterexamples_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
@@ -2919,7 +2797,6 @@ class TuningProposalRecord(TimestampMixin, Base):
     proposed_diff_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     evidence_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     source_lesson_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
-    source_signal_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     strategy_id: Mapped[str] = mapped_column(String(64), nullable=False, default="autonomy_v1")
     change_type: Mapped[str] = mapped_column(String(64), nullable=False, default="proposal")
     risk_direction: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")

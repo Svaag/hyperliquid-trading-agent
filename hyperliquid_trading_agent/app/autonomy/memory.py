@@ -11,7 +11,6 @@ from hyperliquid_trading_agent.app.autonomy.schemas import (
     OperatorFeedback,
     OperatorOutputLessonMemory,
     RoleLessonMemory,
-    SignalEvaluation,
 )
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.governance.policy import (
@@ -85,17 +84,6 @@ class MemoryService:
             "last_error": self.last_error,
         }
 
-    async def observe_signal_evaluation(self, evaluation: SignalEvaluation) -> list[CandidateLesson]:
-        if not self.settings.autonomy_memory_enabled:
-            return []
-        observation = _observation_from_evaluation(evaluation)
-        await self.record_observation(observation)
-        candidates: list[CandidateLesson] = []
-        for candidate in _candidates_from_evaluation(evaluation, observation, self.settings):
-            candidates.append(await self.upsert_candidate(candidate))
-        promoted = await self.promote_candidates()
-        return [*candidates, *promoted]
-
     async def observe_event_evaluation(self, evaluation: AlphaEventEvaluation) -> list[CandidateLesson]:
         if not self.settings.autonomy_memory_enabled:
             return []
@@ -123,7 +111,7 @@ class MemoryService:
             metadata={"exchange_actions": []},
         )
         await self.record_observation(observation)
-        if feedback.target_type in {"bot", "discord_message", "report", "signal"}:
+        if feedback.target_type in {"bot", "discord_message", "report"}:
             candidate = CandidateLesson(
                 id=f"cand_{uuid4().hex}",
                 lesson_type="operator_output",
@@ -132,7 +120,6 @@ class MemoryService:
                 claim=_operator_feedback_claim(feedback),
                 evidence=[feedback.model_dump(mode="json")],
                 source_observation_ids=[observation.id],
-                source_signal_ids=[feedback.target_id] if feedback.target_type == "signal" else [],
                 sample_size=1,
                 confidence=0.65 if feedback.rating in {"bad", "wrong", "good", "useful"} else 0.55,
                 expected_future_behavior_change=_operator_feedback_instruction(feedback),
@@ -163,7 +150,6 @@ class MemoryService:
                     "evidence": [*existing.evidence, *candidate.evidence][-20:],
                     "source_observation_ids": _dedupe([*existing.source_observation_ids, *candidate.source_observation_ids]),
                     "source_run_ids": _dedupe([*existing.source_run_ids, *candidate.source_run_ids]),
-                    "source_signal_ids": _dedupe([*existing.source_signal_ids, *candidate.source_signal_ids]),
                     "expires_at_ms": max(existing.expires_at_ms, candidate.expires_at_ms),
                 }
             )
@@ -430,8 +416,8 @@ class MemoryService:
     def _can_promote(self, candidate: CandidateLesson) -> bool:
         if candidate.lesson_type == "operator_output":
             return candidate.sample_size >= self.settings.autonomy_operator_lesson_min_samples and candidate.confidence >= self.settings.autonomy_lesson_min_confidence
-        if candidate.lesson_type == "signal_quality" or _requires_human_review(candidate):
-            return candidate.sample_size >= self.settings.autonomy_signal_lesson_min_samples and candidate.confidence >= self.settings.autonomy_strategy_lesson_min_confidence
+        if _requires_human_review(candidate):
+            return candidate.sample_size >= self.settings.autonomy_role_lesson_min_samples and candidate.confidence >= self.settings.autonomy_strategy_lesson_min_confidence
         return candidate.sample_size >= self.settings.autonomy_role_lesson_min_samples and candidate.confidence >= self.settings.autonomy_lesson_min_confidence
 
     def _role_lesson_from_candidate(self, candidate: CandidateLesson, *, status: str, now_ms: int, metadata: dict[str, Any] | None = None) -> RoleLessonMemory | None:
@@ -463,7 +449,6 @@ class MemoryService:
             evidence=candidate.evidence,
             source_candidate_id=candidate.id,
             source_run_ids=candidate.source_run_ids,
-            source_signal_ids=candidate.source_signal_ids,
             confidence=candidate.confidence,
             sample_size=candidate.sample_size,
             counterexamples=candidate.counterexamples,
@@ -535,91 +520,6 @@ class MemoryService:
         log.warning("memory_service_error", error=type(exc).__name__)
 
 
-def _observation_from_evaluation(evaluation: SignalEvaluation) -> MemoryObservation:
-    outcome = evaluation.terminal_outcome
-    r_text = "n/a" if evaluation.realized_or_marked_r is None else f"{evaluation.realized_or_marked_r:.2f}R"
-    return MemoryObservation(
-        id=f"obs_{uuid4().hex}",
-        source_type="signal_evaluation",
-        source_id=evaluation.id,
-        symbol=evaluation.symbol,
-        signal_type=evaluation.signal_type,
-        market_regime=evaluation.market_regime,
-        observation=f"{evaluation.symbol} {evaluation.side} {evaluation.signal_type} completed as {outcome} with marked result {r_text}; MFE={evaluation.max_favorable_r}, MAE={evaluation.max_adverse_r}.",
-        evidence=[evaluation.model_dump(mode="json", exclude={"marks"})],
-        severity="warning" if outcome == "stop_hit" else "info",
-        created_at_ms=_now_ms(),
-        metadata={"exchange_actions": []},
-    )
-
-
-def _candidates_from_evaluation(evaluation: SignalEvaluation, observation: MemoryObservation, settings: Settings) -> list[CandidateLesson]:
-    candidates: list[CandidateLesson] = []
-    now_ms = _now_ms()
-    base: dict[str, Any] = {
-        "scope": {"symbol": evaluation.symbol, "signal_type": evaluation.signal_type, "market_regime": evaluation.market_regime},
-        "evidence": observation.evidence,
-        "source_observation_ids": [observation.id],
-        "source_signal_ids": [evaluation.signal_id],
-        "sample_size": 1,
-        "created_at_ms": now_ms,
-        "expires_at_ms": now_ms + settings.autonomy_memory_candidate_ttl_days * 86_400_000,
-        "metadata": {"exchange_actions": []},
-    }
-    if evaluation.terminal_outcome == "stop_hit":
-        candidates.append(
-            CandidateLesson(
-                id=f"cand_{uuid4().hex}",
-                lesson_type="risk_discipline",
-                role="risk",
-                claim=f"{evaluation.symbol} {evaluation.signal_type} signals are hitting stops before thesis completion in this scope.",
-                confidence=0.62,
-                expected_future_behavior_change="Check stop distance versus recent volatility/noise before supporting similar setups; escalate weak invalidation to Judge.",
-                risk_affecting=True,
-                **base,
-            )
-        )
-    if evaluation.terminal_outcome == "tp_hit" or (evaluation.max_favorable_r or 0) >= 1.5:
-        candidates.append(
-            CandidateLesson(
-                id=f"cand_{uuid4().hex}",
-                lesson_type="role_behavior",
-                role="analyst",
-                claim=f"{evaluation.symbol} {evaluation.signal_type} produced favorable excursion in this regime.",
-                confidence=0.60,
-                expected_future_behavior_change="When similar scoped evidence repeats, preserve the thesis structure and clearly state why-now, entry, invalidation, and expected path.",
-                **base,
-            )
-        )
-    if evaluation.rejected and (evaluation.opportunity_cost_r or 0) >= 1:
-        candidates.append(
-            CandidateLesson(
-                id=f"cand_{uuid4().hex}",
-                lesson_type="signal_quality",
-                role="judge",
-                claim=f"Rejected {evaluation.symbol} {evaluation.signal_type} signals in this scope can have material opportunity cost.",
-                confidence=0.58,
-                expected_future_behavior_change="Review rejection reasons against actual MFE before tightening similar filters; emit only as a tuning proposal after higher sample size.",
-                strategy_affecting=True,
-                **base,
-            )
-        )
-    if evaluation.stop <= 0 or evaluation.entry == evaluation.stop:
-        candidates.append(
-            CandidateLesson(
-                id=f"cand_{uuid4().hex}",
-                lesson_type="incident_warning",
-                role="risk",
-                claim="A signal evaluation had invalid stop geometry.",
-                confidence=0.90,
-                expected_future_behavior_change="Hard-veto signals with missing or zero-distance stops; do not report R-multiple without valid stop geometry.",
-                risk_affecting=True,
-                **base,
-            )
-        )
-    return candidates
-
-
 def _observation_from_event_evaluation(evaluation: AlphaEventEvaluation) -> MemoryObservation:
     bps_text = "n/a" if evaluation.realized_or_marked_bps is None else f"{evaluation.realized_or_marked_bps:.1f} bps"
     return MemoryObservation(
@@ -653,7 +553,6 @@ def _candidates_from_event_evaluation(evaluation: AlphaEventEvaluation, observat
         },
         "evidence": observation.evidence,
         "source_observation_ids": [observation.id],
-        "source_signal_ids": list(evaluation.linked_signal_ids),
         "sample_size": 1,
         "created_at_ms": now_ms,
         "expires_at_ms": now_ms + settings.autonomy_memory_candidate_ttl_days * 86_400_000,
@@ -667,7 +566,7 @@ def _candidates_from_event_evaluation(evaluation: AlphaEventEvaluation, observat
                 role="research",
                 claim=f"{evaluation.event_source} {evaluation.event_type} {evaluation.sentiment} catalysts showed directional follow-through for {evaluation.symbol} in this scope.",
                 confidence=0.58,
-                expected_future_behavior_change="When this catalyst scope repeats, preserve it as advisory research evidence but require normal signal/risk confirmation before any paper signal.",
+                expected_future_behavior_change="When this catalyst scope repeats, preserve it as advisory research evidence but require normal engine and risk confirmation.",
                 **base,
             )
         )
@@ -729,7 +628,6 @@ def _should_shadow(candidate: CandidateLesson) -> bool:
 
 def _default_role_for_lesson(lesson_type: str) -> str:
     return {
-        "signal_quality": "quant",
         "risk_discipline": "risk",
         "operator_output": "judge",
         "data_quality": "research",

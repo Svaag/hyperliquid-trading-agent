@@ -20,7 +20,7 @@ class FakeBanditRepo:
         return [
             {"strategy_id": "microstructure_ofi_v2", "family": "microstructure_orderflow", "enabled": True, "counts_for_breadth": True},
             {"strategy_id": "funding_carry_v1", "family": "funding_basis", "enabled": True, "counts_for_breadth": True},
-            {"strategy_id": "legacy_signal_adapter_v1", "family": "legacy_bridge", "enabled": True, "counts_for_breadth": False},
+            {"strategy_id": "regime_defensive_flat_v1", "family": "defensive_control", "enabled": True, "counts_for_breadth": False},
         ]
 
     async def upsert_bandit_policy_snapshot(self, snapshot: dict):

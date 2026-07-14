@@ -218,7 +218,7 @@ class EngineReplayComparisonService:
             metadata: dict[str, Any] = metadata_value if isinstance(metadata_value, dict) else {}
             family = str(metadata.get("strategy_family") or allocated_candidate.get("strategy_family") or "unknown")
             counts_for_breadth = bool(metadata.get("counts_for_breadth", allocated_candidate.get("counts_for_breadth", True)))
-            if counts_for_breadth and family not in {"legacy_bridge", "risk_off_defensive"} and allocated_candidate.get("side") != "flat":
+            if counts_for_breadth and family != "risk_off_defensive" and allocated_candidate.get("side") != "flat":
                 active_alpha_strategies.add(strategy_id)
                 active_alpha_families.add(family)
         allocated_count = len(approved_allocations)

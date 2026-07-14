@@ -227,17 +227,6 @@ class AlphaEventEvaluationService:
             items = [item for item in items if item.symbol == symbol.upper()]
         return sorted(items, key=lambda item: item.received_at_ms, reverse=True)[:limit]
 
-    async def link_signal(self, event_id: str, signal_id: str, symbol: str | None = None) -> None:
-        evaluations = await self.get_by_event_id(event_id)
-        if symbol:
-            evaluations = [item for item in evaluations if item.symbol == symbol.upper()]
-        for evaluation in evaluations:
-            if signal_id in evaluation.linked_signal_ids:
-                continue
-            updated = evaluation.model_copy(update={"linked_signal_ids": [*evaluation.linked_signal_ids, signal_id]})
-            self.evaluations[updated.id] = updated
-            await self._persist(updated)
-
     def _build_marks(self, evaluation: AlphaEventEvaluation) -> list[AlphaEventEvaluationMark]:
         marks: list[AlphaEventEvaluationMark] = []
         seen: set[str] = set()
@@ -488,7 +477,6 @@ def _evaluation_from_event(
         urgency=str(metadata.get("urgency") or ("breaking" if event.freshness == "breaking" else "normal")),
         freshness=event.freshness,
         market_regime=market_regime,
-        linked_signal_ids=list(metadata.get("linked_signal_ids") or []),
         metadata={
             "raw_event": event.model_dump(mode="json"),
             "capture_policy": {

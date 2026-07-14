@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from hyperliquid_trading_agent.app.autonomy.schemas import RoleLessonMemory, TradeSignal
-from hyperliquid_trading_agent.app.config import Settings
+from hyperliquid_trading_agent.app.autonomy.schemas import RoleLessonMemory
 from hyperliquid_trading_agent.app.governance.policy import MemoryPolicyEngine
 from hyperliquid_trading_agent.app.governance.review import ReviewWorkflowService
-from hyperliquid_trading_agent.app.governance.risk_gateway import RiskGateway
 from hyperliquid_trading_agent.app.governance.shadow import ShadowComparisonService
 
 
@@ -36,32 +34,6 @@ def test_memory_policy_blocks_candidate_and_execution_contexts():
     assert not policy.can_inject(candidate, role="research").allowed
     assert policy.can_inject(advisory, role="research").allowed
     assert not policy.can_inject(advisory, role="execution").allowed
-
-
-@pytest.mark.asyncio
-async def test_risk_gateway_rejects_exchange_actions_and_disabled_live():
-    signal = TradeSignal(
-        id="sig_bad",
-        symbol="BTC",
-        side="long",
-        signal_type="trend",
-        score=80,
-        confidence=0.7,
-        created_at_ms=1,
-        expires_at_ms=9999999999999,
-        entry=100,
-        stop=95,
-        invalidation="below 95",
-        thesis="up",
-        risk_plan={"exchange_actions": [{"type": "order"}]},
-    )
-
-    decision = await RiskGateway(settings=Settings()).check_signal(signal, mode="live", asset_class="crypto")
-
-    codes = {item["code"] for item in decision.violations}
-    assert decision.decision == "reject"
-    assert "exchange_actions_present" in codes
-    assert "live_crypto_disabled" in codes
 
 
 @pytest.mark.asyncio

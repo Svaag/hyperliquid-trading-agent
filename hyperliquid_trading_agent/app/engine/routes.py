@@ -15,7 +15,6 @@ from hyperliquid_trading_agent.app.engine.news_risk_counterfactual import (
     list_news_risk_counterfactuals,
     run_news_risk_counterfactual,
 )
-from hyperliquid_trading_agent.app.engine.operator_proposals import project_operator_proposal_to_trade_signal
 from hyperliquid_trading_agent.app.engine.paper_signoff import build_paper_signoff_preflight
 from hyperliquid_trading_agent.app.engine.readiness import build_paper_readiness_scorecard
 from hyperliquid_trading_agent.app.engine.replay_compare import (
@@ -23,7 +22,6 @@ from hyperliquid_trading_agent.app.engine.replay_compare import (
     list_engine_replay_comparisons,
 )
 from hyperliquid_trading_agent.app.engine.runtime import resolve_engine_runtime
-from hyperliquid_trading_agent.app.engine.signal_comparison import build_signal_path_comparison
 from hyperliquid_trading_agent.app.engine.signal_quality import build_signal_quality_report
 from hyperliquid_trading_agent.app.engine.validation_report import (
     build_engine_validation_report,
@@ -286,7 +284,7 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
         item = await _repo().get_engine_operator_proposal(proposal_id)
         if item is None:
             raise HTTPException(status_code=404, detail="engine operator proposal not found")
-        return {**item, "signal_projection": project_operator_proposal_to_trade_signal(item)}
+        return item
 
     @app.post("/engine/operator-proposals/{proposal_id}/acknowledge", status_code=202)
     async def acknowledge_engine_operator_proposal(
@@ -595,22 +593,6 @@ def register_engine_routes(app: FastAPI, settings: Settings, require_auth: Requi
     async def engine_validation_report(limit: int = 500, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _auth(authorization)
         return await build_engine_validation_report(_repo(), limit=limit, settings=settings)
-
-    @app.get("/engine/signal-comparison")
-    async def engine_signal_comparison(
-        window_hours: int = 24,
-        limit: int = 5000,
-        overlap_tolerance_minutes: int = 30,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _auth(authorization)
-        return await build_signal_path_comparison(
-            _repo(),
-            settings=settings,
-            window_hours=max(1, min(24 * 90, window_hours)),
-            limit=max(1, min(20_000, limit)),
-            overlap_tolerance_minutes=max(1, min(24 * 60, overlap_tolerance_minutes)),
-        )
 
     @app.get("/engine/signal-quality")
     async def engine_signal_quality(

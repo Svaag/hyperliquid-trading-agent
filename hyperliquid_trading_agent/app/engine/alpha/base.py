@@ -38,7 +38,7 @@ def evaluate_strategy(
     *,
     timestamp_ms: int,
 ) -> StrategyGenerationTrace:
-    """Evaluate a strategy while preserving the legacy ``generate`` contract."""
+    """Evaluate a strategy while preserving the basic ``generate`` contract."""
 
     richer = getattr(strategy, "evaluate", None)
     if callable(richer):

@@ -16,7 +16,6 @@ from hyperliquid_trading_agent.app.autonomy.schemas import (
     PaperPortfolio,
     PaperPosition,
     PortfolioSnapshot,
-    TradeSignal,
 )
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.paper.schemas import PaperTradeDraftRequest
@@ -100,7 +99,6 @@ class PaperPortfolioService:
         order = PaperOrder(
             id=uuid4().hex,
             portfolio_id=portfolio.id,
-            signal_id=None,
             symbol=request.symbol.upper(),
             side=request.side,
             status="new",
@@ -204,7 +202,6 @@ class PaperPortfolioService:
         position = PaperPosition(
             id=uuid4().hex,
             portfolio_id=portfolio.id,
-            signal_id=None,
             symbol=order.symbol,
             side=order.side,
             status="open",
@@ -257,74 +254,6 @@ class PaperPortfolioService:
         if len(matches) > 1:
             raise RiskControlError("multiple open paper positions match symbol; use position id")
         return await self.close_position(matches[0].id, price, reason=reason, timestamp_ms=timestamp_ms)
-
-    async def approve_signal(self, signal: TradeSignal, approved_by: str, mid: float | None = None, timestamp_ms: int | None = None) -> tuple[PaperOrder, PaperFill, PaperPosition]:
-        portfolio = await self.initialize()
-        if portfolio.status != "active":
-            raise RiskControlError("paper portfolio is not active")
-        ts = timestamp_ms or _now_ms()
-        reference_px = mid or signal.entry
-        fill_px = _fill_price(signal.side, reference_px, self.settings.autonomy_paper_default_slippage_bps)
-        quantity = self._sized_quantity(signal, fill_px)
-        if quantity <= 0:
-            raise RiskControlError("risk controls produced zero quantity")
-        notional = quantity * fill_px
-        fee = notional * self.settings.autonomy_paper_taker_fee_bps / 10_000
-        slippage_usd = abs(fill_px - reference_px) * quantity
-        order = PaperOrder(
-            id=uuid4().hex,
-            portfolio_id=portfolio.id,
-            signal_id=signal.id,
-            symbol=signal.symbol,
-            side=signal.side,
-            status="filled",
-            quantity=quantity,
-            requested_px=reference_px,
-            filled_px=fill_px,
-            stop_px=signal.stop,
-            take_profit_px=signal.take_profit,
-            fee_bps=self.settings.autonomy_paper_taker_fee_bps,
-            slippage_bps=self.settings.autonomy_paper_default_slippage_bps,
-            created_at_ms=ts,
-            filled_at_ms=ts,
-            metadata={"approved_by": approved_by, "source": "human_signoff", "exchange_actions": []},
-        )
-        fill = PaperFill(
-            id=uuid4().hex,
-            order_id=order.id,
-            portfolio_id=portfolio.id,
-            symbol=signal.symbol,
-            side=signal.side,
-            quantity=quantity,
-            price=fill_px,
-            fee_usd=fee,
-            slippage_usd=slippage_usd,
-            created_at_ms=ts,
-            metadata={"signal_id": signal.id, "exchange_actions": []},
-        )
-        position = PaperPosition(
-            id=uuid4().hex,
-            portfolio_id=portfolio.id,
-            signal_id=signal.id,
-            symbol=signal.symbol,
-            side=signal.side,
-            status="open",
-            quantity=quantity,
-            avg_entry_px=fill_px,
-            mark_px=fill_px,
-            stop_px=signal.stop,
-            take_profit_px=signal.take_profit,
-            opened_at_ms=ts,
-            metadata={"order_id": order.id, "signal_id": signal.id, "approved_by": approved_by, "exchange_actions": []},
-        )
-        portfolio.cash_usd -= fee
-        portfolio.updated_at_ms = ts
-        self.orders[order.id] = order
-        self.fills[fill.id] = fill
-        self.positions[position.id] = position
-        await self._persist_order_fill_position(order, fill, position)
-        await self.snapshot(ts)
-        return order, fill, position
 
     async def mark_to_market(self, mids: dict[str, float], timestamp_ms: int | None = None) -> list[PaperPosition]:
         await self.initialize()
@@ -416,45 +345,6 @@ class PaperPortfolioService:
             if item.symbol == symbol and item.side == opposite:
                 return item
         return None
-
-    def sizing_diagnostics(self, signal: TradeSignal, fill_px: float) -> dict[str, Any]:
-        portfolio = self.portfolio
-        latest = self.latest_snapshot()
-        equity = latest.equity_usd if latest is not None else (portfolio.cash_usd if portfolio else 0.0)
-        risk_pct = self.settings.autonomy_paper_risk_pct_per_trade
-        max_single_pct = self.settings.autonomy_paper_max_single_name_exposure_pct
-        max_gross = self.settings.autonomy_paper_max_gross_leverage
-        risk_usd = equity * risk_pct / 100
-        stop_distance = abs(fill_px - signal.stop)
-        current_symbol_exposure = sum(
-            exposure_usd(item) for item in self.open_positions() if item.symbol == signal.symbol
-        )
-        current_gross = sum(exposure_usd(item) for item in self.open_positions())
-        opposing = self.find_opposing_position(signal.symbol, signal.side)
-        return {
-            "equity_usd": round(equity, 2),
-            "risk_pct": risk_pct,
-            "risk_usd": round(risk_usd, 2),
-            "stop_distance": round(stop_distance, 8),
-            "max_single_name_exposure_pct": max_single_pct,
-            "max_single_name_exposure_usd": round(equity * max_single_pct / 100, 2),
-            "current_symbol_exposure_usd": round(current_symbol_exposure, 2),
-            "max_gross_leverage": max_gross,
-            "max_gross_exposure_usd": round(equity * max_gross, 2),
-            "current_gross_exposure_usd": round(current_gross, 2),
-            "opposing_position_id": opposing.id if opposing else None,
-            "opposing_position_side": opposing.side if opposing else None,
-            "opposing_position_quantity": opposing.quantity if opposing else None,
-        }
-
-    def _sized_quantity(self, signal: TradeSignal, fill_px: float) -> float:
-        return self._sized_quantity_from_values(
-            symbol=signal.symbol,
-            side=signal.side,
-            entry_px=fill_px,
-            stop_px=signal.stop,
-            risk_pct=self.settings.autonomy_paper_risk_pct_per_trade,
-        )
 
     def _sized_quantity_from_values(
         self,
@@ -591,7 +481,6 @@ def _order_from_dict(data: dict) -> PaperOrder:
     return PaperOrder(
         id=str(data["id"]),
         portfolio_id=str(data["portfolio_id"]),
-        signal_id=data.get("signal_id"),
         symbol=str(data.get("symbol") or "").upper(),
         side=str(data.get("side") or "long"),  # type: ignore[arg-type]
         order_type=str(data.get("order_type") or "market"),  # type: ignore[arg-type]
@@ -630,7 +519,6 @@ def _position_from_dict(data: dict) -> PaperPosition:
     return PaperPosition(
         id=str(data["id"]),
         portfolio_id=str(data["portfolio_id"]),
-        signal_id=data.get("signal_id"),
         symbol=str(data.get("symbol") or "").upper(),
         side=str(data.get("side") or "long"),  # type: ignore[arg-type]
         status=str(data.get("status") or "open"),  # type: ignore[arg-type]

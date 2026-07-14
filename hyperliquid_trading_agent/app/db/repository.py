@@ -129,8 +129,6 @@ from hyperliquid_trading_agent.app.db.models import (
     ServiceHeartbeatRecord,
     ShadowComparisonRecord,
     ShadowRoleLessonRecord,
-    SignalEvaluationMarkRecord,
-    SignalEvaluationRecord,
     SourceCredibilityRecord,
     StrategyRegimePerformanceRecord,
     StrategySpecRecord,
@@ -139,7 +137,6 @@ from hyperliquid_trading_agent.app.db.models import (
     TrackedLevel,
     TrackingEvent,
     TradeProposalRecord,
-    TradeSignalRecord,
     TuningProposalRecord,
     UniverseSnapshotRecord,
     VenueMarketSnapshotRecord,
@@ -3083,7 +3080,7 @@ class Repository:
                 ):
                     candidate_strategy_metadata_covered_count += 1
                 counts_for_breadth = bool(metadata.get("counts_for_breadth", True))
-                if not counts_for_breadth or family in {"legacy_bridge", "risk_off_defensive"} or side == "flat":
+                if not counts_for_breadth or family == "risk_off_defensive" or side == "flat":
                     continue
                 strategy = str(strategy_value or "unknown")
                 active_strategies.add(strategy)
@@ -5487,158 +5484,6 @@ class Repository:
         except Exception as exc:
             return {"ok": False, "error": type(exc).__name__}
 
-    async def create_or_update_trade_signal(self, signal: dict[str, Any], approved_by: str | None = None, rejected_by: str | None = None) -> None:
-        if self.sessionmaker is None:
-            return
-        async with self.sessionmaker() as session:
-            item = await session.get(TradeSignalRecord, str(signal["id"]))
-            if item is None:
-                item = TradeSignalRecord(id=str(signal["id"]), symbol=str(signal.get("symbol") or "").upper(), side=str(signal.get("side") or "long"), signal_type=str(signal.get("signal_type") or "unknown"), status=str(signal.get("status") or "candidate"), score=float(signal.get("score") or 0), confidence=float(signal.get("confidence") or 0), created_at_ms=int(signal.get("created_at_ms") or 0), expires_at_ms=int(signal.get("expires_at_ms") or 0), entry_px=float(signal.get("entry") or 0), stop_px=float(signal.get("stop") or 0))
-                session.add(item)
-            item.symbol = str(signal.get("symbol") or item.symbol).upper()
-            item.side = str(signal.get("side") or item.side)
-            item.signal_type = str(signal.get("signal_type") or item.signal_type)
-            item.status = str(signal.get("status") or item.status)
-            item.score = float(signal.get("score") or item.score)
-            item.confidence = float(signal.get("confidence") or item.confidence)
-            item.created_at_ms = int(signal.get("created_at_ms") or item.created_at_ms)
-            item.expires_at_ms = int(signal.get("expires_at_ms") or item.expires_at_ms)
-            item.entry_px = float(signal.get("entry") or item.entry_px)
-            item.stop_px = float(signal.get("stop") or item.stop_px)
-            item.take_profit_px = signal.get("take_profit")
-            item.thesis = str(signal.get("thesis") or "")
-            item.invalidation = str(signal.get("invalidation") or "")
-            item.evidence_json = list(signal.get("evidence") or [])
-            item.feature_snapshot_json = redact_secrets(dict(signal.get("feature_snapshot") or {}))
-            item.risk_plan_json = redact_secrets(dict(signal.get("risk_plan") or {}))
-            item.model_insight_json = redact_secrets(signal.get("model_insight")) if signal.get("model_insight") is not None else None
-            item.discord_channel_id = signal.get("discord_channel_id")
-            item.discord_message_id = signal.get("discord_message_id")
-            item.asset_class = str((signal.get("metadata") or {}).get("asset_class") or signal.get("asset_class") or item.asset_class or "crypto")
-            item.metadata_json = redact_secrets(dict(signal.get("metadata") or {}))
-            if approved_by:
-                item.approved_by_discord_user_id = approved_by
-                item.approved_at = datetime.now(UTC)
-            if rejected_by:
-                item.rejected_by_discord_user_id = rejected_by
-                item.rejected_at = datetime.now(UTC)
-            await session.commit()
-
-    async def get_autonomy_trade_signal(self, signal_id: str) -> dict[str, Any] | None:
-        if self.sessionmaker is None:
-            return None
-        async with self.sessionmaker() as session:
-            item = await session.get(TradeSignalRecord, signal_id)
-            return _trade_signal_to_dict(item) if item is not None else None
-
-    async def list_autonomy_trade_signals(self, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
-        if self.sessionmaker is None:
-            return []
-        async with self.sessionmaker() as session:
-            stmt = select(TradeSignalRecord).order_by(TradeSignalRecord.created_at_ms.desc()).limit(limit)
-            if status:
-                stmt = stmt.where(TradeSignalRecord.status == status)
-            result = await session.execute(stmt)
-            return [_trade_signal_to_dict(item) for item in result.scalars().all()]
-
-    async def upsert_signal_evaluation(self, evaluation: dict[str, Any]) -> None:
-        if self.sessionmaker is None:
-            return
-        try:
-            async with self.sessionmaker() as session:
-                item = await session.get(SignalEvaluationRecord, str(evaluation["id"]))
-                if item is None:
-                    result = await session.execute(select(SignalEvaluationRecord).where(SignalEvaluationRecord.signal_id == str(evaluation["signal_id"])))
-                    item = result.scalar_one_or_none()
-                if item is None:
-                    item = SignalEvaluationRecord(id=str(evaluation["id"]), signal_id=str(evaluation["signal_id"]), symbol=str(evaluation.get("symbol") or "").upper(), side=str(evaluation.get("side") or "long"), signal_type=str(evaluation.get("signal_type") or "unknown"), status=str(evaluation.get("status") or "open"), created_at_ms=int(evaluation.get("created_at_ms") or 0), entry_px=float(evaluation.get("entry") or 0), stop_px=float(evaluation.get("stop") or 0), signal_score=float(evaluation.get("signal_score") or 0), signal_confidence=float(evaluation.get("signal_confidence") or 0), signal_status_at_eval_start=str(evaluation.get("signal_status_at_eval_start") or "unknown"), terminal_outcome=str(evaluation.get("terminal_outcome") or "open"))
-                    session.add(item)
-                _apply_signal_evaluation(item, evaluation)
-                await session.commit()
-        except Exception as exc:  # pragma: no cover
-            log.warning("signal_evaluation_upsert_failed", signal_id=evaluation.get("signal_id"), error=type(exc).__name__)
-
-    async def upsert_signal_evaluation_mark(self, mark: dict[str, Any]) -> None:
-        if self.sessionmaker is None:
-            return
-        try:
-            async with self.sessionmaker() as session:
-                item = await session.get(SignalEvaluationMarkRecord, str(mark["id"]))
-                if item is None:
-                    result = await session.execute(select(SignalEvaluationMarkRecord).where(SignalEvaluationMarkRecord.signal_id == str(mark["signal_id"]), SignalEvaluationMarkRecord.horizon == str(mark["horizon"])))
-                    item = result.scalar_one_or_none()
-                if item is None:
-                    item = SignalEvaluationMarkRecord(id=str(mark["id"]), evaluation_id=str(mark["evaluation_id"]), signal_id=str(mark["signal_id"]), symbol=str(mark.get("symbol") or "").upper(), horizon=str(mark.get("horizon") or ""), due_at_ms=int(mark.get("due_at_ms") or 0), status=str(mark.get("status") or "pending"))
-                    session.add(item)
-                _apply_signal_evaluation_mark(item, mark)
-                await session.commit()
-        except Exception as exc:  # pragma: no cover
-            log.warning("signal_evaluation_mark_upsert_failed", signal_id=mark.get("signal_id"), horizon=mark.get("horizon"), error=type(exc).__name__)
-
-    async def upsert_signal_evaluation_marks(self, marks: list[dict[str, Any]]) -> None:
-        for mark in marks:
-            await self.upsert_signal_evaluation_mark(mark)
-
-    async def get_signal_evaluation(self, evaluation_id: str) -> dict[str, Any] | None:
-        if self.sessionmaker is None:
-            return None
-        async with self.sessionmaker() as session:
-            item = await session.get(SignalEvaluationRecord, evaluation_id)
-            if item is None:
-                return None
-            return await self._signal_evaluation_to_dict(session, item)
-
-    async def get_signal_evaluation_by_signal_id(self, signal_id: str) -> dict[str, Any] | None:
-        if self.sessionmaker is None:
-            return None
-        async with self.sessionmaker() as session:
-            result = await session.execute(select(SignalEvaluationRecord).where(SignalEvaluationRecord.signal_id == signal_id))
-            item = result.scalar_one_or_none()
-            if item is None:
-                return None
-            return await self._signal_evaluation_to_dict(session, item)
-
-    async def list_signal_evaluations(self, status: str | None = None, symbol: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
-        if self.sessionmaker is None:
-            return []
-        async with self.sessionmaker() as session:
-            stmt = select(SignalEvaluationRecord).order_by(SignalEvaluationRecord.created_at_ms.desc()).limit(limit)
-            if status:
-                stmt = stmt.where(SignalEvaluationRecord.status == status)
-            if symbol:
-                stmt = stmt.where(SignalEvaluationRecord.symbol == symbol.upper())
-            result = await session.execute(stmt)
-            return [await self._signal_evaluation_to_dict(session, item) for item in result.scalars().all()]
-
-    async def list_open_signal_evaluations(self, symbol: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
-        if self.sessionmaker is None:
-            return []
-        async with self.sessionmaker() as session:
-            stmt = select(SignalEvaluationRecord).where(SignalEvaluationRecord.status.in_(["open", "partial"])).order_by(SignalEvaluationRecord.created_at_ms.desc()).limit(limit)
-            if symbol:
-                stmt = stmt.where(SignalEvaluationRecord.symbol == symbol.upper())
-            result = await session.execute(stmt)
-            return [await self._signal_evaluation_to_dict(session, item) for item in result.scalars().all()]
-
-    async def list_due_signal_evaluation_marks(self, now_ms: int, limit: int = 500) -> list[dict[str, Any]]:
-        if self.sessionmaker is None:
-            return []
-        async with self.sessionmaker() as session:
-            result = await session.execute(select(SignalEvaluationMarkRecord).where(SignalEvaluationMarkRecord.status == "pending", SignalEvaluationMarkRecord.due_at_ms <= now_ms).order_by(SignalEvaluationMarkRecord.due_at_ms.asc()).limit(limit))
-            return [_signal_evaluation_mark_to_dict(item) for item in result.scalars().all()]
-
-    async def list_signal_evaluation_marks(self, evaluation_id: str | None = None, signal_id: str | None = None) -> list[dict[str, Any]]:
-        if self.sessionmaker is None:
-            return []
-        async with self.sessionmaker() as session:
-            stmt = select(SignalEvaluationMarkRecord).order_by(SignalEvaluationMarkRecord.due_at_ms.asc())
-            if evaluation_id:
-                stmt = stmt.where(SignalEvaluationMarkRecord.evaluation_id == evaluation_id)
-            if signal_id:
-                stmt = stmt.where(SignalEvaluationMarkRecord.signal_id == signal_id)
-            result = await session.execute(stmt)
-            return [_signal_evaluation_mark_to_dict(item) for item in result.scalars().all()]
-
     async def upsert_alpha_event_evaluation(self, evaluation: dict[str, Any]) -> None:
         if self.sessionmaker is None:
             return
@@ -5729,7 +5574,7 @@ class Repository:
         if self.sessionmaker is None:
             return None
         async with self.sessionmaker() as session:
-            item = MemoryObservationRecord(id=str(observation["id"]), source_type=str(observation.get("source_type") or "signal_evaluation"), source_id=str(observation.get("source_id") or ""), role=observation.get("role"), symbol=str(observation["symbol"]).upper() if observation.get("symbol") else None, signal_type=observation.get("signal_type"), market_regime=observation.get("market_regime"), observation=str(observation.get("observation") or ""), evidence_json=redact_secrets(list(observation.get("evidence") or [])), severity=str(observation.get("severity") or "info"), created_at_ms=int(observation.get("created_at_ms") or 0), metadata_json=redact_secrets(dict(observation.get("metadata") or {})))
+            item = MemoryObservationRecord(id=str(observation["id"]), source_type=str(observation.get("source_type") or "event_evaluation"), source_id=str(observation.get("source_id") or ""), role=observation.get("role"), symbol=str(observation["symbol"]).upper() if observation.get("symbol") else None, signal_type=observation.get("signal_type"), market_regime=observation.get("market_regime"), observation=str(observation.get("observation") or ""), evidence_json=redact_secrets(list(observation.get("evidence") or [])), severity=str(observation.get("severity") or "info"), created_at_ms=int(observation.get("created_at_ms") or 0), metadata_json=redact_secrets(dict(observation.get("metadata") or {})))
             session.add(item)
             await session.commit()
             return item.id
@@ -5861,7 +5706,7 @@ class Repository:
         if self.sessionmaker is None:
             return None
         async with self.sessionmaker() as session:
-            item = OperatorFeedbackRecord(id=str(feedback["id"]), source=str(feedback.get("source") or "api"), actor_id=feedback.get("actor_id"), target_type=str(feedback.get("target_type") or "signal"), target_id=str(feedback.get("target_id") or ""), rating=str(feedback.get("rating") or "unclear"), note=str(feedback.get("note") or ""), created_at_ms=int(feedback.get("created_at_ms") or 0), metadata_json=redact_secrets(dict(feedback.get("metadata") or {})))
+            item = OperatorFeedbackRecord(id=str(feedback["id"]), source=str(feedback.get("source") or "api"), actor_id=feedback.get("actor_id"), target_type=str(feedback.get("target_type") or "bot"), target_id=str(feedback.get("target_id") or ""), rating=str(feedback.get("rating") or "unclear"), note=str(feedback.get("note") or ""), created_at_ms=int(feedback.get("created_at_ms") or 0), metadata_json=redact_secrets(dict(feedback.get("metadata") or {})))
             session.add(item)
             await session.commit()
             return item.id
@@ -6200,7 +6045,7 @@ class Repository:
             item = cast(DailyReportRecord | WeeklyReportRecord | None, result.scalar_one_or_none())
             return _autonomy_report_to_dict(item, report_type) if item is not None else None
 
-    async def create_or_get_paper_portfolio(self, name: str, initial_equity_usd: float, mode: str = "paper_signoff") -> dict[str, Any]:
+    async def create_or_get_paper_portfolio(self, name: str, initial_equity_usd: float, mode: str = "observation") -> dict[str, Any]:
         if self.sessionmaker is None:
             raise RuntimeError("repository disabled")
         async with self.sessionmaker() as session:
@@ -6219,7 +6064,7 @@ class Repository:
         async with self.sessionmaker() as session:
             item = await session.get(PaperOrderRecord, str(order["id"]))
             if item is None:
-                item = PaperOrderRecord(id=str(order["id"]), portfolio_id=str(order["portfolio_id"]), signal_id=order.get("signal_id"), symbol=str(order.get("symbol") or "").upper(), side=str(order.get("side") or "long"), order_type=str(order.get("order_type") or "market"), status=str(order.get("status") or "new"), quantity=float(order.get("quantity") or 0), fee_bps=float(order.get("fee_bps") or 0), slippage_bps=float(order.get("slippage_bps") or 0))
+                item = PaperOrderRecord(id=str(order["id"]), portfolio_id=str(order["portfolio_id"]), symbol=str(order.get("symbol") or "").upper(), side=str(order.get("side") or "long"), order_type=str(order.get("order_type") or "market"), status=str(order.get("status") or "new"), quantity=float(order.get("quantity") or 0), fee_bps=float(order.get("fee_bps") or 0), slippage_bps=float(order.get("slippage_bps") or 0))
                 session.add(item)
             item.status = str(order.get("status") or item.status)
             item.requested_px = order.get("requested_px")
@@ -6262,7 +6107,7 @@ class Repository:
         async with self.sessionmaker() as session:
             item = await session.get(PaperPositionRecord, str(position["id"]))
             if item is None:
-                item = PaperPositionRecord(id=str(position["id"]), portfolio_id=str(position["portfolio_id"]), signal_id=position.get("signal_id"), symbol=str(position.get("symbol") or "").upper(), side=str(position.get("side") or "long"), status=str(position.get("status") or "open"), quantity=float(position.get("quantity") or 0), avg_entry_px=float(position.get("avg_entry_px") or 0), stop_px=float(position.get("stop_px") or 0), opened_at=_datetime_from_ms(int(position.get("opened_at_ms") or 0)))
+                item = PaperPositionRecord(id=str(position["id"]), portfolio_id=str(position["portfolio_id"]), symbol=str(position.get("symbol") or "").upper(), side=str(position.get("side") or "long"), status=str(position.get("status") or "open"), quantity=float(position.get("quantity") or 0), avg_entry_px=float(position.get("avg_entry_px") or 0), stop_px=float(position.get("stop_px") or 0), opened_at=_datetime_from_ms(int(position.get("opened_at_ms") or 0)))
                 session.add(item)
             item.status = str(position.get("status") or item.status)
             item.mark_px = position.get("mark_px")
@@ -6575,12 +6420,6 @@ class Repository:
             "updated_at": tracker.updated_at.isoformat() if tracker.updated_at else None,
         }
 
-    async def _signal_evaluation_to_dict(self, session: AsyncSession, item: SignalEvaluationRecord) -> dict[str, Any]:
-        result = await session.execute(select(SignalEvaluationMarkRecord).where(SignalEvaluationMarkRecord.evaluation_id == item.id).order_by(SignalEvaluationMarkRecord.due_at_ms.asc()))
-        data = _signal_evaluation_to_dict(item)
-        data["marks"] = [_signal_evaluation_mark_to_dict(mark) for mark in result.scalars().all()]
-        return data
-
     async def _alpha_event_evaluation_to_dict(self, session: AsyncSession, item: AlphaEventEvaluationRecord) -> dict[str, Any]:
         result = await session.execute(select(AlphaEventEvaluationMarkRecord).where(AlphaEventEvaluationMarkRecord.evaluation_id == item.id).order_by(AlphaEventEvaluationMarkRecord.due_at_ms.asc()))
         data = _alpha_event_evaluation_to_dict(item)
@@ -6588,71 +6427,11 @@ class Repository:
         return data
 
 
-def _apply_signal_evaluation(item: SignalEvaluationRecord, data: dict[str, Any]) -> None:
-    item.symbol = str(data.get("symbol") or item.symbol).upper()
-    item.side = str(data.get("side") or item.side)
-    item.signal_type = str(data.get("signal_type") or item.signal_type)
-    item.status = str(data.get("status") or item.status)
-    item.completed_at_ms = data.get("completed_at_ms")
-    item.entry_px = _float_value(data.get("entry"), item.entry_px)
-    item.stop_px = _float_value(data.get("stop"), item.stop_px)
-    item.take_profit_px = data.get("take_profit")
-    item.signal_score = _float_value(data.get("signal_score"), item.signal_score)
-    item.signal_confidence = _float_value(data.get("signal_confidence"), item.signal_confidence)
-    item.signal_status_at_eval_start = str(data.get("signal_status_at_eval_start") or item.signal_status_at_eval_start)
-    item.first_price = data.get("first_price")
-    item.latest_price = data.get("latest_price")
-    item.latest_price_at_ms = data.get("latest_price_at_ms")
-    item.max_favorable_price = data.get("max_favorable_price")
-    item.max_adverse_price = data.get("max_adverse_price")
-    item.max_favorable_bps = data.get("max_favorable_bps")
-    item.max_adverse_bps = data.get("max_adverse_bps")
-    item.max_favorable_r = data.get("max_favorable_r")
-    item.max_adverse_r = data.get("max_adverse_r")
-    item.stop_hit = bool(data.get("stop_hit"))
-    item.stop_hit_at_ms = data.get("stop_hit_at_ms")
-    item.take_profit_hit = bool(data.get("take_profit_hit"))
-    item.take_profit_hit_at_ms = data.get("take_profit_hit_at_ms")
-    item.terminal_outcome = str(data.get("terminal_outcome") or item.terminal_outcome)
-    item.realized_or_marked_r = data.get("realized_or_marked_r")
-    item.opportunity_cost_r = data.get("opportunity_cost_r")
-    item.approved = bool(data.get("approved"))
-    item.rejected = bool(data.get("rejected"))
-    item.paper_ordered = bool(data.get("paper_ordered"))
-    item.paper_position_id = data.get("paper_position_id")
-    item.feature_snapshot_json = redact_secrets(dict(data.get("feature_snapshot") or {}))
-    item.evidence_snapshot_json = redact_secrets(list(data.get("evidence_snapshot") or []))
-    item.market_regime = str(data.get("market_regime") or "unknown")
-    item.error = str(data.get("error") or "")
-    item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
-    item.updated_at = datetime.now(UTC)
-
-
 def _float_value(value: Any, fallback: float) -> float:
     try:
         return float(fallback if value is None else value)
     except (TypeError, ValueError):
         return float(fallback)
-
-
-def _apply_signal_evaluation_mark(item: SignalEvaluationMarkRecord, data: dict[str, Any]) -> None:
-    item.evaluation_id = str(data.get("evaluation_id") or item.evaluation_id)
-    item.signal_id = str(data.get("signal_id") or item.signal_id)
-    item.symbol = str(data.get("symbol") or item.symbol).upper()
-    item.horizon = str(data.get("horizon") or item.horizon)
-    item.due_at_ms = int(data.get("due_at_ms") or item.due_at_ms)
-    item.marked_at_ms = data.get("marked_at_ms")
-    item.price = data.get("price")
-    item.direction_adjusted_return_bps = data.get("direction_adjusted_return_bps")
-    item.r_multiple = data.get("r_multiple")
-    item.mfe_bps_until_mark = data.get("mfe_bps_until_mark")
-    item.mae_bps_until_mark = data.get("mae_bps_until_mark")
-    item.mfe_r_until_mark = data.get("mfe_r_until_mark")
-    item.mae_r_until_mark = data.get("mae_r_until_mark")
-    item.stop_hit_before_mark = bool(data.get("stop_hit_before_mark"))
-    item.take_profit_hit_before_mark = bool(data.get("take_profit_hit_before_mark"))
-    item.status = str(data.get("status") or item.status)
-    item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
 
 
 def _apply_alpha_event_evaluation(item: AlphaEventEvaluationRecord, data: dict[str, Any]) -> None:
@@ -6685,7 +6464,6 @@ def _apply_alpha_event_evaluation(item: AlphaEventEvaluationRecord, data: dict[s
     item.max_adverse_bps = data.get("max_adverse_bps")
     item.max_abs_move_bps = data.get("max_abs_move_bps")
     item.realized_or_marked_bps = data.get("realized_or_marked_bps")
-    item.linked_signal_ids_json = list(data.get("linked_signal_ids") or [])
     item.error = str(data.get("error") or "")
     item.metadata_json = redact_secrets(dict(data.get("metadata") or {}))
     item.updated_at = datetime.now(UTC)
@@ -6717,7 +6495,6 @@ def _apply_candidate_lesson(item: CandidateLessonRecord, data: dict[str, Any]) -
     item.evidence_json = redact_secrets(list(data.get("evidence") or []))
     item.source_observation_ids_json = list(data.get("source_observation_ids") or [])
     item.source_run_ids_json = list(data.get("source_run_ids") or [])
-    item.source_signal_ids_json = list(data.get("source_signal_ids") or [])
     item.sample_size = int(data.get("sample_size") or 0)
     item.counterexamples_json = redact_secrets(list(data.get("counterexamples") or []))
     item.confidence = float(data.get("confidence") or 0)
@@ -6741,7 +6518,6 @@ def _apply_role_lesson(item: ShadowRoleLessonRecord | RoleLessonRecord, data: di
     item.evidence_json = redact_secrets(list(data.get("evidence") or []))
     item.source_candidate_id = data.get("source_candidate_id")
     item.source_run_ids_json = list(data.get("source_run_ids") or [])
-    item.source_signal_ids_json = list(data.get("source_signal_ids") or [])
     item.confidence = float(data.get("confidence") or 0)
     item.sample_size = int(data.get("sample_size") or 0)
     item.counterexamples_json = redact_secrets(list(data.get("counterexamples") or []))
@@ -6806,7 +6582,6 @@ def _apply_tuning_proposal(item: TuningProposalRecord, data: dict[str, Any]) -> 
     item.proposed_diff_json = redact_secrets(dict(data.get("proposed_diff") or {}))
     item.evidence_json = redact_secrets(list(data.get("evidence") or []))
     item.source_lesson_ids_json = list(data.get("source_lesson_ids") or [])
-    item.source_signal_ids_json = list(data.get("source_signal_ids") or [])
     item.strategy_id = str(data.get("strategy_id") or item.strategy_id)
     item.change_type = str(data.get("change_type") or item.change_type)
     item.risk_direction = str(data.get("risk_direction") or item.risk_direction)
@@ -8038,34 +7813,6 @@ def _decision_context_to_dict(item: DecisionContextRecord) -> dict[str, Any]:
     }
 
 
-def _trade_signal_to_dict(item: TradeSignalRecord) -> dict[str, Any]:
-    metadata = dict(item.metadata_json or {})
-    metadata.setdefault("asset_class", item.asset_class)
-    return {
-        "id": item.id,
-        "symbol": item.symbol,
-        "side": item.side,
-        "signal_type": item.signal_type,
-        "status": item.status,
-        "score": item.score,
-        "confidence": item.confidence,
-        "created_at_ms": item.created_at_ms,
-        "expires_at_ms": item.expires_at_ms,
-        "entry": item.entry_px,
-        "stop": item.stop_px,
-        "take_profit": item.take_profit_px,
-        "thesis": item.thesis,
-        "invalidation": item.invalidation,
-        "evidence": item.evidence_json,
-        "feature_snapshot": item.feature_snapshot_json,
-        "risk_plan": item.risk_plan_json,
-        "model_insight": item.model_insight_json,
-        "discord_channel_id": item.discord_channel_id,
-        "discord_message_id": item.discord_message_id,
-        "metadata": metadata,
-    }
-
-
 def _paper_portfolio_to_dict(item: PaperPortfolioRecord) -> dict[str, Any]:
     return {
         "id": item.id,
@@ -8084,7 +7831,6 @@ def _paper_order_to_dict(item: PaperOrderRecord) -> dict[str, Any]:
     return {
         "id": item.id,
         "portfolio_id": item.portfolio_id,
-        "signal_id": item.signal_id,
         "symbol": item.symbol,
         "side": item.side,
         "order_type": item.order_type,
@@ -8123,7 +7869,6 @@ def _paper_position_to_dict(item: PaperPositionRecord) -> dict[str, Any]:
     return {
         "id": item.id,
         "portfolio_id": item.portfolio_id,
-        "signal_id": item.signal_id,
         "symbol": item.symbol,
         "side": item.side,
         "status": item.status,
@@ -8233,76 +7978,6 @@ def _equity_paper_position_to_dict(item: EquityPaperPositionRecord) -> dict[str,
     }
 
 
-def _signal_evaluation_to_dict(item: SignalEvaluationRecord) -> dict[str, Any]:
-    return {
-        "id": item.id,
-        "signal_id": item.signal_id,
-        "symbol": item.symbol,
-        "side": item.side,
-        "signal_type": item.signal_type,
-        "status": item.status,
-        "created_at_ms": item.created_at_ms,
-        "completed_at_ms": item.completed_at_ms,
-        "entry": item.entry_px,
-        "stop": item.stop_px,
-        "take_profit": item.take_profit_px,
-        "signal_score": item.signal_score,
-        "signal_confidence": item.signal_confidence,
-        "signal_status_at_eval_start": item.signal_status_at_eval_start,
-        "first_price": item.first_price,
-        "latest_price": item.latest_price,
-        "latest_price_at_ms": item.latest_price_at_ms,
-        "max_favorable_price": item.max_favorable_price,
-        "max_adverse_price": item.max_adverse_price,
-        "max_favorable_bps": item.max_favorable_bps,
-        "max_adverse_bps": item.max_adverse_bps,
-        "max_favorable_r": item.max_favorable_r,
-        "max_adverse_r": item.max_adverse_r,
-        "stop_hit": item.stop_hit,
-        "stop_hit_at_ms": item.stop_hit_at_ms,
-        "take_profit_hit": item.take_profit_hit,
-        "take_profit_hit_at_ms": item.take_profit_hit_at_ms,
-        "terminal_outcome": item.terminal_outcome,
-        "realized_or_marked_r": item.realized_or_marked_r,
-        "opportunity_cost_r": item.opportunity_cost_r,
-        "approved": item.approved,
-        "rejected": item.rejected,
-        "paper_ordered": item.paper_ordered,
-        "paper_position_id": item.paper_position_id,
-        "feature_snapshot": item.feature_snapshot_json,
-        "evidence_snapshot": item.evidence_snapshot_json,
-        "market_regime": item.market_regime,
-        "error": item.error,
-        "metadata": item.metadata_json,
-        "created_at": item.created_at.isoformat() if item.created_at else None,
-        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
-    }
-
-
-def _signal_evaluation_mark_to_dict(item: SignalEvaluationMarkRecord) -> dict[str, Any]:
-    return {
-        "id": item.id,
-        "evaluation_id": item.evaluation_id,
-        "signal_id": item.signal_id,
-        "symbol": item.symbol,
-        "horizon": item.horizon,
-        "due_at_ms": item.due_at_ms,
-        "marked_at_ms": item.marked_at_ms,
-        "price": item.price,
-        "direction_adjusted_return_bps": item.direction_adjusted_return_bps,
-        "r_multiple": item.r_multiple,
-        "mfe_bps_until_mark": item.mfe_bps_until_mark,
-        "mae_bps_until_mark": item.mae_bps_until_mark,
-        "mfe_r_until_mark": item.mfe_r_until_mark,
-        "mae_r_until_mark": item.mae_r_until_mark,
-        "stop_hit_before_mark": item.stop_hit_before_mark,
-        "take_profit_hit_before_mark": item.take_profit_hit_before_mark,
-        "status": item.status,
-        "metadata": item.metadata_json,
-        "created_at": item.created_at.isoformat() if item.created_at else None,
-    }
-
-
 def _alpha_event_evaluation_to_dict(item: AlphaEventEvaluationRecord) -> dict[str, Any]:
     return {
         "id": item.id,
@@ -8335,7 +8010,6 @@ def _alpha_event_evaluation_to_dict(item: AlphaEventEvaluationRecord) -> dict[st
         "max_adverse_bps": item.max_adverse_bps,
         "max_abs_move_bps": item.max_abs_move_bps,
         "realized_or_marked_bps": item.realized_or_marked_bps,
-        "linked_signal_ids": item.linked_signal_ids_json,
         "error": item.error,
         "metadata": item.metadata_json,
         "created_at": item.created_at.isoformat() if item.created_at else None,
@@ -8392,7 +8066,6 @@ def _candidate_lesson_to_dict(item: CandidateLessonRecord) -> dict[str, Any]:
         "evidence": item.evidence_json,
         "source_observation_ids": item.source_observation_ids_json,
         "source_run_ids": item.source_run_ids_json,
-        "source_signal_ids": item.source_signal_ids_json,
         "sample_size": item.sample_size,
         "counterexamples": item.counterexamples_json,
         "confidence": item.confidence,
@@ -8419,7 +8092,6 @@ def _role_lesson_to_dict(item: ShadowRoleLessonRecord | RoleLessonRecord) -> dic
         "evidence": item.evidence_json,
         "source_candidate_id": item.source_candidate_id,
         "source_run_ids": item.source_run_ids_json,
-        "source_signal_ids": item.source_signal_ids_json,
         "confidence": item.confidence,
         "sample_size": item.sample_size,
         "counterexamples": item.counterexamples_json,
@@ -8587,7 +8259,6 @@ def _tuning_proposal_to_dict(item: TuningProposalRecord) -> dict[str, Any]:
         "proposed_diff": item.proposed_diff_json,
         "evidence": item.evidence_json,
         "source_lesson_ids": item.source_lesson_ids_json,
-        "source_signal_ids": item.source_signal_ids_json,
         "strategy_id": item.strategy_id,
         "change_type": item.change_type,
         "risk_direction": item.risk_direction,

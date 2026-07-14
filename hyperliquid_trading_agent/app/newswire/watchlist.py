@@ -101,7 +101,6 @@ class DynamicNewswireWatchSet:
         await self._merge_rows(priorities, warnings, "list_paper_positions", "position", status="open", limit=1000)
         await self._merge_rows(priorities, warnings, "list_equity_paper_positions", "position", status="open", limit=1000)
         await self._merge_rows(priorities, warnings, "list_alpha_candidates", "active", limit=1000)
-        await self._merge_rows(priorities, warnings, "list_autonomy_trade_signals", "active", limit=1000)
         top_count = max(0, int(getattr(self.settings, "newswire_top_volume_watch_count", 20)))
         if top_count:
             try:

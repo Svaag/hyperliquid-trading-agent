@@ -4,7 +4,6 @@ import anyio
 
 from hyperliquid_trading_agent.app.engine.alpha.wave1a import (
     FundingCarryStrategy,
-    LegacySignalAdapterStrategy,
     LiquidationCascadeStrategy,
     LiquidationMeanRevertStrategy,
     MicrostructureOFIV2Strategy,
@@ -57,12 +56,8 @@ def test_wave_1a_registry_has_active_alpha_nucleus():
         "oi_breakout_v1",
         "regime_defensive_flat_v1",
     } <= ids
-    retired = registry.require_spec("legacy_signal_adapter_v1")
-    assert retired.enabled is False
-    assert retired.metadata["retired_reason"] == "institutional_engine_is_canonical_signal_source"
-    alpha_specs = [spec for spec in registry.alpha_breadth_specs() if not spec.strategy_id.startswith("legacy")]
+    alpha_specs = registry.alpha_breadth_specs()
     assert len(alpha_specs) >= 5
-    assert registry.require_spec("legacy_signal_adapter_v1").counts_for_breadth is False
     assert registry.require_spec("regime_defensive_flat_v1").counts_for_breadth is False
 
 
@@ -117,31 +112,6 @@ def test_wave_1a_alpha_strategies_emit_with_required_metadata():
 def test_wave_1a_missing_required_features_prevents_emission():
     assert MicrostructureOFIV2Strategy().generate(_snapshot({"mid": 100.0}), _regime(orderflow_state="buy_pressure"), timestamp_ms=10_000) == []
     assert FundingCarryStrategy().generate(_snapshot({"mid": 100.0, "funding_hourly": 0.0003}), _regime(), timestamp_ms=10_000) == []
-
-
-def test_legacy_adapter_dedupes_contract_and_does_not_count_for_breadth():
-    signal = {
-        "id": "sig_1",
-        "symbol": "BTC",
-        "side": "long",
-        "signal_type": "breakout",
-        "score": 72,
-        "confidence": 0.66,
-        "entry": 100,
-        "stop": 97,
-        "take_profit": 106,
-        "thesis": "legacy breakout",
-        "invalidation": "lose level",
-        "expires_at_ms": 60_000,
-        "metadata": {"horizon": "30m"},
-    }
-    strategy = LegacySignalAdapterStrategy(signals=[signal, dict(signal)])
-
-    candidates = strategy.generate(_snapshot({"mid": 100.0}), _regime(), timestamp_ms=10_000)
-
-    assert [candidate.candidate_id for candidate in candidates] == [candidates[0].candidate_id]
-    assert candidates[0].counts_for_breadth is False
-    assert candidates[0].source_integrity["legacy_signal_id"] == "sig_1"
 
 
 def test_defensive_flat_never_allocates_intent_size():

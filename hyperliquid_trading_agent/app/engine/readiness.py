@@ -524,7 +524,7 @@ async def build_paper_readiness_scorecard(
         metadata = _metadata(candidate)
         family = str(metadata.get("strategy_family") or candidate.get("strategy_family") or "unknown")
         counts_for_breadth = bool(metadata.get("counts_for_breadth", candidate.get("counts_for_breadth", True)))
-        if counts_for_breadth and family not in {"legacy_bridge", "risk_off_defensive"} and candidate.get("side") != "flat":
+        if counts_for_breadth and family != "risk_off_defensive" and candidate.get("side") != "flat":
             strategy_id = str(candidate.get("strategy_id") or "unknown")
             candidate_strategy_families[strategy_id] = family
             active_alpha_strategies.add(strategy_id)
@@ -875,7 +875,6 @@ async def build_paper_readiness_scorecard(
         portfolio_concentration_events=portfolio_concentration_events,
         latest_replay=latest_replay,
     )
-    wave_reports["legacy_engine_signal_comparison"] = report.get("signal_path_comparison") or {}
     metrics = {
         "candidate_count": candidate_count_for_gate,
         "ev_estimate_count": _i(exact_counts.get("ev_estimate_count"), len(ev_estimates)) if exact_counts else _i((report.get("summary") or {}).get("ev_estimate_count"), len(ev_estimates)),

@@ -21,11 +21,11 @@ class FakePerformanceRepo:
             },
             {
                 "candidate_id": "cand_2",
-                "strategy_id": "legacy_signal_adapter_v1",
+                "strategy_id": "funding_carry_v1",
                 "asset": "BTC",
                 "created_at_ms": 1_100,
                 "regime_snapshot_id": "reg_1",
-                "metadata": {"strategy_version": "1.0.0", "strategy_family": "legacy_bridge", "regime_label": "orderflow=buy_pressure"},
+                "metadata": {"strategy_version": "1.0.0", "strategy_family": "funding_basis", "regime_label": "funding=positive_extreme"},
             },
         ]
 

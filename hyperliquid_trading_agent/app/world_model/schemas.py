@@ -9,7 +9,6 @@ WorldEventSourceType = Literal[
     "social",
     "prediction_market",
     "market_data",
-    "signal_evaluation",
     "event_evaluation",
     "engine",
     "operator",

@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from hyperliquid_trading_agent.app.autonomy.schemas import AlphaEventEvaluation, NewsEvent, SignalEvaluation
+from hyperliquid_trading_agent.app.autonomy.schemas import AlphaEventEvaluation, NewsEvent
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.newswire.schemas import NewswireEvent
@@ -141,14 +141,6 @@ class WorldModelService:
             metadata={"paper_only": True, "execution_authority": "none", "source": "hip4_candidate"},
         )
         return await self.observe_event(event)
-
-    async def observe_signal_evaluation(self, evaluation: SignalEvaluation) -> list[MarketBelief]:
-        event = _world_event_from_signal_evaluation(evaluation)
-        beliefs = await self.observe_event(event)
-        for source_event_id in evaluation.metadata.get("source_event_ids", []) if isinstance(evaluation.metadata, dict) else []:
-            self.reducer.observe_outcome_evaluation(source_event_id=str(source_event_id), terminal_outcome=evaluation.terminal_outcome)
-        await self._persist_state(beliefs=[])
-        return beliefs
 
     async def observe_alpha_event_evaluation(self, evaluation: AlphaEventEvaluation) -> list[MarketBelief]:
         event = _world_event_from_alpha_event_evaluation(evaluation)
@@ -678,32 +670,6 @@ def _world_event_from_legacy_news(event: NewsEvent) -> WorldEvent:
         quality_score=max(float(metadata.get("source_score") or 0.5), event.importance_score / 100.0),
         staleness_ms=staleness,
         payload=event.model_dump(mode="json"),
-        metadata={"paper_only": True, "execution_authority": "none"},
-    )
-
-
-def _world_event_from_signal_evaluation(evaluation: SignalEvaluation) -> WorldEvent:
-    ts = evaluation.completed_at_ms or evaluation.latest_price_at_ms or evaluation.created_at_ms or now_ms()
-    direction = "bullish" if evaluation.terminal_outcome in {"tp_hit", "expired_positive"} else "bearish" if evaluation.terminal_outcome in {"stop_hit", "expired_negative"} else "neutral"
-    return WorldEvent(
-        event_id=f"wevt_signal_eval_{evaluation.id}",
-        source_type="signal_evaluation",
-        source="autonomy_evaluation",
-        provider="internal",
-        event_type="signal_evaluation",
-        asset_class=str(evaluation.metadata.get("asset_class") or "crypto") if isinstance(evaluation.metadata, dict) else "crypto",
-        symbols=[evaluation.symbol],
-        topics=[evaluation.signal_type, evaluation.market_regime, evaluation.terminal_outcome],
-        title=f"{evaluation.symbol} {evaluation.signal_type} signal outcome {evaluation.terminal_outcome}",
-        body=f"Marked result={evaluation.realized_or_marked_r}; MFE={evaluation.max_favorable_r}; MAE={evaluation.max_adverse_r}",
-        received_ts_ms=ts,
-        computed_ts_ms=max(now_ms(), ts),
-        importance_score=65.0 if evaluation.terminal_outcome in {"tp_hit", "stop_hit"} else 40.0,
-        sentiment=direction,  # type: ignore[arg-type]
-        confidence=min(0.9, max(0.3, abs(float(evaluation.realized_or_marked_r or 0.0)) / 3.0)),
-        source_score=0.9,
-        quality_score=0.9,
-        payload=evaluation.model_dump(mode="json"),
         metadata={"paper_only": True, "execution_authority": "none"},
     )
 

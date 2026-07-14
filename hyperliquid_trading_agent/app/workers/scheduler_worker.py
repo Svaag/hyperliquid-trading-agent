@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperliquid_trading_agent.app.autonomy.evaluation import SignalEvaluationService
 from hyperliquid_trading_agent.app.autonomy.event_evaluation import AlphaEventEvaluationService
 from hyperliquid_trading_agent.app.autonomy.memory import MemoryService
 from hyperliquid_trading_agent.app.autonomy.reports import AutonomyReportService
@@ -21,7 +20,6 @@ class SchedulerWorker(BaseWorker):
         self.command_count = 0
         self.last_command_type: str | None = None
         self._memory_service: MemoryService | None = None
-        self._evaluation_service: SignalEvaluationService | None = None
         self._event_evaluation_service: AlphaEventEvaluationService | None = None
         self._report_service: AutonomyReportService | None = None
         self._wave_supervisor: WaveSupervisor | None = None
@@ -33,8 +31,6 @@ class SchedulerWorker(BaseWorker):
             await self.command_loop(
                 {
                     "orchestration_wave_run_once": self._handle_orchestration_wave_run_once,
-                    "autonomy_evaluations_run": self._handle_autonomy_evaluations_run,
-                    "autonomy_evaluations_backfill": self._handle_autonomy_evaluations_backfill,
                     "autonomy_event_evaluations_backfill": self._handle_autonomy_event_evaluations_backfill,
                     "autonomy_daily_report_run": self._handle_autonomy_daily_report_run,
                     "autonomy_weekly_report_run": self._handle_autonomy_weekly_report_run,
@@ -53,26 +49,6 @@ class SchedulerWorker(BaseWorker):
             )
         )
         return {"accepted_by": self.instance_id, "command_type": command.get("command_type"), "result": result}
-
-    async def _handle_autonomy_evaluations_run(self, command: dict[str, Any]) -> dict[str, Any]:
-        self._record_command(command)
-        payload = self._payload(command)
-        now_ms = self._payload_now_ms(payload)
-        service = self._get_evaluation_service()
-        await service.load_open()
-        marked = await service.mark_due(now_ms)
-        await service.expire_overdue_signals(now_ms)
-        return {"accepted_by": self.instance_id, "command_type": command.get("command_type"), "marked_count": len(marked), "now_ms": now_ms}
-
-    async def _handle_autonomy_evaluations_backfill(self, command: dict[str, Any]) -> dict[str, Any]:
-        self._record_command(command)
-        payload = self._payload(command)
-        now_ms = self._payload_now_ms(payload)
-        service = self._get_evaluation_service()
-        await service.load_open()
-        marked = await service.mark_due(now_ms)
-        await service.expire_overdue_signals(now_ms)
-        return {"accepted_by": self.instance_id, "command_type": command.get("command_type"), "marked_count": len(marked), "backfilled": True, "now_ms": now_ms}
 
     async def _handle_autonomy_event_evaluations_backfill(self, command: dict[str, Any]) -> dict[str, Any]:
         self._record_command(command)
@@ -113,11 +89,6 @@ class SchedulerWorker(BaseWorker):
             self._memory_service = MemoryService(settings=self.settings, repository=self.repository)
         return self._memory_service
 
-    def _get_evaluation_service(self) -> SignalEvaluationService:
-        if self._evaluation_service is None:
-            self._evaluation_service = SignalEvaluationService(settings=self.settings, repository=self.repository, memory_service=self._get_memory_service())
-        return self._evaluation_service
-
     def _get_event_evaluation_service(self) -> AlphaEventEvaluationService:
         if self._event_evaluation_service is None:
             self._event_evaluation_service = AlphaEventEvaluationService(settings=self.settings, repository=self.repository, memory_service=self._get_memory_service())
@@ -128,7 +99,6 @@ class SchedulerWorker(BaseWorker):
             self._report_service = AutonomyReportService(
                 settings=self.settings,
                 repository=self.repository,
-                evaluation_service=self._get_evaluation_service(),
                 event_evaluation_service=self._get_event_evaluation_service(),
                 memory_service=self._get_memory_service(),
                 tuning_service=None,

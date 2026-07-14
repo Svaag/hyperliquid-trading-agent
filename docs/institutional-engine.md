@@ -77,9 +77,6 @@ LIGHTER_READ_ONLY=true
 ALPACA_PAPER_TRADING_ENABLED=false
 
 NEWSWIRE_GATEWAY_ENABLED=true
-AUTONOMY_LEGACY_NEWS_POLL_ENABLED=false
-NEWS_SIGNAL_GENERATION_ENABLED=true
-NEWS_EVENT_RISK_BLOCKS_ENABLED=true
 
 # Bounded in-memory feature store (2h general / 25h funding series) and
 # traded-symbol-only feature emission (escape hatch for research).
@@ -111,21 +108,19 @@ When `ENGINE_ENABLED=true`, `ENGINE_VALIDATION_DIGEST_ENABLED=true`, `DISCORD_BO
 
 Alert conditions include stale engine loop, engine runtime errors, paper intents/reports in shadow-only mode, live mode enabled, risk reject spikes, missing/stale feature or regime data, and EV calibration drift once realized attribution samples exist.
 
+## Discord operator proposals are a bounded sample
+
+The engine evaluates and persists every candidate, but Discord proposal messages are intentionally a review sample rather than a trade ledger. A candidate can become an operator proposal only when it is directional, paper-eligible, counts toward active alpha breadth, clears the configured EV/utility/confidence/feature-coverage floors, has a positive allocation, and passes RiskGateway, Council, debate, and expiry checks.
+
+Eligible candidates are ranked by net EV, risk-adjusted utility, confidence, and raw alpha score. Delivery is then capped by `ENGINE_OPERATOR_MAX_PROPOSALS_PER_LOOP` (default `3`), `ENGINE_OPERATOR_MAX_PROPOSALS_PER_DAY` (default `10`), candidate deduplication, and `ENGINE_OPERATOR_SYMBOL_COOLDOWN_MINUTES` (default `30`). Candidates that do not become Discord proposals remain in the candidate book, diagnostics, digest, readiness, and dashboard evidence. A proposal acknowledgment records review only and never creates a paper or live order.
+
 ## Paper-readiness scorecard
 
 `GET /engine/readiness` returns a deterministic conservative promotion scorecard. Paper readiness is blocked by live flags, paper leakage during shadow-only mode, stale engine loops, runtime errors, insufficient shadow observation/sample size, missing core feature/regime data, critical risk-reject spikes, failed replay comparisons, and unhealthy PnL marking.
 
-The default gate requires 24h shadow observation, at least 100 engine runs, 250 candidates, 50 shadow intents, 95% EV/feature/regime coverage, 100% candidate strategy metadata coverage, 95%+ Council review coverage, 100% RiskGateway coverage, at least 5 paper-eligible non-legacy alpha strategies across 3 paper-eligible families, at least 20 matured candidate outcomes for each active paper-eligible strategy, strategy/family/symbol-strategy concentration below 55%/60%/35%, a latest replay with `passed` or `advisory_pass`, strategy-regime evidence, no hard blocks, and score >=85. Concentration is report-only before 50 directional shadow intents. In the default integrated catalog, qualifying Wave 1 and Wave 2 activity contributes to the same gates. Intentionally shadow-only sources such as Newswire shadow alpha remain visible separately.
+The default gate requires 24h shadow observation, at least 100 engine runs, 250 candidates, 50 shadow intents, 95% EV/feature/regime coverage, 100% candidate strategy metadata coverage, 95%+ Council review coverage, 100% RiskGateway coverage, at least 5 paper-eligible directional alpha strategies across 3 paper-eligible families, at least 20 matured candidate outcomes for each active paper-eligible strategy, strategy/family/symbol-strategy concentration below 55%/60%/35%, a latest replay with `passed` or `advisory_pass`, strategy-regime evidence, no hard blocks, and score >=85. Concentration is report-only before 50 directional shadow intents. In the default integrated catalog, qualifying Wave 1 and Wave 2 activity contributes to the same gates. Intentionally shadow-only sources such as Newswire shadow alpha remain visible separately.
 
 `regime_defensive_flat_v1` is an explicit no-trade control. Its candidates receive RiskGateway/Council evidence, but never enter allocation-share denominators and never create an order intent. Directional shadow sampling uses separate evidence-admission quotas (45% strategy target, 60% family cap, 35% symbol-strategy cap) after raw candidates and governance evidence are persisted. This balances learnable evidence without deleting candidates or weakening the paper gate.
-
-`GET /engine/signal-comparison` is the read-only unification report for the retired/
-optional legacy `TradeSignal` path and the canonical institutional path. The same report
-is embedded under `signal_path_comparison` in validation output and under
-`reports.legacy_engine_signal_comparison` in readiness output. It compares legacy hit
-rate/R multiples, engine candidate outcomes/shadow PnL/replay state, and same-symbol/
-side/time overlap. It has no execution authority; engine operator proposals remain
-acknowledgment-only and never create a paper or live order through this report.
 
 ## Strategy portfolio, Council, replay, and bandit reports
 
@@ -138,10 +133,9 @@ Wave 1A locks the strategy-regime candidate nucleus:
 - `liquidation_mean_revert_v1`
 - `funding_carry_v1`
 - `oi_breakout_v1`
-- `legacy_signal_adapter_v1`
 - `regime_defensive_flat_v1`
 
-Only the five non-legacy/non-defensive Wave 1A strategies count as active alpha breadth by default. Pre-Wave1A strategies remain registered only as disabled comparison specs. `legacy_signal_adapter_v1` and `regime_defensive_flat_v1` do not count as independent alpha breadth.
+The five directional Wave 1A strategies count as active alpha breadth by default. `regime_defensive_flat_v1` is a no-trade control and does not count as independent alpha breadth.
 
 Wave 1B adds the evidence spine: every candidate receives candidate evidence links, fixed delayed outcome windows (`5m`, `15m`, `1h`, `4h`, `24h`), candidate-level RiskGateway coverage for non-flat candidates, Council packet/no-trade coverage, replay context links, and strategy-regime performance rows sourced from outcome attribution.
 

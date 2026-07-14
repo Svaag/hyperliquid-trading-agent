@@ -6,23 +6,6 @@ from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.workers.scheduler_worker import SchedulerWorker
 
 
-class _DummyEvaluationService:
-    def __init__(self) -> None:
-        self.loaded = False
-        self.marked_now_ms: int | None = None
-        self.expired_now_ms: int | None = None
-
-    async def load_open(self) -> None:
-        self.loaded = True
-
-    async def mark_due(self, now_ms: int | None = None) -> list[object]:
-        self.marked_now_ms = now_ms
-        return [object(), object()]
-
-    async def expire_overdue_signals(self, now_ms: int | None = None) -> None:
-        self.expired_now_ms = now_ms
-
-
 class _DummyEventEvaluationService:
     def __init__(self) -> None:
         self.loaded = False
@@ -56,21 +39,6 @@ class _DummyWaveSupervisor:
 
     def status(self) -> dict[str, object]:
         return {"enabled": True, "running": self.started and not self.stopped, "owner_role": "scheduler"}
-
-
-def test_scheduler_signal_evaluation_handler_runs_real_service_methods() -> None:
-    async def run() -> None:
-        worker = SchedulerWorker(Settings(environment="test"))
-        service = _DummyEvaluationService()
-        worker._evaluation_service = service
-        result = await worker._handle_autonomy_evaluations_run({"command_type": "autonomy_evaluations_run", "payload": {"now_ms": 123}})
-        assert result["marked_count"] == 2
-        assert service.loaded is True
-        assert service.marked_now_ms == 123
-        assert service.expired_now_ms == 123
-        assert worker.heartbeat_metadata()["scheduler"]["command_count"] == 1
-
-    anyio.run(run)
 
 
 def test_scheduler_event_evaluation_and_wave_handlers_run_real_service_methods() -> None:

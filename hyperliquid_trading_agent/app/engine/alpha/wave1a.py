@@ -308,102 +308,6 @@ class OIBreakoutStrategy:
         ]
 
 
-class LegacySignalAdapterStrategy:
-    spec = StrategySpec(
-        strategy_id="legacy_signal_adapter_v1",
-        version="1.0.0",
-        family="legacy_bridge",
-        supported_assets=CORE_CRYPTO_ASSETS,
-        supported_venues=HYPERLIQUID_VENUES,
-        supported_horizons=["15m", "30m", "1h"],
-        required_features=["mid"],
-        valid_regimes=["bear", "bull", "range", "unknown"],
-        max_candidates_per_run=5,
-        max_allocation_share_pct=25.0,
-        cooldown_ms=60_000,
-        min_confidence=0.30,
-        min_ev_bps=8.0,
-        risk_tags=["adapter", "legacy"],
-        counts_for_breadth=False,
-    )
-    strategy_id = spec.strategy_id
-
-    def __init__(self, signals: list[dict[str, Any]] | None = None):
-        self._signals = signals or []
-
-    async def refresh_from_repository(self, repository: Any | None, *, now_ms: int, limit: int = 50) -> None:
-        if repository is None or not getattr(repository, "enabled", False):
-            return
-        list_signals = getattr(repository, "list_autonomy_trade_signals", None)
-        if not callable(list_signals):
-            return
-        rows = await list_signals(status="candidate", limit=limit)
-        self._signals = [row for row in rows if int(row.get("expires_at_ms") or 0) > now_ms]
-
-    def generate(self, snapshot: FeatureSnapshot, regime: RegimeVector, *, timestamp_ms: int) -> list[AlphaCandidate]:
-        out: list[AlphaCandidate] = []
-        seen_dedupe_keys: set[str] = set()
-        mid = _float(snapshot.features.get("mid"))
-        for signal in self._signals:
-            symbol = str(signal.get("symbol") or signal.get("asset") or "").upper()
-            if symbol != snapshot.asset:
-                continue
-            if int(signal.get("expires_at_ms") or 0) <= timestamp_ms:
-                continue
-            side = str(signal.get("side") or "").lower()
-            if side not in {"long", "short"}:
-                continue
-            entry = _float(signal.get("entry") or signal.get("entry_px")) or mid
-            stop = _float(signal.get("stop") or signal.get("stop_px"))
-            target = _float(signal.get("take_profit") or signal.get("take_profit_px"))
-            if entry is None or entry <= 0 or stop is None or stop <= 0:
-                continue
-            if target is None or target <= 0:
-                target = entry + abs(entry - stop) * (1.5 if side == "long" else -1.5)
-            if target <= 0:
-                continue
-            signal_id = str(signal.get("id") or signal.get("signal_id") or "unknown")
-            horizon = str((signal.get("metadata") or {}).get("horizon") or signal.get("horizon") or "30m")
-            signal_type = str(signal.get("signal_type") or "legacy")
-            dedupe_key = f"{signal_id}:{snapshot.asset}:{side}:{signal_type}:{horizon}"
-            if dedupe_key in seen_dedupe_keys:
-                continue
-            seen_dedupe_keys.add(dedupe_key)
-            cid = "cand_" + hashlib.sha1(f"{self.strategy_id}:{dedupe_key}".encode()).hexdigest()[:24]
-            score = float(signal.get("score") or 0.0)
-            confidence = float(signal.get("confidence") or 0.0)
-            contract_fields = candidate_contract_fields(self.spec, snapshot, expected_edge_bps=max(0.0, score - 50.0) / 3.0)
-            contract_fields["source_integrity"] = {**contract_fields.get("source_integrity", {}), "legacy_signal_id": signal_id, "adapter": self.strategy_id, "dedupe_key": dedupe_key}
-            out.append(
-                AlphaCandidate(
-                    candidate_id=cid,
-                    strategy_id=self.strategy_id,
-                    **contract_fields,
-                    asset=snapshot.asset,
-                    asset_class=str((signal.get("metadata") or {}).get("asset_class") or "crypto"),  # type: ignore[arg-type]
-                    venue=str((signal.get("metadata") or {}).get("venue") or "hyperliquid"),
-                    side=side,  # type: ignore[arg-type]
-                    horizon=horizon,
-                    proposed_entry=entry,
-                    stop=stop,
-                    targets=[target],
-                    thesis=str(signal.get("thesis") or f"Legacy autonomy signal {signal_id}"),
-                    invalidation_conditions=[str(signal.get("invalidation") or "Legacy signal invalidation triggered")],
-                    feature_snapshot_id=snapshot.snapshot_id,
-                    regime_snapshot_id=regime.regime_snapshot_id,
-                    source_event_ids=[],
-                    raw_alpha_score=max(0.0, min(100.0, score)),
-                    confidence=max(0.0, min(1.0, confidence)),
-                    created_at_ms=timestamp_ms,
-                    expires_at_ms=min(int(signal.get("expires_at_ms") or timestamp_ms + 30 * 60_000), timestamp_ms + 60 * 60_000),
-                    metadata={"legacy_signal_id": signal_id, "legacy_signal_type": signal_type, "dedupe_key": dedupe_key, "regime_label": regime.regime_label},
-                )
-            )
-            if len(out) >= self.spec.max_candidates_per_run:
-                break
-        return out
-
-
 class RegimeDefensiveFlatStrategy:
     spec = StrategySpec(
         strategy_id="regime_defensive_flat_v1",
@@ -475,19 +379,7 @@ def wave_1a_strategy_instances() -> list[Any]:
 
 
 def wave_1a_specs() -> list[StrategySpec]:
-    retired_legacy = LegacySignalAdapterStrategy.spec.model_copy(
-        update={
-            "enabled": False,
-            "counts_for_breadth": False,
-            "metadata": {
-                **LegacySignalAdapterStrategy.spec.metadata,
-                "retired": True,
-                "retired_reason": "institutional_engine_is_canonical_signal_source",
-                "read_only_history": True,
-            },
-        }
-    )
-    return [*[strategy.spec for strategy in wave_1a_strategy_instances()], retired_legacy]
+    return [strategy.spec for strategy in wave_1a_strategy_instances()]
 
 
 def _candidate(

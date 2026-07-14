@@ -45,9 +45,9 @@ class ProposalEvaluation:
 class EngineOperatorProposalService:
     """Project institutional-engine decisions into shadow-only operator artifacts.
 
-    This service never generates alpha, writes legacy ``trade_signals``, or submits
-    orders. Acknowledgment is evidence that an operator reviewed a proposal; it is
-    deliberately not paper execution authority.
+    This service never generates alpha or submits orders. Acknowledgment is evidence
+    that an operator reviewed a proposal; it is deliberately not paper execution
+    authority.
     """
 
     def __init__(self, *, settings: Settings, repository: Repository):
@@ -165,14 +165,6 @@ class EngineOperatorProposalService:
             now_ms=now,
         )
 
-    async def expire(self, proposal_id: str, *, actor: str) -> dict[str, Any] | None:
-        return await self.repository.update_engine_operator_proposal_status(
-            proposal_id,
-            status="expired",
-            actor=actor,
-            now_ms=_now_ms(),
-        )
-
     async def _evaluate_candidate(self, candidate_id: str, *, now_ms: int) -> ProposalEvaluation | None:
         candidate_record = await self.repository.get_alpha_candidate(candidate_id)
         packets = await self.repository.list_candidate_trade_packets(candidate_id=candidate_id, limit=1)
@@ -208,15 +200,12 @@ class EngineOperatorProposalService:
         packet = evaluation.packet
         council = evaluation.council
         debate = evaluation.debate
-        strategy_id = str(candidate.get("strategy_id") or "")
         side = str(candidate.get("side") or "flat")
         source_value = candidate.get("source_integrity")
         source: dict[str, Any] = dict(source_value) if isinstance(source_value, dict) else {}
 
         if side not in {"long", "short"}:
             evaluation.hard_blockers.append("not_directional")
-        if strategy_id == "legacy_signal_adapter_v1":
-            evaluation.hard_blockers.append("legacy_signal_adapter")
         activation_scope = str(source.get("activation_scope") or "paper_shadow")
         if activation_scope == "shadow_only":
             evaluation.soft_blockers.append("shadow_only_strategy")
@@ -289,80 +278,13 @@ class EngineOperatorProposalService:
         ev = evaluation.ev
         allocation = evaluation.allocation
         council = evaluation.council
-        proposal_id = "sig_eng_" + hashlib.sha1(evaluation.candidate_id.encode()).hexdigest()[:24]
+        proposal_id = "eng_prop_" + hashlib.sha1(evaluation.candidate_id.encode()).hexdigest()[:24]
         candidate_expiry = int(candidate.get("expires_at_ms") or now_ms)
         expires_at_ms = min(
             candidate_expiry,
             now_ms + max(1, self.settings.engine_operator_proposal_ttl_minutes) * 60_000,
         )
-        targets = list(candidate.get("targets") or [])
         payload = {
-            "signal": {
-                "id": proposal_id,
-                "symbol": str(candidate.get("asset") or "").upper(),
-                "side": str(candidate.get("side") or "flat"),
-                "signal_type": f"engine:{candidate.get('strategy_id') or 'unknown'}",
-                "status": "posted",
-                "score": float(candidate.get("raw_alpha_score") or 0),
-                "confidence": float(candidate.get("confidence") or 0),
-                "created_at_ms": now_ms,
-                "expires_at_ms": expires_at_ms,
-                "entry": float(candidate.get("proposed_entry") or 0),
-                "stop": float(candidate.get("stop") or 0),
-                "take_profit": float(targets[0]) if targets else None,
-                "invalidation": "; ".join(str(item) for item in candidate.get("invalidation_conditions") or []),
-                "thesis": str(candidate.get("thesis") or ""),
-                "evidence": [
-                    {
-                        "category": "expected_value",
-                        "label": "Net EV",
-                        "value": float(ev.get("net_ev_bps") or 0),
-                        "source": "model",
-                        "kind": "bps",
-                    },
-                    {
-                        "category": "risk",
-                        "label": "Risk-adjusted utility",
-                        "value": float(ev.get("risk_adjusted_utility") or 0),
-                        "source": "risk",
-                        "kind": "ratio",
-                    },
-                    {
-                        "category": "data_quality",
-                        "label": "Feature coverage",
-                        "value": float(candidate.get("feature_coverage_pct") or 0),
-                        "source": "market_structure",
-                        "kind": "pct",
-                    },
-                ],
-                "feature_snapshot": {
-                    "feature_snapshot_id": candidate.get("feature_snapshot_id"),
-                    "regime_snapshot_id": candidate.get("regime_snapshot_id"),
-                    "feature_coverage_pct": candidate.get("feature_coverage_pct"),
-                },
-                "risk_plan": {
-                    "allocated_notional_usd": allocation.get("allocated_notional_usd"),
-                    "allocated_size": allocation.get("allocated_size"),
-                    "risk_usd": allocation.get("risk_usd"),
-                    "net_ev_bps": ev.get("net_ev_bps"),
-                    "risk_adjusted_utility": ev.get("risk_adjusted_utility"),
-                },
-                "model_insight": None,
-                "discord_channel_id": self.settings.autonomy_alert_channel_id or None,
-                "discord_message_id": None,
-                "metadata": {
-                    "source": "institutional_engine",
-                    "execution_authority": "none",
-                    "acknowledgment_only": True,
-                    "candidate_id": evaluation.candidate_id,
-                    "packet_id": evaluation.packet.get("packet_id"),
-                    "council_review_id": council.get("review_id"),
-                    "council_decision": council.get("decision"),
-                    "strategy_id": candidate.get("strategy_id"),
-                    "strategy_version": candidate.get("strategy_version"),
-                    "asset_class": candidate.get("asset_class"),
-                },
-            },
             "candidate": candidate,
             "ev_estimate": ev,
             "allocation": allocation,
@@ -400,8 +322,10 @@ class EngineOperatorProposalService:
         channel_id = str(self.settings.autonomy_alert_channel_id or "").strip()
         if not channel_id:
             return
-        signal = dict((proposal.get("payload") or {}).get("signal") or {})
-        take_profit = signal.get("take_profit")
+        payload = dict(proposal.get("payload") or {})
+        candidate = dict(payload.get("candidate") or {})
+        targets = list(candidate.get("targets") or [])
+        take_profit = targets[0] if targets else None
         target_text = f"{float(take_profit):.8g}" if isinstance(take_profit, (int, float, str)) else "n/a"
         content = (
             f"📐 **Institutional engine proposal — {proposal['asset']} {str(proposal['side']).upper()}**\n"
@@ -410,8 +334,8 @@ class EngineOperatorProposalService:
             f"net EV **{proposal['net_ev_bps']:.2f} bps** | utility **{proposal['risk_adjusted_utility']:.3f}**\n"
             f"Feature coverage **{proposal['feature_coverage_pct']:.1f}%** | shadow allocation "
             f"**${proposal['allocated_notional_usd']:,.2f}**\n"
-            f"Entry `{signal.get('entry')}` | stop `{signal.get('stop')}` | target `{target_text}`\n\n"
-            f"{signal.get('thesis') or 'No thesis recorded.'}\n\n"
+            f"Entry `{candidate.get('proposed_entry')}` | stop `{candidate.get('stop')}` | target `{target_text}`\n\n"
+            f"{candidate.get('thesis') or 'No thesis recorded.'}\n\n"
             "**Shadow safety:** acknowledgment records operator review only. It does not create a paper or live order."
         )
         await self.repository.enqueue_operational_notification(
@@ -531,29 +455,3 @@ class EngineOperatorProposalService:
             "last_blocker_counts": self.last_blocker_counts,
             "last_error": self.last_error,
         }
-
-
-def project_operator_proposal_to_trade_signal(proposal: dict[str, Any]) -> dict[str, Any]:
-    signal = dict((proposal.get("payload") or {}).get("signal") or {})
-    status_map = {
-        "proposed": "posted",
-        "acknowledged": "approved",
-        "rejected": "rejected",
-        "expired": "expired",
-    }
-    signal["status"] = status_map.get(str(proposal.get("status") or "proposed"), "posted")
-    metadata = dict(signal.get("metadata") or {})
-    metadata.update(
-        {
-            "operator_proposal_status": proposal.get("status"),
-            "acknowledged_by": proposal.get("acknowledged_by"),
-            "acknowledged_at_ms": proposal.get("acknowledged_at_ms"),
-            "rejected_by": proposal.get("rejected_by"),
-            "rejected_at_ms": proposal.get("rejected_at_ms"),
-            "rejection_reason": proposal.get("rejection_reason"),
-            "acknowledgment_only": True,
-            "paper_execution_created": False,
-        }
-    )
-    signal["metadata"] = metadata
-    return signal

@@ -6,7 +6,6 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from hyperliquid_trading_agent.app.config import Settings
-from hyperliquid_trading_agent.app.engine.signal_comparison import build_signal_path_comparison
 
 
 def _now_ms() -> int:
@@ -203,13 +202,6 @@ async def build_engine_validation_report(
         for item in reports
         if item.get("status") == "filled" and item.get("avg_fill_px") is not None and _f(item.get("filled_size")) > 0
     ]
-    signal_path_comparison = await build_signal_path_comparison(
-        repository,
-        settings=settings,
-        window_hours=window_hours,
-        limit=max(limit, 500),
-    )
-
     return {
         "generated_at_ms": generated_at_ms,
         "sample_limit": limit,
@@ -281,7 +273,6 @@ async def build_engine_validation_report(
             "allocation_expected": False,
         },
         "allocation_status_counts": dict(allocation_status),
-        "signal_path_comparison": signal_path_comparison,
     }
 
 

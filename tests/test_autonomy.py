@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
-
 import pytest
 from fastapi.testclient import TestClient
 
-from hyperliquid_trading_agent.app.autonomy.discord import format_signal_alert, parse_autonomy_command
+from hyperliquid_trading_agent.app.autonomy.discord import parse_autonomy_command
 from hyperliquid_trading_agent.app.autonomy.levels import infer_liquidation_clusters
 from hyperliquid_trading_agent.app.autonomy.market_map import MarketMapReducer
 from hyperliquid_trading_agent.app.autonomy.orderflow import compute_orderflow_state
@@ -14,10 +12,7 @@ from hyperliquid_trading_agent.app.autonomy.schemas import (
     MarketAsset,
     MarketLevel,
     NewsEvent,
-    SignalEvidence,
-    TradeSignal,
 )
-from hyperliquid_trading_agent.app.autonomy.signals import SignalEngine, risk_vetoes
 from hyperliquid_trading_agent.app.autonomy.universe import MarketUniverseResolver
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.main import create_app
@@ -98,111 +93,6 @@ def test_direct_and_inferred_liquidation_clusters_are_labeled():
     assert clusters[0].source == "public_account"
     assert clusters[1].confidence == "inferred_low"
     assert clusters[1].source == "market_structure"
-
-
-def test_signal_engine_generates_postable_signal_and_vetoes_duplicate():
-    settings = Settings(autonomy_min_signal_score=30)
-    reducer = MarketMapReducer()
-    reducer.set_universe([MarketAsset(symbol="BTC", display_name="BTC", source="core")], timestamp_ms=1)
-    for index, px in enumerate([100, 101, 102, 103], start=1):
-        reducer.apply_all_mids({"BTC": px}, timestamp_ms=index)
-    reducer.apply_candles("BTC", [{"h": 104, "l": 99, "c": 103, "v": 10}, {"h": 105, "l": 101, "c": 104, "v": 20}, {"h": 106, "l": 102, "c": 105, "v": 30}], "1h", timestamp_ms=5)
-    reducer.apply_l2_book("BTC", {"levels": [[[102.9, 100]], [[103.1, 50]]]}, timestamp_ms=5)
-
-    signals = SignalEngine(settings).generate(reducer.snapshot(), timestamp_ms=10)
-
-    assert signals
-    signal = signals[0]
-    assert signal.risk_plan["exchange_actions"] == []
-    assert signal.risk_plan["rr"] >= 1.5
-    assert risk_vetoes(signal, reducer.snapshot().assets["BTC"], [signal], []) == ["duplicate_active_signal"]
-
-
-def test_paper_portfolio_approval_fill_fees_and_stop_close():
-    settings = Settings(autonomy_paper_initial_equity_usd=10_000, autonomy_paper_risk_pct_per_trade=1, autonomy_paper_max_single_name_exposure_pct=100)
-    service = PaperPortfolioService(settings)
-    signal = TradeSignal(
-        id="sig_test",
-        symbol="BTC",
-        side="long",
-        signal_type="trend_continuation",
-        score=80,
-        confidence=0.7,
-        created_at_ms=1,
-        expires_at_ms=100000,
-        entry=100,
-        stop=95,
-        take_profit=115,
-        invalidation="below 95",
-        thesis="up",
-        risk_plan={"rr": 3, "exchange_actions": []},
-    )
-
-    import anyio
-
-    order, fill, position = anyio.run(service.approve_signal, signal, "user1", 100, 1)
-    assert order.status == "filled"
-    assert fill.price == 100.02
-    assert round(fill.fee_usd, 2) > 0
-    assert position.status == "open"
-    closed = anyio.run(service.mark_to_market, {"BTC": 94}, 2)
-    assert closed[0].status == "closed"
-    assert service.latest_snapshot() is not None
-    assert service.latest_snapshot().metrics["sharpe"] is None  # type: ignore[union-attr]
-
-
-def test_flip_request_closes_opposing_position_and_marks_signal():
-    settings = Settings(
-        autonomy_paper_initial_equity_usd=10_000,
-        autonomy_paper_risk_pct_per_trade=4,
-        autonomy_paper_max_single_name_exposure_pct=5,
-    )
-    portfolio = PaperPortfolioService(settings)
-
-    short_signal = TradeSignal(
-        id="sig_short",
-        symbol="SOL",
-        side="short",
-        signal_type="trend_continuation",
-        score=70,
-        confidence=0.7,
-        created_at_ms=1,
-        expires_at_ms=10_000_000,
-        entry=100.0,
-        stop=105.0,
-        take_profit=90.0,
-        invalidation="above 105",
-        thesis="short",
-        risk_plan={"rr": 2, "exchange_actions": []},
-    )
-    import anyio
-    anyio.run(portfolio.approve_signal, short_signal, "user1", 100.0, 1)
-    assert any(p.symbol == "SOL" and p.side == "short" and p.status == "open" for p in portfolio.open_positions())
-
-    long_signal = TradeSignal(
-        id="sig_long",
-        symbol="SOL",
-        side="long",
-        signal_type="trend_continuation",
-        score=77,
-        confidence=0.86,
-        created_at_ms=2,
-        expires_at_ms=10_000_000,
-        entry=101.0,
-        stop=100.0,
-        take_profit=103.0,
-        invalidation="below 100",
-        thesis="long",
-        risk_plan={"rr": 2, "exchange_actions": []},
-    )
-    with pytest.raises(Exception) as excinfo:
-        anyio.run(portfolio.approve_signal, long_signal, "user1", 101.0, 2)
-    assert "zero quantity" in str(excinfo.value).lower()
-    opposing = portfolio.find_opposing_position("SOL", "long")
-    assert opposing is not None
-    diag = portfolio.sizing_diagnostics(long_signal, 101.0)
-    assert diag["opposing_position_side"] == "short"
-    assert diag["current_symbol_exposure_usd"] > diag["max_single_name_exposure_usd"]
 
 
 def test_manual_paper_trade_draft_confirm_cancel_lifecycle():
@@ -362,90 +252,15 @@ def test_parse_paper_discord_commands():
     assert natural_sell.draft.market is True
 
 
-def test_discord_autonomy_command_parser_and_alert_format():
-    flip_command = parse_autonomy_command("approve flip sig_abc")
-    assert flip_command is not None
-    assert flip_command.action == "approve_flip"
-    assert flip_command.signal_id == "sig_abc"
-    cancel_command = parse_autonomy_command("cancel flip sig_abc")
-    assert cancel_command is not None
-    assert cancel_command.action == "reject"
-    assert cancel_command.signal_id == "sig_abc"
-    command = parse_autonomy_command("approve signal sig_abc")
-    assert command is not None
-    assert command.action == "approve"
-    assert command.signal_id == "sig_abc"
-    signal = TradeSignal(
-        id="sig_abc",
-        symbol="HYPE",
-        side="long",
-        signal_type="support_bounce",
-        score=82,
-        confidence=0.71,
-        created_at_ms=1,
-        expires_at_ms=30 * 60 * 1000,
-        entry=34.2,
-        stop=33.45,
-        take_profit=36.1,
-        invalidation="below 33.45",
-        thesis="reclaim",
-        risk_plan={"rr": 2.5, "exchange_actions": []},
-    )
-    content = format_signal_alert(signal)
-    assert "approve signal sig_abc" in content
-    assert "No live trade will be placed" in content
-
-
-def test_parse_autonomy_command_bare_approve_via_reply():
+def test_retired_signal_commands_are_not_parsed():
     from types import SimpleNamespace
-    referenced = SimpleNamespace(content="🚨 AI Trading Signal — SOL LONG ... `approve signal sig_demo_xyz`")
-    cmd = parse_autonomy_command("approve", referenced_message=referenced)
-    assert cmd is not None
-    assert cmd.action == "approve"
-    assert cmd.signal_id == "sig_demo_xyz"
 
-    cmd2 = parse_autonomy_command("reject", referenced_message=referenced)
-    assert cmd2 is not None
-    assert cmd2.action == "reject"
-    assert cmd2.signal_id == "sig_demo_xyz"
-
-    # bare "approve" without a reply should NOT trigger an autonomy command
+    referenced = SimpleNamespace(content="retired trade idea")
+    assert parse_autonomy_command("approve signal sig_demo_xyz") is None
+    assert parse_autonomy_command("reject signal sig_demo_xyz") is None
+    assert parse_autonomy_command("approve flip sig_demo_xyz") is None
     assert parse_autonomy_command("approve") is None
-    assert parse_autonomy_command("approve", referenced_message=SimpleNamespace(content="hello there")) is None
-
-
-def test_format_signal_alert_renders_funding_as_percentage():
-    signal = TradeSignal(
-        id="sig_funding",
-        symbol="ETH",
-        side="long",
-        signal_type="funding_oi_squeeze",
-        score=78,
-        confidence=0.82,
-        created_at_ms=1,
-        expires_at_ms=60 * 60 * 1000,
-        entry=3500,
-        stop=3450,
-        take_profit=3650,
-        invalidation="below 3450",
-        thesis="funding flip",
-        risk_plan={"rr": 2, "exchange_actions": []},
-        evidence=[
-            SignalEvidence(category="funding_oi", label="funding/OI", value=1.25e-05, source="funding", kind="funding_hourly"),
-            SignalEvidence(category="funding_oi", label="funding/OI", value=-2.5e-05, source="funding", kind="funding_hourly"),
-            SignalEvidence(category="orderflow", label="depth/imbalance/spread", value=12.3, source="orderflow", kind="number"),
-            SignalEvidence(category="risk_reward", label="reward:risk", value=2.0, source="risk", kind="ratio"),
-        ],
-    )
-    content = format_signal_alert(signal)
-    # funding value 1.25e-05 should render as +0.0013%/hr (4 decimals)
-    assert "0.0013%/hr" in content or "0.0012%/hr" in content
-    # negative funding should keep a minus sign
-    assert "-0.0025%/hr" in content
-    # ratio kind uses "x" suffix
-    assert "2.00x" in content
-    # raw evidence label still present
-    assert "funding/OI" in content
+    assert parse_autonomy_command("approve", referenced_message=referenced) is None
 
 
 
@@ -465,12 +280,11 @@ def test_autonomy_api_requires_auth_outside_dev_and_no_execution_guardrail():
         raise AssertionError("live exchange enable should be rejected")
 
 
-def test_autonomy_api_sources_trader_runtime_and_routes_enabled_legacy_review_commands():
+def test_retired_signal_api_routes_are_absent():
     app = create_app(
         Settings(
             environment="test",
             autonomy_enabled=False,
-            autonomy_signals_run_with_engine_enabled=True,
             engine_enabled=False,
             hip4_enabled=False,
             orchestration_wave_supervisor_enabled=False,
@@ -478,42 +292,7 @@ def test_autonomy_api_sources_trader_runtime_and_routes_enabled_legacy_review_co
             _env_file=None,
         )
     )
-    with TestClient(app) as client:
-        repo = app.state.repository
-        repo.list_service_heartbeats = AsyncMock(
-            return_value=[
-                {
-                    "service_role": "trader",
-                    "updated_at_ms": 1234,
-                    "metadata": {
-                        "autonomy_loop": {
-                            "enabled": True,
-                            "running": True,
-                            "last_error": None,
-                            "signals_run_with_engine_enabled": True,
-                        }
-                    },
-                }
-            ]
-        )
-        repo.get_autonomy_trade_signal = AsyncMock(return_value={"id": "legacy_1"})
-        repo.enqueue_worker_command = AsyncMock(
-            return_value={
-                "command_id": "cmd_legacy_approve",
-                "target_role": "trader",
-                "command_type": "autonomy_signal_approve",
-                "status": "pending",
-            }
-        )
-
-        runtime = client.get("/autonomy/status").json()
-        approval = client.post("/autonomy/signals/legacy_1/approve", json={"actor": "operator"})
-
-    assert runtime["enabled"] is True
-    assert runtime["running"] is True
-    assert runtime["owner_role"] == "trader"
-    assert runtime["runtime_source"] == "trader_heartbeat"
-    assert approval.status_code == 200
-    assert approval.json()["source"] == "legacy_signal_engine"
-    assert approval.json()["paper_only"] is True
-    repo.enqueue_worker_command.assert_awaited_once()
+    paths = {route.path for route in app.routes}
+    assert "/autonomy/signals" not in paths
+    assert "/autonomy/signals/{signal_id}/approve" not in paths
+    assert "/engine/operator-proposals" in paths

@@ -185,7 +185,7 @@ class WorldModelReducer:
         }
 
     def _beliefs_from_event(self, event: WorldEvent) -> list[MarketBelief]:
-        if event.source_type not in {"newswire", "social", "event_evaluation", "signal_evaluation", "engine"}:
+        if event.source_type not in {"newswire", "social", "event_evaluation", "engine"}:
             return []
         if event.importance_score < 10 and event.source_type in {"newswire", "social"}:
             return []

@@ -8,7 +8,6 @@ from hyperliquid_trading_agent.app.engine.alpha.microstructure import Microstruc
 from hyperliquid_trading_agent.app.engine.alpha.news_event import NewsEventAlphaStrategy
 from hyperliquid_trading_agent.app.engine.alpha.wave1a import (
     FundingCarryStrategy,
-    LegacySignalAdapterStrategy,
     LiquidationCascadeStrategy,
     LiquidationMeanRevertStrategy,
     MicrostructureOFIV2Strategy,
@@ -21,7 +20,6 @@ __all__ = [
     "DirectionalMomentumStrategy",
     "EquityOptionsFlowStrategy",
     "FundingCarryStrategy",
-    "LegacySignalAdapterStrategy",
     "LiquidationCascadeStrategy",
     "LiquidationMeanRevertStrategy",
     "MicrostructureOFIStrategy",

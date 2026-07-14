@@ -12,26 +12,26 @@ class FakeReplayRepository:
     def __init__(self):
         self.diff = {
             "proposal_id": "tp_replay",
-            "strategy_id": "autonomy_v1",
-            "scope": {"symbol": "BTC", "signal_type": "trend_continuation"},
+            "strategy_id": "news_event_alpha_v2",
+            "scope": {"symbol": "BTC", "event_type": "headline"},
             "change_type": "threshold_adjustment",
-            "current_value": {"autonomy_min_signal_score": 75},
-            "proposed_value": {"asset_overrides.BTC.trend_continuation.min_signal_score": 80},
-            "rationale": "Raise low-quality threshold.",
-            "evidence": ["sig_low", "sig_high", "sig_stop", "sig_good"],
-            "expected_effect": "Reduce weak paper signals.",
-            "known_risks": ["May reduce trade count."],
+            "current_value": {"autonomy_event_eval_min_importance": 50},
+            "proposed_value": {"autonomy_event_eval_min_importance": 80},
+            "rationale": "Raise the low-importance catalyst threshold.",
+            "evidence": ["event_failed", "event_worked", "event_flat", "event_volatile"],
+            "expected_effect": "Reduce weak catalyst evaluations.",
+            "known_risks": ["May reduce event coverage."],
             "validation_required": ["replay", "shadow_run", "human_review"],
             "risk_direction": "tightens_risk",
             "requires_human_approval": True,
             "status": "proposed",
             "metadata": {},
         }
-        self.signal_evals = {
-            "sig_low": _evaluation("eval_low", "sig_low", score=60, r=-0.5, stop=True),
-            "sig_high": _evaluation("eval_high", "sig_high", score=85, r=0.5),
-            "sig_stop": _evaluation("eval_stop", "sig_stop", score=90, r=-1.0, stop=True),
-            "sig_good": _evaluation("eval_good", "sig_good", score=95, r=1.5, tp=True),
+        self.event_evals = {
+            "event_failed": _event_evaluation("eval_failed", "event_failed", outcome="failed", bps=-50),
+            "event_worked": _event_evaluation("eval_worked", "event_worked", outcome="worked", bps=80),
+            "event_flat": _event_evaluation("eval_flat", "event_flat", outcome="expired_neutral", bps=5),
+            "event_volatile": _event_evaluation("eval_volatile", "event_volatile", outcome="volatility_only", bps=-10),
         }
         self.replays: list[dict] = []
         self.shadows: list[dict] = []
@@ -42,23 +42,15 @@ class FakeReplayRepository:
     async def get_candidate_config_diff(self, proposal_id: str):
         return self.diff if proposal_id == self.diff["proposal_id"] else None
 
-    async def get_signal_evaluation(self, evaluation_id: str):
-        return next((item for item in self.signal_evals.values() if item["id"] == evaluation_id), None)
-
-    async def get_signal_evaluation_by_signal_id(self, signal_id: str):
-        return self.signal_evals.get(signal_id)
-
     async def get_alpha_event_evaluation(self, evaluation_id: str):
-        return None
+        return next((item for item in self.event_evals.values() if item["id"] == evaluation_id), None)
 
     async def get_alpha_event_evaluation_by_event_id(self, event_id: str):
-        return []
-
-    async def list_signal_evaluations(self, status=None, symbol=None, limit=100):
-        return list(self.signal_evals.values())[:limit]
+        item = self.event_evals.get(event_id)
+        return [item] if item is not None else []
 
     async def list_alpha_event_evaluations(self, status=None, symbol=None, limit=100):
-        return []
+        return list(self.event_evals.values())[:limit]
 
     async def record_replay_result(self, result: dict):
         self.replays.insert(0, result)
@@ -89,41 +81,31 @@ class FakeReplayRepository:
         self.diff["status"] = status
 
 
-def _evaluation(eval_id: str, signal_id: str, *, score: float, r: float, stop: bool = False, tp: bool = False):
+def _event_evaluation(eval_id: str, event_id: str, *, outcome: str, bps: float):
     return {
         "id": eval_id,
-        "signal_id": signal_id,
+        "event_id": event_id,
         "symbol": "BTC",
-        "signal_type": "trend_continuation",
+        "event_type": "headline",
         "status": "complete",
-        "terminal_outcome": "stop_hit" if stop else "tp_hit" if tp else "expired_positive",
-        "signal_score": score,
-        "realized_or_marked_r": r,
-        "stop_hit": stop,
-        "take_profit_hit": tp,
-        "approved": True,
-        "paper_ordered": True,
-        "rejected": False,
-        "opportunity_cost_r": None,
-        "max_favorable_r": max(r, 0),
-        "max_adverse_r": min(r, 0),
+        "terminal_outcome": outcome,
+        "realized_or_marked_bps": bps,
     }
 
 
 @pytest.mark.asyncio
-async def test_replay_candidate_diff_computes_and_persists_metrics():
+async def test_replay_candidate_diff_audits_event_evidence_and_persists_metrics():
     repo = FakeReplayRepository()
     service = ShadowComparisonService(repository=repo)
 
     replay = await service.replay_candidate_diff("tp_replay")
 
-    assert replay.status == "passed"
-    assert replay.baseline_metrics["sample_size"] == 4
-    assert replay.candidate_metrics["sample_size"] == 3
-    assert replay.diffs["transform"]["type"] == "min_signal_score_filter"
-    assert replay.diffs["avg_r"] > 0
+    assert replay.status == "audit_only"
+    assert replay.baseline_metrics["event_sample_size"] == 4
+    assert replay.candidate_metrics == replay.baseline_metrics
+    assert replay.diffs["transform"]["reason"] == "no_deterministic_event_transform"
     assert repo.replays[0]["replay_id"] == replay.replay_id
-    assert repo.diff["current_value"] == {"autonomy_min_signal_score": 75}
+    assert repo.diff["current_value"] == {"autonomy_event_eval_min_importance": 50}
 
 
 @pytest.mark.asyncio

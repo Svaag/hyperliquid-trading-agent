@@ -7,7 +7,6 @@ from datetime import date, datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from hyperliquid_trading_agent.app.autonomy.equity_features import detect_technical_breakout_equity
 from hyperliquid_trading_agent.app.tradfi.alpaca_provider import AlpacaTradFiProvider
 from hyperliquid_trading_agent.app.tradfi.alpha_vantage_provider import AlphaVantageTradFiProvider
 from hyperliquid_trading_agent.app.tradfi.base import TradFiProvider
@@ -483,27 +482,6 @@ async def test_equity_paper_update_marks():
 
 
 # --- Config -------------------------------------------------------------------
-
-
-def test_equity_signal_evidence_sources_are_schema_valid():
-    snap = StockSnapshot(
-        symbol="AAPL",
-        previous_close=100.0,
-        change_pct=4.0,
-        daily_bar=Bar(
-            symbol="AAPL",
-            timestamp=datetime.now(timezone.utc),
-            open=100.0,
-            high=105.0,
-            low=99.0,
-            close=104.0,
-            volume=25_000_000.0,
-            timeframe="1Day",
-        ),
-    )
-    signal = detect_technical_breakout_equity("AAPL", snap, timestamp_ms=1)
-    assert signal is not None
-    assert {item.source for item in signal.evidence} == {"equity"}
 
 
 def test_tradfi_config_warnings(monkeypatch):

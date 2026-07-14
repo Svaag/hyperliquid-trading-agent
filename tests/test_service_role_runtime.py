@@ -242,8 +242,8 @@ def test_repository_runtime_helpers() -> None:
         command = await repo.enqueue_worker_command(target_role="agent", command_type="ask", payload={"prompt": "hi"}, idempotency_key="ask-hi")
         duplicate = await repo.enqueue_worker_command(target_role="agent", command_type="ask", payload={"prompt": "hi"}, idempotency_key="ask-hi")
         assert duplicate["command_id"] == command["command_id"]
-        auto_keyed = await repo.enqueue_worker_command(target_role="trader", command_type="autonomy_signal_approve", payload={"signal_id": "sig-1"})
-        duplicate_auto_keyed = await repo.enqueue_worker_command(target_role="trader", command_type="autonomy_signal_approve", payload={"signal_id": "sig-1"})
+        auto_keyed = await repo.enqueue_worker_command(target_role="trader", command_type="engine_operator_proposal_ack", payload={"proposal_id": "eng_prop_1"})
+        duplicate_auto_keyed = await repo.enqueue_worker_command(target_role="trader", command_type="engine_operator_proposal_ack", payload={"proposal_id": "eng_prop_1"})
         assert duplicate_auto_keyed["command_id"] == auto_keyed["command_id"]
         claimed = await repo.claim_next_worker_command(target_role="agent", instance_id="agent-1", stale_after_ms=300_000)
         assert claimed is not None
