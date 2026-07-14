@@ -36,6 +36,7 @@ from hyperliquid_trading_agent.app.prediction_markets.schemas import (
 from hyperliquid_trading_agent.app.tradfi.alpaca_paper_execution import AlpacaPaperExecutionAdapter
 from hyperliquid_trading_agent.app.workers.base import BaseWorker
 from hyperliquid_trading_agent.app.workers.stored_newswire_story_pump import StoredNewswireStoryPump
+from hyperliquid_trading_agent.app.world_model.factory import build_world_model_service
 
 log = get_logger(__name__)
 
@@ -67,8 +68,14 @@ class TraderWorker(BaseWorker):
         self._alpaca_paper_execution: AlpacaPaperExecutionAdapter | None = None
         self._market_universe_sync: MarketUniverseSyncService | None = None
         self._market_universe_sync_task: asyncio.Task | None = None
+        self._world_model_service: Any | None = None
 
     async def run(self) -> None:
+        if self.settings.world_model_v2_enabled:
+            self._world_model_service = build_world_model_service(settings=self.settings, repository=self.repository)
+            hydrate = getattr(self._world_model_service, "hydrate", None)
+            if callable(hydrate):
+                await hydrate()
         await self._start_market_universe_sync()
         await self._start_engine_loop()
         await self._start_engine_validation_monitor()
@@ -77,6 +84,8 @@ class TraderWorker(BaseWorker):
         await self._start_engine_newsfeed()
         await self._start_autonomy_loop()
         tasks = [asyncio.create_task(self.command_loop(self._command_handlers()), name="trader-command-loop")]
+        if self._world_model_service is not None:
+            tasks.append(asyncio.create_task(self._world_model_cache_loop(), name="trader-world-model-v2-cache"))
         if self._engine_loop_task is not None:
             tasks.append(self._engine_loop_task)
         if self._engine_news_pump is not None:
@@ -97,6 +106,13 @@ class TraderWorker(BaseWorker):
                 except asyncio.CancelledError:
                     pass
             await self._shutdown_engine_runtime()
+
+    async def _world_model_cache_loop(self) -> None:
+        while True:
+            await asyncio.sleep(30)
+            refresh = getattr(self._world_model_service, "refresh_read_cache", None)
+            if callable(refresh):
+                await refresh()
 
     def _command_handlers(self):
         return {
@@ -315,7 +331,7 @@ class TraderWorker(BaseWorker):
                 hyperliquid=self._engine_hyperliquid,
                 risk_gateway=risk_gateway,
                 portfolio_service=None,
-                world_model_service=None,
+                world_model_service=self._world_model_service,
                 liquidation_bridge=liquidation_bridge,
             )
         return self._engine_service

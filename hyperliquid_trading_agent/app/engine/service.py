@@ -1148,7 +1148,11 @@ class InstitutionalEngineService:
             return
         try:
             world_snapshot = snapshot(symbols=[symbol], max_beliefs=12)
-            await self.feature_store.features_for_world_model_snapshot(asset=symbol, snapshot=world_snapshot)
+            if bool(getattr(self.settings, "world_model_v2_enabled", False)):
+                if bool(getattr(self.settings, "world_model_v2_shadow_features_enabled", False)):
+                    await self.feature_store.features_for_world_model_v2_shadow(asset=symbol, snapshot=world_snapshot)
+            else:
+                await self.feature_store.features_for_world_model_snapshot(asset=symbol, snapshot=world_snapshot)
         except Exception:
             return
 

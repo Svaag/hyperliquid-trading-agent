@@ -419,6 +419,135 @@ class WorldModelSnapshotRecord(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class WorldModelV2EvidenceRecord(TimestampMixin, Base):
+    __tablename__ = "world_model_v2_evidence"
+    __table_args__ = (
+        Index("ix_wm_v2_evidence_available", "available_at_ms"),
+        Index("ix_wm_v2_evidence_admission", "admission_status"),
+    )
+
+    evidence_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    source_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider: Mapped[str] = mapped_column(String(128), nullable=False)
+    available_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    admission_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WorldModelV2MacroObservationRecord(TimestampMixin, Base):
+    __tablename__ = "world_model_v2_macro_observations"
+    __table_args__ = (
+        Index("ix_wm_v2_macro_series_available", "series_id", "available_at_ms"),
+        UniqueConstraint("series_id", "period", "vintage", name="uq_wm_v2_macro_vintage"),
+    )
+
+    observation_id: Mapped[str] = mapped_column(String(180), primary_key=True)
+    series_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    factor_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    period: Mapped[str] = mapped_column(String(64), nullable=False)
+    vintage: Mapped[str] = mapped_column(String(64), nullable=False)
+    available_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WorldModelV2MacroStateRecord(TimestampMixin, Base):
+    __tablename__ = "world_model_v2_macro_states"
+    __table_args__ = (Index("ix_wm_v2_macro_state_as_of", "as_of_ms"),)
+
+    factor_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    as_of_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WorldModelV2PredictionMarketRecord(TimestampMixin, Base):
+    __tablename__ = "world_model_v2_prediction_markets"
+    __table_args__ = (
+        Index("ix_wm_v2_prediction_admission", "admission_status"),
+        UniqueConstraint("venue", "market_id", name="uq_wm_v2_prediction_market"),
+    )
+
+    market_key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    market_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    admission_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WorldModelV2PredictionQuoteRecord(TimestampMixin, Base):
+    __tablename__ = "world_model_v2_prediction_quotes"
+    __table_args__ = (Index("ix_wm_v2_prediction_quote_observed", "observed_at_ms"),)
+
+    quote_key: Mapped[str] = mapped_column(String(240), primary_key=True)
+    market_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    outcome_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    observed_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WorldModelV2PredictionQuoteHistoryRecord(TimestampMixin, Base):
+    __tablename__ = "world_model_v2_prediction_quote_history"
+    __table_args__ = (Index("ix_wm_v2_quote_history_key_time", "quote_key", "observed_at_ms"),)
+
+    history_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    quote_key: Mapped[str] = mapped_column(String(240), nullable=False)
+    observed_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WorldModelV2PredictionQuoteRollupRecord(TimestampMixin, Base):
+    __tablename__ = "world_model_v2_prediction_quote_rollups"
+    __table_args__ = (
+        Index("ix_wm_v2_quote_rollup_key_bucket", "quote_key", "bucket_at_ms"),
+        UniqueConstraint("quote_key", "bucket_at_ms", name="uq_wm_v2_quote_rollup_hour"),
+    )
+
+    rollup_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    quote_key: Mapped[str] = mapped_column(String(240), nullable=False)
+    bucket_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WorldModelV2HypothesisRecord(TimestampMixin, Base):
+    __tablename__ = "world_model_v2_hypotheses"
+    __table_args__ = (Index("ix_wm_v2_hypothesis_as_of", "as_of_ms"),)
+
+    hypothesis_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    market_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    as_of_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WorldModelV2AssetImpactRecord(TimestampMixin, Base):
+    __tablename__ = "world_model_v2_asset_impacts"
+    __table_args__ = (Index("ix_wm_v2_impact_instrument_as_of", "instrument_id", "as_of_ms"),)
+
+    impact_id: Mapped[str] = mapped_column(String(240), primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    factor_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    as_of_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WorldModelV2SnapshotRecord(TimestampMixin, Base):
+    __tablename__ = "world_model_v2_snapshots"
+    __table_args__ = (Index("ix_wm_v2_snapshot_as_of", "as_of_ms"),)
+
+    snapshot_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    as_of_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WorldModelV2SupervisionRecord(TimestampMixin, Base):
+    __tablename__ = "world_model_v2_supervision"
+    __table_args__ = (Index("ix_wm_v2_supervision_target", "target_type", "target_id"),)
+
+    supervision_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    target_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class WorldModelAnnotationRecord(TimestampMixin, Base):
     __tablename__ = "world_model_annotations"
     __table_args__ = (

@@ -10,7 +10,24 @@ It does not:
 - mutate strategy thresholds
 - auto-promote prediction-market signals into execution
 
-## Flow
+## World Model v2
+
+Set `WORLD_MODEL_V2_ENABLED=true` on the `api`, `world-model`, `agent`, and `trader` services for the clean v2 cutover. V2 writes only `world_model_v2_*` tables; v1 tables and prediction-paper positions remain untouched. The new `world_model_v2:newswire` consumer bootstraps from the latest story revision, so corrupt v1 history is not replayed.
+
+V2 separates concepts that v1 conflated:
+
+- forecasts contain a canonical binary Yes probability or a multi-outcome distribution; probability is never a bullish/bearish direction
+- macro states use factor-specific axes, point-in-time official observations, level, momentum, normalized surprise, freshness, and coverage
+- asset impacts are `supportive|adverse|neutral|unknown`, scoped to `intraday|swing|regime`, and marked `current` or explicitly `conditional`
+- evidence is admitted, quarantined, or rejected by deterministic factor/instrument mappings
+
+Official baseline sources are keyless BLS and US Treasury nominal/real curves. FRED breadth is enabled only when `WORLD_MODEL_V2_FRED_API_KEY` is configured; otherwise the model reports partial coverage and does not synthesize missing inputs. Custom cross-asset exposure profiles use `WORLD_MODEL_V2_EXPOSURE_PROFILES_JSON` with factor weights restricted to `-1`, `0`, or `1`.
+
+Prediction discovery remains broad for paper/manual search, while the v2 feature subset is relevance-gated, volume ordered, quality checked, and capped. Sports, entertainment, celebrity, crime, and unmapped political markets cannot enter v2 forecasts.
+
+Set `WORLD_MODEL_V2_SHADOW_FEATURES_ENABLED=true` to persist v2 engine features for comparison. They bypass the active in-memory feature snapshot and cannot affect paper or live strategy decisions.
+
+## Legacy v1 Flow
 
 ```text
 Newswire / social / HIP-4 / evaluations
@@ -37,6 +54,9 @@ GET /world-model/snapshot?symbol=BTC
 GET /world-model/events
 GET /world-model/beliefs
 GET /world-model/prediction-markets
+GET /world-model/macro-state
+GET /world-model/asset-impacts
+GET /world-model/quality
 GET /world-model/memory
 GET /world-model/dashboard/data
 GET /world-model/snapshots
@@ -67,7 +87,7 @@ docker compose up newswire world-model
 ```
 
 - `SERVICE_ROLE=newswire` owns external news provider connections and persists raw events plus canonical `newswire_stories` / append-only `newswire_story_revisions`.
-- `SERVICE_ROLE=world_model` consumes persisted story revisions through `world_model:newswire`, updates world-model tables/snapshots, supersedes retracted story beliefs, and owns prediction-market streams.
+- `SERVICE_ROLE=world_model` consumes persisted story revisions through `world_model_v2:newswire` when v2 is enabled (otherwise `world_model:newswire`), updates the matching versioned stores, and owns prediction-market streams.
 - `SERVICE_ROLE=trader` consumes the same revision stream through `trader:engine_newswire` to derive Institutional Engine news evidence/features/risk state. It keeps `NEWSWIRE_ENABLED=false` and never opens news provider connections.
 - The deprecated `world-model-live` profile is a no-port compatibility alias and must not expose a dashboard.
 
@@ -78,7 +98,7 @@ For a blank local instance, `POST /world-model/dev/seed` creates a `world_model`
 - Operator annotations are append-only audit marks: `confirmed`, `disputed`, `needs_review`, or `pinned`.
 - Outcomes calibrate event/source credibility and prediction-market Brier scores.
 - Time-travel uses persisted snapshots plus replay windows to answer "what did the model believe at this time?"
-- Dashboard graph modes: belief tree, event timeline, contradiction graph, prediction-market consensus, and source reliability.
+- The v2 dashboard is split into a template, stylesheet, and JavaScript asset and presents Macro State, Cross-Asset Impact, Relevant Forecasts, Evidence, and Quarantine/Quality.
 
 ## Source Adapters
 
@@ -99,7 +119,7 @@ Adapters retain raw source payloads in metadata for audit/calibration and mark e
 - HIP-4 outcome books become prediction-market probability signals.
 - HIP-4 edge candidates become advisory evidence only.
 - Completed signal and alpha-event evaluations reinforce source credibility and episodic memory.
-- The institutional engine records world-model features such as `narrative_pressure`, `belief_conflict_score`, `source_consensus_score`, `prediction_implied_probability`, and `belief_salience`.
+- V1 records features such as `narrative_pressure`, `belief_conflict_score`, `source_consensus_score`, `prediction_implied_probability`, and `belief_salience`. V2 features are separately named and persist shadow-only without entering active feature state.
 - The institutional engine also records direct Newswire features from `trader:engine_newswire`, including story impact/direction/source context and persisted `neutral|risk_on|risk_off|shock` state. V2 engine actions and source-quality guards route them; the overlay is shadow by default and remains paper-only.
 - High-stakes roles receive a compact wiki block labeled advisory-only.
 - The engine feature boundary rejects world-model snapshots carrying execution authority, exchange actions, order intents, risk mutations, or config changes.

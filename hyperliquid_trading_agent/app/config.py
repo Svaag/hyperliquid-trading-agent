@@ -597,6 +597,13 @@ class Settings(BaseSettings):
     world_model_tavily_enabled: bool = False
     world_model_tavily_base_url: str = "https://api.tavily.com/search"
     world_model_tavily_queries: str = "BTC crypto market,Fed macro markets,Hyperliquid HYPE"
+    world_model_v2_enabled: bool = False
+    world_model_v2_instruments: str = "BTC,ETH,HYPE,SPY,QQQ,DXY,GOLD,OIL,TLT"
+    world_model_v2_exposure_profiles_json: str = "{}"
+    world_model_v2_fred_api_key: str | None = None
+    world_model_v2_macro_backfill_years: int = 10
+    world_model_v2_prediction_max_markets: int = 100
+    world_model_v2_shadow_features_enabled: bool = False
 
     # Alpaca News WebSocket (free, Benzinga-sourced)
     alpaca_news_enabled: bool = False

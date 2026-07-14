@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable, Literal
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from hyperliquid_trading_agent.app.config import Settings
 from hyperliquid_trading_agent.app.world_model.reducer import now_ms
 from hyperliquid_trading_agent.app.world_model.schemas import PredictionMarketSignal, WorldEvent
+from hyperliquid_trading_agent.app.world_model.v2_schemas import EvidenceV2
 
 RequireAuth = Callable[[Settings, str | None], None]
+_TEMPLATES = Path(__file__).with_name("templates")
+_STATIC = Path(__file__).with_name("static")
 
 
 class AnnotationRequest(BaseModel):
@@ -72,7 +76,15 @@ def register_world_model_routes(app: FastAPI, settings: Settings, require_auth: 
 
     @app.get("/world-model/dashboard", response_class=HTMLResponse)
     async def world_model_dashboard() -> HTMLResponse:
-        return HTMLResponse(_dashboard_html_v2())
+        return HTMLResponse((_TEMPLATES / "dashboard.html").read_text(encoding="utf-8"))
+
+    @app.get("/world-model/dashboard/app.js")
+    async def world_model_dashboard_js() -> Response:
+        return Response((_STATIC / "dashboard.js").read_text(encoding="utf-8"), media_type="application/javascript")
+
+    @app.get("/world-model/dashboard/app.css")
+    async def world_model_dashboard_css() -> Response:
+        return Response((_STATIC / "dashboard.css").read_text(encoding="utf-8"), media_type="text/css")
 
     @app.get("/world-model/dashboard/data")
     async def world_model_dashboard_data(
@@ -122,7 +134,11 @@ def register_world_model_routes(app: FastAPI, settings: Settings, require_auth: 
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _auth(authorization)
-        items = await _service().list_events(limit=limit, source_type=source_type, symbol=symbol)
+        service = _service()
+        if service.status().get("version") == 2:
+            items = await service.list_evidence(limit=limit)
+        else:
+            items = await service.list_events(limit=limit, source_type=source_type, symbol=symbol)
         return {"items": items, "count": len(items)}
 
     @app.get("/world-model/beliefs")
@@ -133,7 +149,16 @@ def register_world_model_routes(app: FastAPI, settings: Settings, require_auth: 
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _auth(authorization)
-        items = await _service().list_beliefs(limit=limit, symbol=symbol, kind=kind)
+        service = _service()
+        if service.status().get("version") == 2:
+            states = await service.list_macro_states(limit=limit)
+            impacts = await service.list_asset_impacts(limit=limit, instrument_id=symbol)
+            items = [
+                {"assertion_type": "macro_state", **item} for item in states
+            ] + [{"assertion_type": "asset_impact", **item} for item in impacts]
+            items = items[:limit]
+        else:
+            items = await service.list_beliefs(limit=limit, symbol=symbol, kind=kind)
         return {"items": items, "count": len(items)}
 
     @app.get("/world-model/prediction-markets")
@@ -144,8 +169,44 @@ def register_world_model_routes(app: FastAPI, settings: Settings, require_auth: 
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _auth(authorization)
-        items = await _service().list_prediction_signals(limit=limit, venue=venue, symbol=symbol)
+        service = _service()
+        if service.status().get("version") == 2:
+            items = await service.list_forecasts(limit=limit)
+            if symbol:
+                items = [item for item in items if symbol.upper() in item.get("instrument_ids", [])]
+        else:
+            items = await service.list_prediction_signals(limit=limit, venue=venue, symbol=symbol)
         return {"items": items, "count": len(items)}
+
+    @app.get("/world-model/macro-state")
+    async def world_model_macro_state(limit: int = 100, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _auth(authorization)
+        service = _service()
+        if service.status().get("version") != 2:
+            raise HTTPException(status_code=404, detail="world model v2 is disabled")
+        items = await service.list_macro_states(limit=limit)
+        return {"items": items, "count": len(items)}
+
+    @app.get("/world-model/asset-impacts")
+    async def world_model_asset_impacts(instrument_id: str | None = None, limit: int = 200, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _auth(authorization)
+        service = _service()
+        if service.status().get("version") != 2:
+            raise HTTPException(status_code=404, detail="world model v2 is disabled")
+        items = await service.list_asset_impacts(limit=limit, instrument_id=instrument_id)
+        return {"items": items, "count": len(items)}
+
+    @app.get("/world-model/quality")
+    async def world_model_quality(limit: int = 100, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _auth(authorization)
+        service = _service()
+        if service.status().get("version") != 2:
+            raise HTTPException(status_code=404, detail="world model v2 is disabled")
+        quarantined = await service.list_evidence(limit=limit, admission_status="quarantined")
+        rejected = await service.list_evidence(limit=limit, admission_status="rejected")
+        prediction_quarantine = await service.list_prediction_markets(limit=limit, admission_status="quarantined")
+        snapshot = service.snapshot().model_dump(mode="json")
+        return {"quality_flags": snapshot.get("quality_flags", []), "coverage": snapshot.get("coverage", {}), "quarantined": quarantined, "rejected": rejected, "prediction_quarantine": prediction_quarantine}
 
     @app.get("/world-model/memory")
     async def world_model_memory(
@@ -155,7 +216,8 @@ def register_world_model_routes(app: FastAPI, settings: Settings, require_auth: 
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _auth(authorization)
-        items = await _service().list_memory(limit=limit, symbol=symbol, memory_type=memory_type)
+        service = _service()
+        items = [] if service.status().get("version") == 2 else await service.list_memory(limit=limit, symbol=symbol, memory_type=memory_type)
         return {"items": items, "count": len(items)}
 
     @app.post("/world-model/annotations")
@@ -318,6 +380,35 @@ async def _dashboard_data(
     streams: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     bounded_limit = min(500, max(1, int(limit or 100)))
+    if service.status().get("version") == 2:
+        snapshot = service.snapshot(symbols=[symbol.upper()] if symbol else None)
+        snapshot_data = snapshot.model_dump(mode="json")
+        evidence = await service.list_evidence(limit=bounded_limit)
+        quarantined = await service.list_evidence(limit=bounded_limit, admission_status="quarantined")
+        quarantined_predictions = await service.list_prediction_markets(limit=bounded_limit, admission_status="quarantined")
+        forecasts = await service.list_forecasts(limit=bounded_limit)
+        impacts = await service.list_asset_impacts(limit=bounded_limit, instrument_id=symbol)
+        states = await service.list_macro_states(limit=bounded_limit)
+        return {
+            "status": service.status(),
+            "filters": {"symbol": symbol.upper() if symbol else None, "topic": topic, "limit": bounded_limit, "mode": "macro", "as_of_ms": as_of_ms},
+            "snapshot": snapshot_data,
+            "summary": {
+                "macro_factors": len(states), "asset_impacts": len(impacts), "relevant_forecasts": len(forecasts),
+                "evidence": len(evidence), "quarantined": len(quarantined) + len(quarantined_predictions), "quality_flags": snapshot_data.get("quality_flags", []),
+            },
+            "macro_state": {"items": states, "count": len(states)},
+            "asset_impacts": {"items": impacts, "count": len(impacts)},
+            "prediction_markets": {"items": forecasts, "count": len(forecasts)},
+            "evidence": {"items": evidence, "count": len(evidence)},
+            "quality": {"items": [{"record_type": "evidence", **item} for item in quarantined] + [{"record_type": "prediction_market", **item} for item in quarantined_predictions], "count": len(quarantined) + len(quarantined_predictions), "coverage": snapshot_data.get("coverage", {})},
+            # Compatibility aliases contain typed v2 assertions, never raw quotes.
+            "events": {"items": evidence, "count": len(evidence)},
+            "beliefs": {"items": [{"assertion_type": "macro_state", **item} for item in states] + [{"assertion_type": "asset_impact", **item} for item in impacts], "count": len(states) + len(impacts)},
+            "memory": {"items": [], "count": 0}, "annotations": {"items": [], "count": 0},
+            "outcomes": {"items": [], "count": 0}, "prediction_calibration": {"items": [], "count": 0},
+            "graph": _build_v2_graph(snapshot_data), "streams": streams or {},
+        }
     graph_mode = mode if mode in {"tree", "timeline", "contradictions", "prediction_consensus", "source_reliability"} else "tree"
     normalized_symbol = symbol.upper().strip() if symbol and symbol.strip() else None
     normalized_topic = topic.lower().strip() if topic and topic.strip() else None
@@ -394,6 +485,34 @@ async def _dashboard_data(
     }
 
 
+def _build_v2_graph(snapshot: dict[str, Any]) -> dict[str, Any]:
+    nodes = [{"id": "world", "type": "world", "label": "World Model v2", "score": 1.0, "data": {"as_of_ms": snapshot.get("as_of_ms"), "quality_flags": snapshot.get("quality_flags", [])}}]
+    edges: list[dict[str, Any]] = []
+    seen = {"world"}
+    for state in snapshot.get("macro_states", []):
+        node_id = f"factor:{state.get('factor_id')}"
+        nodes.append({"id": node_id, "type": "narrative", "label": f"{state.get('factor_id')}: {state.get('regime')}", "score": float(state.get("coverage") or 0), "data": state})
+        edges.append({"source": "world", "target": node_id, "type": "macro_state", "weight": max(0.1, float(state.get("coverage") or 0)), "label": str(state.get("semantic_axis") or "factor")})
+        seen.add(node_id)
+    for impact in snapshot.get("asset_impacts", []):
+        asset_id = f"asset:{impact.get('instrument_id')}"
+        if asset_id not in seen:
+            nodes.append({"id": asset_id, "type": "scope", "label": str(impact.get("instrument_id")), "score": float(impact.get("strength") or 0), "data": {"instrument_id": impact.get("instrument_id")}})
+            seen.add(asset_id)
+        factor_id = f"factor:{impact.get('factor_id')}"
+        if factor_id in seen:
+            edges.append({"source": factor_id, "target": asset_id, "type": "asset_impact", "weight": max(0.1, float(impact.get("strength") or 0)), "label": f"{impact.get('horizon')} {impact.get('direction')} ({impact.get('mode')})"})
+    for forecast in snapshot.get("forecasts", []):
+        forecast_id = f"prediction:{forecast.get('hypothesis_id')}"
+        nodes.append({"id": forecast_id, "type": "prediction_market", "label": str(forecast.get("question") or "forecast"), "score": float(forecast.get("confidence") or 0), "data": forecast})
+        edges.append({"source": "world", "target": forecast_id, "type": "prediction_market", "weight": max(0.1, float(forecast.get("confidence") or 0)), "label": _probability_label(forecast.get("yes_probability"))})
+        for instrument in forecast.get("instrument_ids", []):
+            asset_id = f"asset:{instrument}"
+            if asset_id in seen:
+                edges.append({"source": forecast_id, "target": asset_id, "type": "conditional", "weight": 0.5, "label": "conditional scenario"})
+    return {"nodes": nodes, "edges": edges}
+
+
 def _seed_allowed(settings: Settings) -> bool:
     environment = str(settings.environment or "").lower()
     return bool(settings.world_model_dev_seed_enabled) and (settings.runtime_profile == "dashboard_only" or environment in {"test", "local", "dev", "development"})
@@ -403,6 +522,17 @@ async def _seed_world_model(service: Any, request: SeedRequest, settings: Settin
     symbol = request.symbol.upper().strip() or "BTC"
     topic = request.topic.lower().strip() or "macro"
     ts = now_ms()
+    if service.status().get("version") == 2:
+        factor_ids = [topic] if topic in {"inflation", "labor", "growth", "policy_stance", "rates", "real_rates", "usd", "liquidity", "financial_conditions"} else []
+        evidence = EvidenceV2(
+            evidence_id=f"wm2_seed_{symbol}_{topic}_{ts}", source_type="operator", source="dashboard_seed", provider="local",
+            title=f"Seeded {symbol} {topic} v2 evidence", available_at_ms=ts, observed_at_ms=ts,
+            admission_status="admitted", admission_reason_codes=["operator_seed"], factor_ids=factor_ids,
+            instrument_ids=[symbol], metadata={"shadow_only": True, "execution_authority": "none"},
+        )
+        await service.observe_evidence(evidence)
+        await service.persist_snapshot(force=True)
+        return {"seeded": True, "version": 2, "symbol": symbol, "topic": topic, "evidence": 1, "snapshot_id": service.snapshot().snapshot_id, "execution_authority": "none"}
     base = ts - 15 * 60 * 1000
     events = [
         WorldEvent(
@@ -881,71 +1011,3 @@ def _probability_label(value: Any) -> str:
         return f"p {float(value):.2f}"
     except (TypeError, ValueError):
         return "p n/a"
-
-
-def _dashboard_html() -> str:
-    return """
-<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>World Model Dashboard</title>
-<style>
-:root{color-scheme:dark;--bg:#101113;--panel:#17191d;--panel2:#1f2329;--line:#303640;--text:#eef2f5;--muted:#9ba6b2;--accent:#2dd4bf;--good:#76d672;--warn:#f6b73c;--bad:#f36f56;--blue:#7aa8ff;--violet:#c38cff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}header{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;padding:18px 20px;border-bottom:1px solid var(--line);background:#131518}h1{margin:0 0 5px;font-size:22px;letter-spacing:0}h2{margin:0 0 10px;font-size:15px}h3{margin:18px 0 8px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}.muted{color:var(--muted)}.controls{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}input,select,button{height:34px;background:#111317;color:var(--text);border:1px solid var(--line);border-radius:7px;padding:0 10px;font:inherit}button{cursor:pointer;background:#20252c}button:hover{border-color:var(--accent)}main{display:grid;gap:14px;padding:14px 18px 22px}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px}.metric,.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px}.metric{padding:11px 12px;min-height:70px}.metric b{display:block;font-size:24px;line-height:1.15}.workspace{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:14px;align-items:start}.graph-panel,.detail-panel{min-height:620px}.graph-panel{overflow:auto}.detail-panel{position:sticky;top:12px;max-height:calc(100vh - 24px);overflow:auto}.panel{padding:13px}.graph-head{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:10px}.legend{display:flex;gap:7px;flex-wrap:wrap}.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:999px;padding:3px 7px;color:var(--muted);font-size:12px}.dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}#world-model-graph{display:block;min-width:900px;width:100%;height:650px;background:#111317;border:1px solid #252b33;border-radius:8px}.edge{stroke:#4b5563;stroke-width:1.15;opacity:.7}.edge.contradicts{stroke:var(--bad);stroke-dasharray:4 4;opacity:.95}.edge.prediction_market{stroke:var(--accent)}.node circle{stroke:#101113;stroke-width:2}.node text{fill:var(--text);font-size:12px;pointer-events:none}.node:hover circle{stroke:var(--text)}.world{fill:var(--accent)}.narrative{fill:var(--blue)}.scope,.category{fill:#6ee7b7}.belief{fill:var(--warn)}.prediction_market{fill:var(--violet)}.memory{fill:var(--good)}.event{fill:#d1d5db}.source{fill:#fb923c}pre{white-space:pre-wrap;overflow:auto;background:#111317;border:1px solid #252b33;border-radius:7px;padding:10px;margin:0;max-height:420px}.tables{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:14px}.table-wrap{overflow:auto;max-height:390px}table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px solid #272d35;padding:7px 6px;text-align:left;vertical-align:top}th{color:var(--muted);font-weight:600}.pill{display:inline-block;border-radius:999px;background:#252b33;padding:2px 7px}.good{color:var(--good)}.warn{color:var(--warn)}.bad{color:var(--bad)}@media (max-width:980px){header{display:block}.controls{justify-content:flex-start;margin-top:12px}.workspace{grid-template-columns:1fr}.detail-panel{position:static;max-height:none}#world-model-graph{min-width:760px}}
-</style></head>
-<body><header><div><h1>World Model Dashboard</h1><div class="muted">Market beliefs, prediction signals, memory, and evidence graph.</div></div><div class="controls"><input id="token" type="password" placeholder="Bearer token"/><input id="symbol" placeholder="Symbol"/><input id="topic" placeholder="Topic"/><select id="mode"><option value="tree">Tree</option><option value="timeline">Timeline</option><option value="contradictions">Contradictions</option><option value="prediction_consensus">Prediction consensus</option><option value="source_reliability">Source reliability</option></select><select id="limit"><option>50</option><option selected>100</option><option>250</option><option>500</option></select><button onclick="saveToken()">Save</button><button onclick="load()">Refresh</button></div></header>
-<main><section class="metrics" id="summary"></section><section class="workspace"><div class="panel graph-panel"><div class="graph-head"><h2 id="graph-title">Graph Tree</h2><div class="legend"><span class="chip"><span class="dot narrative"></span>Narrative</span><span class="chip"><span class="dot belief"></span>Belief</span><span class="chip"><span class="dot prediction_market"></span>Prediction</span><span class="chip"><span class="dot memory"></span>Memory</span><span class="chip"><span class="dot event"></span>Event</span></div></div><svg id="world-model-graph" role="img" aria-label="World model graph"></svg></div><aside class="panel detail-panel"><h2>Node Detail</h2><div id="detail" class="muted">No node selected.</div><h3>Snapshot Summary</h3><pre id="snapshot"></pre></aside></section><section class="tables"><div class="panel"><h2>Beliefs</h2><div class="table-wrap" id="beliefs"></div></div><div class="panel"><h2>Prediction Markets</h2><div class="table-wrap" id="predictions"></div></div><div class="panel"><h2>Memory</h2><div class="table-wrap" id="memory"></div></div><div class="panel"><h2>Evidence Events</h2><div class="table-wrap" id="events"></div></div></section></main>
-<script>
-const $=id=>document.getElementById(id);let model={nodes:[],edges:[]};let selected=null;function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}function headers(){const t=localStorage.getItem('agentToken')||'';return t?{'Authorization':'Bearer '+t}:{}}function saveToken(){localStorage.setItem('agentToken',$('token').value.trim());load()}function metric(k,v,cls=''){return `<div class="metric"><span class="muted">${esc(k)}</span><b class="${cls}">${esc(v)}</b></div>`}function fmtPct(v){if(v===null||v===undefined||v==='')return '';const n=Number(v);return Number.isFinite(n)?(n*100).toFixed(1)+'%':String(v)}function fmtNum(v){if(v===null||v===undefined||v==='')return '';const n=Number(v);return Number.isFinite(n)?n.toFixed(2):String(v)}function table(items,cols){if(!items||!items.length)return '<div class="muted">No rows.</div>';return '<table><thead><tr>'+cols.map(c=>`<th>${esc(c[0])}</th>`).join('')+'</tr></thead><tbody>'+items.map(r=>'<tr>'+cols.map(c=>`<td>${c[2]?c[2](r):esc(r[c[1]])}</td>`).join('')+'</tr>').join('')+'</tbody></table>'}async function api(path){const r=await fetch(path,{headers:headers()});if(!r.ok)throw new Error(r.status+' '+await r.text());return await r.json()}
-function depth(n){return ({world:0,narrative:1,scope:1,category:1,source:1,belief:2,prediction_market:2,memory:2,event:3}[n.type]??2)}function radius(n){return Math.max(7,Math.min(18,8+(Number(n.score)||0)*9))}function colorClass(n){return n.type}
-function renderGraph(graph){model=graph||{nodes:[],edges:[]};const svg=$('world-model-graph');const nodes=model.nodes||[],edges=model.edges||[];const byId=Object.fromEntries(nodes.map(n=>[n.id,n]));const groups=[0,1,2,3].map(d=>nodes.filter(n=>depth(n)===d));const maxRows=Math.max(1,...groups.map(g=>g.length));const width=Math.max(900,svg.clientWidth||900);const height=Math.max(650,maxRows*56+80);svg.setAttribute('viewBox',`0 0 ${width} ${height}`);svg.style.height=height+'px';const pos={};groups.forEach((g,d)=>{const x=48+d*((width-110)/3);g.forEach((n,i)=>{pos[n.id]={x:x,y:50+(i+1)*((height-100)/(g.length+1))}})});svg.innerHTML='';edges.forEach(e=>{const a=pos[e.source],b=pos[e.target];if(!a||!b)return;const line=document.createElementNS('http://www.w3.org/2000/svg','path');const mid=(a.x+b.x)/2;line.setAttribute('d',`M${a.x},${a.y} C${mid},${a.y} ${mid},${b.y} ${b.x},${b.y}`);line.setAttribute('class','edge '+esc(e.type));line.setAttribute('fill','none');svg.appendChild(line)});nodes.forEach(n=>{const p=pos[n.id];if(!p)return;const g=document.createElementNS('http://www.w3.org/2000/svg','g');g.setAttribute('class','node');g.setAttribute('tabindex','0');g.onclick=()=>selectNode(n);const c=document.createElementNS('http://www.w3.org/2000/svg','circle');c.setAttribute('cx',p.x);c.setAttribute('cy',p.y);c.setAttribute('r',radius(n));c.setAttribute('class',colorClass(n));g.appendChild(c);const t=document.createElementNS('http://www.w3.org/2000/svg','text');t.setAttribute('x',p.x+radius(n)+7);t.setAttribute('y',p.y+4);t.textContent=n.label.length>52?n.label.slice(0,49)+'...':n.label;g.appendChild(t);svg.appendChild(g)});if(nodes.length&&!selected)selectNode(nodes[0])}
-function targetFor(n){const [prefix,...rest]=String(n.id).split(':');const id=rest.join(':');const map={event:'event',belief:'belief',prediction:'prediction_signal',memory:'memory',source:'source',cluster:'narrative'};return map[prefix]?{target_type:map[prefix],target_id:id}:null}
-async function annotate(action){if(!selected)return;const t=targetFor(selected);if(!t)return;const note=prompt('Annotation note','')||'';const r=await fetch('/world-model/annotations',{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify({...t,action,note,metadata:{source:'dashboard'}})});if(!r.ok)throw new Error(await r.text());await load()}
-function selectNode(n){selected=n;const t=targetFor(n);const controls=t?`<p><button onclick="annotate('confirmed')">Confirm</button> <button onclick="annotate('disputed')">Dispute</button> <button onclick="annotate('needs_review')">Review</button> <button onclick="annotate('pinned')">Pin</button></p>`:'';$('detail').innerHTML=`<h3>${esc(n.type)}</h3><p><b>${esc(n.label)}</b></p>${controls}<pre>${esc(JSON.stringify(n.data||{},null,2))}</pre>`}
-async function load(){try{$('token').value=localStorage.getItem('agentToken')||'';const qs=new URLSearchParams();if($('symbol').value.trim())qs.set('symbol',$('symbol').value.trim());if($('topic').value.trim())qs.set('topic',$('topic').value.trim());qs.set('mode',$('mode').value);qs.set('limit',$('limit').value);const d=await api('/world-model/dashboard/data?'+qs.toString());const s=d.summary||{},st=d.status||{},snap=d.snapshot||{};const repo=st.repository_enabled?(st.repository_available?'OK':'FALLBACK'):'OFF';$('graph-title').textContent=($('mode').selectedOptions[0]||{}).textContent||'Graph';$('summary').innerHTML=[metric('Beliefs',s.beliefs??0),metric('Events',s.events??0),metric('Predictions',s.prediction_market_signals??0),metric('Annotations',s.annotations??0),metric('Repository',repo,repo==='OK'?'good':repo==='OFF'?'':'warn'),metric('Model errors',st.error_count??0,(st.error_count||0)?'bad':'good')].join('');$('snapshot').textContent=JSON.stringify({summary:snap.summary,quality_flags:snap.quality_flags,filters:d.filters,repository:{available:st.repository_available,last_error:st.repository_last_error,cooldown_until_ms:st.repository_cooldown_until_ms}},null,2);renderGraph(d.graph);$('beliefs').innerHTML=table(d.beliefs.items,[['Direction','direction',(r)=>`<span class="pill">${esc(r.direction)}</span>`],['Subject','subject'],['Belief','statement'],['Conf','confidence',(r)=>fmtPct(r.confidence)]]);$('predictions').innerHTML=table(d.prediction_markets.items,[['Venue','venue'],['Question','question'],['P','implied_probability',(r)=>fmtPct(r.implied_probability)],['Liq','liquidity_usd',(r)=>fmtNum(r.liquidity_usd)]]);$('memory').innerHTML=table(d.memory.items,[['Type','memory_type'],['Subject','subject'],['Content','content'],['Sal','salience',(r)=>fmtPct(r.salience)]]);$('events').innerHTML=table(d.events.items,[['Source','source'],['Type','source_type'],['Title','title'],['Imp','importance_score',(r)=>fmtNum(r.importance_score)]])}catch(e){$('summary').innerHTML=`<div class="metric"><span class="bad">Load failed</span><pre>${esc(e.message)}</pre></div>`}}load();
-</script></body></html>
-""".strip()
-
-
-def _dashboard_html_v2() -> str:
-    return """
-<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>World Model Dashboard</title>
-<style>
-:root{color-scheme:dark;--bg:#101113;--panel:#17191d;--panel2:#20242b;--line:#303640;--text:#eef2f5;--muted:#9ba6b2;--accent:#2dd4bf;--good:#76d672;--warn:#f6b73c;--bad:#f36f56;--blue:#7aa8ff;--violet:#c38cff;--orange:#fb923c}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}header{display:grid;grid-template-columns:minmax(220px,1fr) minmax(320px,2fr);gap:16px;align-items:start;padding:18px 20px;border-bottom:1px solid var(--line);background:#131518}h1{margin:0 0 5px;font-size:22px;letter-spacing:0}h2{margin:0 0 10px;font-size:15px}h3{margin:18px 0 8px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}.muted{color:var(--muted)}.controls,.toolrow{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}input,select,button{height:34px;background:#111317;color:var(--text);border:1px solid var(--line);border-radius:7px;padding:0 10px;font:inherit}input[type=range]{padding:0;min-width:220px}input[type=number]{width:90px}button{cursor:pointer;background:#20252c}button:hover{border-color:var(--accent)}button:disabled{opacity:.45;cursor:not-allowed}.check{display:inline-flex;align-items:center;gap:6px;height:34px;border:1px solid var(--line);border-radius:7px;padding:0 10px;color:var(--muted);background:#111317}.check input{height:auto}.small{font-size:12px}.wide{min-width:220px}main{display:grid;gap:14px;padding:14px 18px 22px}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px}.metric,.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px}.metric{padding:11px 12px;min-height:70px}.metric b{display:block;font-size:24px;line-height:1.15}.workspace{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:14px;align-items:start}.graph-panel,.detail-panel{min-height:640px}.graph-panel{overflow:auto}.detail-panel{position:sticky;top:12px;max-height:calc(100vh - 24px);overflow:auto}.panel{padding:13px}.graph-head{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:10px}.legend{display:flex;gap:7px;flex-wrap:wrap}.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:999px;padding:3px 7px;color:var(--muted);font-size:12px}.dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}#world-model-graph{display:block;min-width:900px;width:100%;height:650px;background:#111317;border:1px solid #252b33;border-radius:8px}.edge{stroke:#4b5563;stroke-width:1.15;opacity:.7}.edge.contradicts{stroke:var(--bad);stroke-dasharray:4 4;opacity:.95}.edge.prediction_market{stroke:var(--accent)}.node circle{stroke:#101113;stroke-width:2}.node text{fill:var(--text);font-size:12px;pointer-events:none}.node:hover circle{stroke:var(--text)}.world{fill:var(--accent)}.narrative{fill:var(--blue)}.scope,.category{fill:#6ee7b7}.belief{fill:var(--warn)}.prediction_market{fill:var(--violet)}.memory{fill:var(--good)}.event{fill:#d1d5db}.source{fill:var(--orange)}pre{white-space:pre-wrap;overflow:auto;background:#111317;border:1px solid #252b33;border-radius:7px;padding:10px;margin:0;max-height:360px}.tables{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:14px}.table-wrap{overflow:auto;max-height:390px}table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px solid #272d35;padding:7px 6px;text-align:left;vertical-align:top}th{color:var(--muted);font-weight:600}.pill{display:inline-block;border-radius:999px;background:#252b33;padding:2px 7px}.good{color:var(--good)}.warn{color:var(--warn)}.bad{color:var(--bad)}.side-list{display:grid;gap:7px}.queue-item{border:1px solid #272d35;border-radius:7px;padding:8px;background:#111317}.timebar{display:grid;gap:9px}.timebar .toolrow{justify-content:flex-start}.statusline{min-height:18px}@media (max-width:1040px){header{display:block}.controls{justify-content:flex-start;margin-top:12px}.workspace{grid-template-columns:1fr}.detail-panel{position:static;max-height:none}#world-model-graph{min-width:760px}}
-</style></head>
-<body><header><div><h1>World Model Dashboard</h1><div class="muted">Advisory market state, prediction consensus, source memory, and operator supervision.</div></div><div class="controls"><input id="token" type="password" placeholder="Bearer token"/><input id="symbol" placeholder="Symbol"/><input id="topic" placeholder="Topic"/><select id="mode"><option value="tree">Tree</option><option value="timeline">Timeline</option><option value="contradictions">Contradictions</option><option value="prediction_consensus">Prediction consensus</option><option value="source_reliability">Source reliability</option></select><select id="limit"><option>50</option><option selected>100</option><option>250</option><option>500</option></select><input id="search" class="wide" placeholder="Search nodes"/><input id="sourceFilter" placeholder="Source"/><input id="minScore" type="number" min="0" max="1" step="0.05" placeholder="Score"/><label class="check small"><input id="contradictionsOnly" type="checkbox"/>Contradictions</label><button onclick="saveToken()">Save</button><button onclick="load()">Refresh</button></div></header>
-<main><section class="panel timebar"><div class="toolrow"><input id="asOf" type="datetime-local"/><input id="timeSlider" type="range" min="0" max="1" step="1"/><button onclick="loadSnapshots(true)">Snapshots</button><button onclick="loadAtTime()">At Time</button><button onclick="useNow()">Now</button><input id="replayStart" type="datetime-local"/><input id="replayEnd" type="datetime-local"/><button onclick="runReplay()">Replay</button><button onclick="pollAdapters()">Poll</button><button onclick="seedDemo()">Seed</button></div><div id="timeStatus" class="muted statusline"></div></section><section class="metrics" id="summary"></section><section class="workspace"><div class="panel graph-panel"><div class="graph-head"><h2 id="graph-title">Graph Tree</h2><div class="legend"><span class="chip"><span class="dot narrative"></span>Narrative</span><span class="chip"><span class="dot belief"></span>Belief</span><span class="chip"><span class="dot prediction_market"></span>Prediction</span><span class="chip"><span class="dot memory"></span>Memory</span><span class="chip"><span class="dot event"></span>Event</span></div></div><svg id="world-model-graph" role="img" aria-label="World model graph"></svg></div><aside class="panel detail-panel"><h2>Node Detail</h2><div id="detail" class="muted">No node selected.</div><h3>Annotation Queue</h3><select id="queueAction" onchange="renderAnnotationQueue(lastData)"><option value="">All annotations</option><option value="needs_review">Needs review</option><option value="disputed">Disputed</option><option value="pinned">Pinned</option><option value="confirmed">Confirmed</option></select><div id="annotationQueue" class="side-list"></div><h3>Replay</h3><pre id="replay"></pre><h3>Streams</h3><pre id="streams"></pre><h3>Adapters</h3><pre id="adapters"></pre><h3>Snapshot Summary</h3><pre id="snapshot"></pre></aside></section><section class="tables"><div class="panel"><h2>Beliefs</h2><div class="table-wrap" id="beliefs"></div></div><div class="panel"><h2>Prediction Markets</h2><div class="table-wrap" id="predictions"></div></div><div class="panel"><h2>Calibration</h2><div class="table-wrap" id="calibration"></div></div><div class="panel"><h2>Outcomes</h2><div class="table-wrap" id="outcomes"></div></div><div class="panel"><h2>Memory</h2><div class="table-wrap" id="memory"></div></div><div class="panel"><h2>Evidence Events</h2><div class="table-wrap" id="events"></div></div></section></main>
-<script>
-const $=id=>document.getElementById(id);let rawGraph={nodes:[],edges:[]};let model={nodes:[],edges:[]};let selected=null;let asOfMs=null;let snapshots=[];let lastData=null;
-function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
-function headers(json=false){const t=localStorage.getItem('agentToken')||'';const h=t?{'Authorization':'Bearer '+t}:{};if(json)h['Content-Type']='application/json';return h}
-function saveToken(){localStorage.setItem('agentToken',$('token').value.trim());load()}
-function metric(k,v,cls=''){return `<div class="metric"><span class="muted">${esc(k)}</span><b class="${cls}">${esc(v)}</b></div>`}
-function fmtPct(v){if(v===null||v===undefined||v==='')return '';const n=Number(v);return Number.isFinite(n)?(n*100).toFixed(1)+'%':String(v)}
-function fmtNum(v){if(v===null||v===undefined||v==='')return '';const n=Number(v);return Number.isFinite(n)?n.toFixed(2):String(v)}
-function fmtTime(ms){const n=Number(ms);return Number.isFinite(n)&&n>0?new Date(n).toLocaleString():''}
-function table(items,cols){if(!items||!items.length)return '<div class="muted">No rows.</div>';return '<table><thead><tr>'+cols.map(c=>`<th>${esc(c[0])}</th>`).join('')+'</tr></thead><tbody>'+items.map(r=>'<tr>'+cols.map(c=>`<td>${c[2]?c[2](r):esc(r[c[1]])}</td>`).join('')+'</tr>').join('')+'</tbody></table>'}
-async function api(path){const r=await fetch(path,{headers:headers()});if(!r.ok)throw new Error(r.status+' '+await r.text());return await r.json()}
-async function post(path,body=null){const r=await fetch(path,{method:'POST',headers:headers(true),body:body?JSON.stringify(body):null});if(!r.ok)throw new Error(r.status+' '+await r.text());return await r.json()}
-function depth(n){return ({world:0,narrative:1,scope:1,category:1,source:1,belief:2,prediction_market:2,memory:2,event:3}[n.type]??2)}
-function radius(n){return Math.max(7,Math.min(18,8+(Number(n.score)||0)*9))}
-function colorClass(n){return n.type}
-function activeGraphFilters(){return {q:$('search').value.trim().toLowerCase(),source:$('sourceFilter').value.trim().toLowerCase(),min:Number($('minScore').value),contradictions:$('contradictionsOnly').checked}}
-function filteredGraph(graph){const f=activeGraphFilters();const min=Number.isFinite(f.min)?f.min:null;const contradictionIds=new Set();(graph.edges||[]).filter(e=>e.type==='contradicts').forEach(e=>{contradictionIds.add(e.source);contradictionIds.add(e.target)});const filtered=(graph.nodes||[]).filter(n=>{if(n.id==='world')return true;if(f.contradictions&&!contradictionIds.has(n.id))return false;if(min!==null&&min>0&&Number(n.score||0)<min)return false;const data=n.data||{};const hay=(n.label+' '+n.type+' '+JSON.stringify(data)).toLowerCase();if(f.q&&!hay.includes(f.q))return false;if(f.source){const src=String(data.source||data.provider||data.venue||'').toLowerCase();if(!src.includes(f.source)&&!hay.includes(f.source))return false}return true});const ids=new Set(filtered.map(n=>n.id));return {nodes:filtered,edges:(graph.edges||[]).filter(e=>ids.has(e.source)&&ids.has(e.target))}}
-function renderGraph(graph){rawGraph=graph||{nodes:[],edges:[]};model=filteredGraph(rawGraph);const svg=$('world-model-graph');const nodes=model.nodes||[],edges=model.edges||[];const groups=[0,1,2,3].map(d=>nodes.filter(n=>depth(n)===d));const maxRows=Math.max(1,...groups.map(g=>g.length));const width=Math.max(900,svg.clientWidth||900);const height=Math.max(650,maxRows*56+80);svg.setAttribute('viewBox',`0 0 ${width} ${height}`);svg.style.height=height+'px';const pos={};groups.forEach((g,d)=>{const x=48+d*((width-110)/3);g.forEach((n,i)=>{pos[n.id]={x:x,y:50+(i+1)*((height-100)/(g.length+1))}})});svg.innerHTML='';edges.forEach(e=>{const a=pos[e.source],b=pos[e.target];if(!a||!b)return;const line=document.createElementNS('http://www.w3.org/2000/svg','path');const mid=(a.x+b.x)/2;line.setAttribute('d',`M${a.x},${a.y} C${mid},${a.y} ${mid},${b.y} ${b.x},${b.y}`);line.setAttribute('class','edge '+esc(e.type));line.setAttribute('fill','none');svg.appendChild(line)});nodes.forEach(n=>{const p=pos[n.id];if(!p)return;const g=document.createElementNS('http://www.w3.org/2000/svg','g');g.setAttribute('class','node');g.setAttribute('tabindex','0');g.onclick=()=>selectNode(n);const c=document.createElementNS('http://www.w3.org/2000/svg','circle');c.setAttribute('cx',p.x);c.setAttribute('cy',p.y);c.setAttribute('r',radius(n));c.setAttribute('class',colorClass(n));g.appendChild(c);const t=document.createElementNS('http://www.w3.org/2000/svg','text');t.setAttribute('x',p.x+radius(n)+7);t.setAttribute('y',p.y+4);t.textContent=n.label.length>52?n.label.slice(0,49)+'...':n.label;g.appendChild(t);svg.appendChild(g)});if(nodes.length&&(!selected||!nodes.some(n=>n.id===selected.id)))selectNode(nodes[0])}
-function targetFor(n){const [prefix,...rest]=String(n.id).split(':');const id=rest.join(':');const map={event:'event',belief:'belief',prediction:'prediction_signal',memory:'memory',source:'source',cluster:'narrative'};return map[prefix]?{target_type:map[prefix],target_id:id}:null}
-function symbolForNode(n){const symbols=(n.data||{}).symbols||[];return symbols[0]||$('symbol').value.trim()||null}
-async function annotate(action){if(!selected)return;const t=targetFor(selected);if(!t)return;const note=prompt('Annotation note','')||'';await post('/world-model/annotations',{...t,action,note,metadata:{source:'dashboard'}});await load()}
-async function recordOutcome(outcome){if(!selected)return;const t=targetFor(selected);if(!t)return;await post('/world-model/outcomes',{...t,outcome,symbol:symbolForNode(selected),realized_value:(outcome==='yes'||outcome==='worked')?1.0:(outcome==='no'||outcome==='failed')?0.0:null,metadata:{source:'dashboard'}});await load()}
-function selectNode(n){selected=n;const t=targetFor(n);let controls='';if(t){controls+=`<p><button onclick="annotate('confirmed')">Confirm</button> <button onclick="annotate('disputed')">Dispute</button> <button onclick="annotate('needs_review')">Review</button> <button onclick="annotate('pinned')">Pin</button></p>`}if(t&&t.target_type==='prediction_signal'){controls+=`<p><button onclick="recordOutcome('yes')">Mark Yes</button> <button onclick="recordOutcome('no')">Mark No</button></p>`}if(t&&t.target_type==='event'){controls+=`<p><button onclick="recordOutcome('worked')">Worked</button> <button onclick="recordOutcome('failed')">Failed</button></p>`}$('detail').innerHTML=`<h3>${esc(n.type)}</h3><p><b>${esc(n.label)}</b></p>${controls}<pre>${esc(JSON.stringify(n.data||{},null,2))}</pre>`}
-function renderAnnotationQueue(d){if(!d){$('annotationQueue').innerHTML='<div class="muted">No rows.</div>';return}const action=$('queueAction').value;let items=((d.annotations||{}).items||[]);if(action)items=items.filter(x=>x.action===action);$('annotationQueue').innerHTML=items.slice(0,20).map(x=>`<div class="queue-item"><span class="pill">${esc(x.action)}</span> <b>${esc(x.target_type)}:${esc(x.target_id)}</b><div class="muted small">${esc(fmtTime(x.created_at_ms))}</div><div>${esc(x.note||'')}</div></div>`).join('')||'<div class="muted">No rows.</div>'}
-function toLocalInput(ms){if(!ms)return '';const d=new Date(Number(ms));d.setMinutes(d.getMinutes()-d.getTimezoneOffset());return d.toISOString().slice(0,16)}
-function fromLocalInput(v){const n=Date.parse(v);return Number.isFinite(n)?n:null}
-async function loadSnapshots(showStatus=false){const qs=new URLSearchParams();if($('symbol').value.trim())qs.set('symbol',$('symbol').value.trim());if($('topic').value.trim())qs.set('topic',$('topic').value.trim());qs.set('limit','100');const d=await api('/world-model/snapshots?'+qs.toString());snapshots=(d.items||[]).sort((a,b)=>Number(a.as_of_ms||0)-Number(b.as_of_ms||0));if(snapshots.length){const min=Number(snapshots[0].as_of_ms),max=Number(snapshots[snapshots.length-1].as_of_ms);$('timeSlider').min=min;$('timeSlider').max=max;$('timeSlider').value=asOfMs||max;if(!$('replayStart').value)$('replayStart').value=toLocalInput(min);if(!$('replayEnd').value)$('replayEnd').value=toLocalInput(max);if(showStatus)$('timeStatus').textContent=`${snapshots.length} snapshots from ${fmtTime(min)} to ${fmtTime(max)}`}else if(showStatus){$('timeStatus').textContent='No snapshots found.'}}
-function loadAtTime(){asOfMs=fromLocalInput($('asOf').value);if(asOfMs)$('timeSlider').value=asOfMs;load()}
-function useNow(){asOfMs=null;$('asOf').value='';load()}
-async function runReplay(){const start=fromLocalInput($('replayStart').value)||(snapshots[0]&&Number(snapshots[0].as_of_ms))||0;const end=fromLocalInput($('replayEnd').value)||asOfMs||Date.now();const qs=new URLSearchParams({start_ms:String(start),end_ms:String(end),limit:'200'});if($('symbol').value.trim())qs.set('symbol',$('symbol').value.trim());if($('topic').value.trim())qs.set('topic',$('topic').value.trim());const d=await api('/world-model/replay?'+qs.toString());$('replay').textContent=JSON.stringify({window:[fmtTime(start),fmtTime(end)],snapshots:(d.snapshots||[]).length,events:(d.events||[]).length,annotations:(d.annotations||[]).length,outcomes:(d.outcomes||[]).length,latest_event:(d.events||[]).slice(-1)[0]||null},null,2)}
-async function loadAdapters(){try{const d=await api('/world-model/adapters/status');$('adapters').textContent=JSON.stringify(d,null,2)}catch(e){$('adapters').textContent=e.message}}
-async function loadStreams(){try{const d=await api('/world-model/streams/status');$('streams').textContent=JSON.stringify(d,null,2)}catch(e){$('streams').textContent=e.message}}
-async function pollAdapters(){try{$('timeStatus').textContent='Polling adapters...';const d=await post('/world-model/adapters/poll?force=true');$('timeStatus').textContent='Adapter poll complete.';$('adapters').textContent=JSON.stringify(d,null,2);await load()}catch(e){$('timeStatus').textContent=e.message}}
-async function seedDemo(){try{const body={symbol:$('symbol').value.trim()||'BTC',topic:$('topic').value.trim()||'macro'};const d=await post('/world-model/dev/seed',body);$('timeStatus').textContent=`Seeded ${d.symbol} / ${d.topic}`;await loadSnapshots(true);await load()}catch(e){$('timeStatus').textContent=e.message}}
-async function load(){try{$('token').value=localStorage.getItem('agentToken')||'';const qs=new URLSearchParams();if($('symbol').value.trim())qs.set('symbol',$('symbol').value.trim());if($('topic').value.trim())qs.set('topic',$('topic').value.trim());qs.set('mode',$('mode').value);qs.set('limit',$('limit').value);if(asOfMs)qs.set('as_of_ms',String(asOfMs));const d=await api('/world-model/dashboard/data?'+qs.toString());lastData=d;const s=d.summary||{},st=d.status||{},snap=d.snapshot||{};const repo=st.repository_enabled?(st.repository_available?'OK':'FALLBACK'):'OFF';$('graph-title').textContent=($('mode').selectedOptions[0]||{}).textContent||'Graph';$('summary').innerHTML=[metric('Beliefs',s.beliefs??0),metric('Events',s.events??0),metric('Predictions',s.prediction_market_signals??0),metric('Annotations',s.annotations??0),metric('Repository',repo,repo==='OK'?'good':repo==='OFF'?'':'warn'),metric('Model errors',st.error_count??0,(st.error_count||0)?'bad':'good')].join('');$('snapshot').textContent=JSON.stringify({summary:snap.summary,as_of_ms:snap.as_of_ms,as_of:fmtTime(snap.as_of_ms),quality_flags:snap.quality_flags,filters:d.filters,repository:{available:st.repository_available,last_error:st.repository_last_error,cooldown_until_ms:st.repository_cooldown_until_ms}},null,2);if(d.streams)$('streams').textContent=JSON.stringify(d.streams,null,2);if(asOfMs)$('asOf').value=toLocalInput(asOfMs);renderGraph(d.graph);renderAnnotationQueue(d);$('beliefs').innerHTML=table(d.beliefs.items,[['Direction','direction',r=>`<span class="pill">${esc(r.direction)}</span>`],['Subject','subject'],['Belief','statement'],['Conf','confidence',r=>fmtPct(r.confidence)]]);$('predictions').innerHTML=table(d.prediction_markets.items,[['Venue','venue'],['Question','question'],['P','implied_probability',r=>fmtPct(r.implied_probability)],['Delta','probability_delta',r=>fmtPct(r.probability_delta)],['Liq','liquidity_usd',r=>fmtNum(r.liquidity_usd)]]);$('calibration').innerHTML=table((d.prediction_calibration||{}).items,[['Venue','venue'],['Market','market_id'],['P','implied_probability',r=>fmtPct(r.implied_probability)],['Realized','realized_outcome',r=>fmtPct(r.realized_outcome)],['Brier','brier_score',r=>fmtNum(r.brier_score)]]);$('outcomes').innerHTML=table((d.outcomes||{}).items,[['Target','target_id'],['Type','target_type'],['Outcome','outcome'],['At','created_at_ms',r=>fmtTime(r.created_at_ms)]]);$('memory').innerHTML=table(d.memory.items,[['Type','memory_type'],['Subject','subject'],['Content','content'],['Sal','salience',r=>fmtPct(r.salience)]]);$('events').innerHTML=table(d.events.items,[['Source','source'],['Type','source_type'],['Title','title'],['Imp','importance_score',r=>fmtNum(r.importance_score)]]);await loadAdapters();await loadStreams();if(!snapshots.length)await loadSnapshots(false)}catch(e){$('summary').innerHTML=`<div class="metric"><span class="bad">Load failed</span><pre>${esc(e.message)}</pre></div>`}}
-['search','sourceFilter','minScore','contradictionsOnly'].forEach(id=>$(id).addEventListener('input',()=>renderGraph(rawGraph)));$('timeSlider').addEventListener('change',()=>{asOfMs=Number($('timeSlider').value);$('asOf').value=toLocalInput(asOfMs);load()});load();
-</script></body></html>
-""".strip()

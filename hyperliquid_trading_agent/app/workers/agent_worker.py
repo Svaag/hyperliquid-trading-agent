@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from hyperliquid_trading_agent import __version__
@@ -21,7 +22,7 @@ from hyperliquid_trading_agent.app.tradfi.client import TradFiClient
 from hyperliquid_trading_agent.app.tradfi.factory import build_tradfi_client
 from hyperliquid_trading_agent.app.tradfi.options_flow import OptionsFlowDetector
 from hyperliquid_trading_agent.app.workers.base import BaseWorker
-from hyperliquid_trading_agent.app.world_model.service import WorldModelService
+from hyperliquid_trading_agent.app.world_model.factory import build_world_model_service
 
 
 class AgentWorker(BaseWorker):
@@ -48,7 +49,10 @@ class AgentWorker(BaseWorker):
         model_gateway = ModelGateway(settings=self.settings)
         tools = AgentTools(hyperliquid=self.hyperliquid, news=news, repository=self.repository, tradfi=self.tradfi, options_flow=options_flow)
         memory_service = MemoryService(settings=self.settings, repository=self.repository)
-        world_model_service = WorldModelService(settings=self.settings, repository=self.repository)
+        world_model_service = build_world_model_service(settings=self.settings, repository=self.repository)
+        hydrate = getattr(world_model_service, "hydrate", None)
+        if callable(hydrate):
+            await hydrate()
         decision_context_recorder = DecisionContextRecorder(settings=self.settings, repository=self.repository, code_version=__version__)
         await decision_context_recorder.snapshot_startup()
         ws_worker = HyperliquidWebSocketWorker(settings=self.settings)
@@ -64,11 +68,25 @@ class AgentWorker(BaseWorker):
             decision_context_recorder=decision_context_recorder,
         )
         self.runner = TradingAgentRunner(tools=tools, model_gateway=model_gateway, repository=self.repository, settings=self.settings, high_stakes_graph=self.graph)
+        cache_task = asyncio.create_task(self._world_model_cache_loop(world_model_service), name="agent-world-model-v2-cache") if self.settings.world_model_v2_enabled else None
         try:
             await self.command_loop({"ask": self._handle_ask, "trade_proposal": self._handle_trade_proposal})
         finally:
+            if cache_task is not None:
+                cache_task.cancel()
+                try:
+                    await cache_task
+                except asyncio.CancelledError:
+                    pass
             if self.tradfi is not None:
                 await self.tradfi.close()
+
+    async def _world_model_cache_loop(self, service: Any) -> None:
+        while True:
+            await asyncio.sleep(30)
+            refresh = getattr(service, "refresh_read_cache", None)
+            if callable(refresh):
+                await refresh()
             await self.hyperliquid.close()
 
     async def _handle_ask(self, command: dict[str, Any]) -> dict[str, Any]:

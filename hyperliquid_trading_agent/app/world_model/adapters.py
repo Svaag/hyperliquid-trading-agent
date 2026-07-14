@@ -105,7 +105,8 @@ class PolymarketAdapter(WorldSourceAdapter):
 
     async def poll(self, service: WorldModelService) -> dict[str, int]:
         url = self.settings.world_model_polymarket_base_url.rstrip("/") + "/markets"
-        params = {"active": "true", "closed": "false", "limit": self.settings.world_model_adapter_max_items}
+        limit = self.settings.world_model_v2_prediction_max_markets if self.settings.world_model_v2_enabled else self.settings.world_model_adapter_max_items
+        params = {"active": "true", "closed": "false", "limit": min(500, max(100, limit * 4)), "order": "volume", "ascending": "false"}
         async with httpx.AsyncClient(timeout=self.settings.world_model_adapter_timeout_seconds) as client:
             response = await client.get(url, params=params)
             response.raise_for_status()
@@ -114,7 +115,7 @@ class PolymarketAdapter(WorldSourceAdapter):
         count = 0
         duplicate_count = 0
         seen_signal_ids: set[str] = set()
-        for market in list(markets or [])[: self.settings.world_model_adapter_max_items]:
+        for market in list(markets or []):
             signals = _polymarket_signals(market, self.settings)
             for signal in signals:
                 if signal.signal_id in seen_signal_ids:
@@ -124,6 +125,8 @@ class PolymarketAdapter(WorldSourceAdapter):
                 signal = _with_probability_delta(service, signal)
                 await service.observe_prediction_market_signal(signal)
                 count += 1
+            if count >= limit * 2:
+                break
         return {"events": 0, "prediction_signals": count, "duplicates_skipped": duplicate_count}
 
 
@@ -331,7 +334,10 @@ def _kalshi_signal(market: dict[str, Any], settings: Settings) -> PredictionMark
 
 
 def _with_probability_delta(service: WorldModelService, signal: PredictionMarketSignal) -> PredictionMarketSignal:
-    previous = service.reducer.prediction_signals.get(signal.signal_id)
+    reducer = getattr(service, "reducer", None)
+    if reducer is None:
+        return signal
+    previous = reducer.prediction_signals.get(signal.signal_id)
     if previous is None or previous.implied_probability is None or signal.implied_probability is None:
         return signal
     return signal.model_copy(update={"probability_delta": signal.implied_probability - previous.implied_probability})

@@ -1,0 +1,26 @@
+:root { color-scheme: dark; --bg:#101216; --panel:#181b21; --line:#303743; --text:#edf2f7; --muted:#9aa7b5; --accent:#2dd4bf; --bad:#fb7185; --warn:#fbbf24; }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 Inter,system-ui,sans-serif; }
+header { display:flex; justify-content:space-between; gap:20px; padding:20px; border-bottom:1px solid var(--line); }
+h1,h2,p { margin:0; } h1 { font-size:24px; } h2 { margin-bottom:10px; font-size:15px; } p { color:var(--muted); }
+.controls { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:8px; }
+.timeline { display:flex; align-items:center; gap:12px; } .timeline input { flex:1; } .spaced { margin-top:18px; }
+input,select,button { height:36px; border:1px solid var(--line); border-radius:7px; background:#11141a; color:var(--text); padding:0 10px; }
+button { cursor:pointer; } button:hover { border-color:var(--accent); }
+main { display:grid; gap:14px; padding:16px 20px 28px; }
+.panel,.metric { border:1px solid var(--line); border-radius:9px; background:var(--panel); padding:13px; overflow:auto; }
+.metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; }
+.metric span { display:block; color:var(--muted); } .metric b { font-size:22px; }
+.layout { display:grid; grid-template-columns:minmax(0,3fr) minmax(260px,1fr); gap:14px; }
+.grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th,td { padding:7px 6px; border-bottom:1px solid #29303a; text-align:left; vertical-align:top; }
+th { color:var(--muted); font-weight:600; }
+.pill { display:inline-block; padding:2px 7px; border-radius:999px; background:#272e38; }
+.supportive { color:var(--accent); } .adverse { color:var(--bad); } .unknown { color:var(--muted); }
+pre { margin:0; white-space:pre-wrap; color:var(--muted); }
+.world-map { display:flex; flex-wrap:wrap; gap:8px; }
+.world-map .node { border:1px solid var(--line); border-radius:999px; padding:5px 9px; background:#11141a; }
+.world-map .edge { color:var(--muted); padding:5px 0; }
+.empty { color:var(--muted); padding:8px 0; }
+@media (max-width:900px) { header { display:block; } .controls { justify-content:flex-start; margin-top:12px; } .layout,.grid { grid-template-columns:1fr; } }

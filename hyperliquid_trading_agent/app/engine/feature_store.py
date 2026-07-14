@@ -82,6 +82,21 @@ class FeatureStore:
                 await record(feature.model_dump(mode="json"))
         return feature
 
+    async def record_shadow(self, feature: FeatureValue) -> FeatureValue:
+        """Persist a feature without exposing it through active in-memory snapshots."""
+        feature = feature.model_copy(update={"metadata": {**feature.metadata, "shadow_only": True, "execution_authority": "none"}})
+        if self.repository is not None:
+            record = getattr(self.repository, "record_feature_value", None)
+            if callable(record):
+                await record(feature.model_dump(mode="json"))
+        return feature
+
+    async def features_for_world_model_v2_shadow(self, *, asset: str, snapshot: Any) -> list[FeatureValue]:
+        features = derive_world_model_v2_shadow_features(asset=asset, snapshot=snapshot)
+        for feature in features:
+            await self.record_shadow(feature)
+        return features
+
     def _append_point(self, asset: str, feature_name: str, ts_ms: int, value: float, feature_id: str) -> None:
         key = (asset, feature_name)
         points = self._series.setdefault(key, [])
@@ -261,6 +276,32 @@ def derive_world_model_features(*, asset: str, snapshot: Any) -> list[FeatureVal
     if beliefs:
         avg_salience = sum(float(item.get("salience") or 0.0) for item in beliefs) / len(beliefs)
         out.append(_feature(pseudo_event, asset=asset, group="world_model", name="belief_salience", value={"belief_count": len(beliefs), "avg_salience": avg_salience}, scalar=avg_salience))
+    return out
+
+
+def derive_world_model_v2_shadow_features(*, asset: str, snapshot: Any) -> list[FeatureValue]:
+    data = snapshot.model_dump(mode="json") if callable(getattr(snapshot, "model_dump", None)) else dict(snapshot or {})
+    _assert_world_model_advisory(data)
+    asset = asset.upper()
+    ts = int(data.get("as_of_ms") or now_ms())
+    event = NormalizedEvent(
+        event_id=str(data.get("snapshot_id") or f"world_model_v2:{asset}:{ts}"), event_type="world_model_v2_snapshot",
+        asset_class="crypto", symbols=[asset], source="world_model_v2", provider="internal",
+        received_ts_ms=ts, computed_ts_ms=max(ts, now_ms()), payload=data, quality_score=1.0,
+        metadata={"paper_only": True, "shadow_only": True, "execution_authority": "none"},
+    )
+    out: list[FeatureValue] = []
+    for impact in data.get("asset_impacts") or []:
+        if str(impact.get("instrument_id") or "").upper() != asset or impact.get("mode") != "current":
+            continue
+        direction = str(impact.get("direction") or "unknown")
+        scalar = float(impact.get("strength") or 0.0) * (1.0 if direction == "supportive" else -1.0 if direction == "adverse" else 0.0)
+        name = f"wm2_impact_{impact.get('factor_id')}_{impact.get('horizon')}"
+        out.append(_feature(event, asset=asset, group="world_model_v2_shadow", name=name, value=impact, scalar=scalar, metadata={"shadow_only": True, "mapping_version": impact.get("mapping_version")}))
+    for forecast in data.get("forecasts") or []:
+        if asset not in [str(item).upper() for item in forecast.get("instrument_ids") or []] or forecast.get("yes_probability") is None:
+            continue
+        out.append(_feature(event, asset=asset, group="world_model_v2_shadow", name=f"wm2_forecast_{forecast.get('hypothesis_id')}", value=forecast, scalar=float(forecast["yes_probability"]), metadata={"shadow_only": True, "semantic": "forecast_probability_not_direction"}))
     return out
 
 

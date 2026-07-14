@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>World Model Dashboard</title>
+  <link rel="stylesheet" href="/world-model/dashboard/app.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>World Model Dashboard</h1>
+      <p>Macro state, cross-asset effects, and relevant forecasts. Shadow-only.</p>
+    </div>
+    <div class="controls">
+      <input id="token" type="password" placeholder="Bearer token">
+      <input id="symbol" placeholder="Instrument (BTC, SPY…)">
+      <select id="limit"><option>50</option><option selected>100</option><option>250</option></select>
+      <button id="save">Save token</button>
+      <button id="refresh">Refresh</button>
+    </div>
+  </header>
+  <main>
+    <section class="panel timeline">
+      <label for="timeSlider">Snapshot timeline</label>
+      <input id="timeSlider" type="range" min="0" max="1" value="1" step="1">
+      <button id="now">Now</button>
+    </section>
+    <section id="metrics" class="metrics"></section>
+    <section class="layout">
+      <article class="panel wide">
+        <h2>Macro State</h2>
+        <div id="macro"></div>
+      </article>
+      <article class="panel">
+        <h2>Coverage & Quality</h2>
+        <pre id="quality"></pre>
+        <h2 class="spaced">Annotation Queue</h2>
+        <div id="annotations" class="empty">No annotations.</div>
+      </article>
+    </section>
+    <section class="panel">
+      <h2>World Map</h2>
+      <div id="world-model-graph" class="world-map"></div>
+    </section>
+    <section class="grid">
+      <article class="panel"><h2>Cross-Asset Impact</h2><div id="impacts"></div></article>
+      <article class="panel"><h2>Relevant Forecasts</h2><div id="forecasts"></div></article>
+      <article class="panel"><h2>Admitted Evidence</h2><div id="evidence"></div></article>
+      <article class="panel"><h2>Quarantine</h2><div id="quarantine"></div></article>
+    </section>
+    <section class="panel">
+      <h2>Runtime</h2>
+      <pre id="runtime"></pre>
+    </section>
+  </main>
+  <script src="/world-model/dashboard/app.js" defer></script>
+</body>
+</html>

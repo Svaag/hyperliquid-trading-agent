@@ -21,6 +21,7 @@ from hyperliquid_trading_agent.app.world_model.adapters import (
 from hyperliquid_trading_agent.app.world_model.reducer import now_ms
 from hyperliquid_trading_agent.app.world_model.schemas import PredictionMarketSignal
 from hyperliquid_trading_agent.app.world_model.service import WorldModelService
+from hyperliquid_trading_agent.app.world_model.v2_reducer import map_prediction_market
 
 log = get_logger(__name__)
 
@@ -179,7 +180,7 @@ class PolymarketWebSocketAdapter(WorldModelStreamAdapter):
         self.status.subscriptions = [item.asset_id for item in subscriptions]
         async with websockets.connect(self.settings.world_model_polymarket_ws_url, ping_interval=None) as ws:
             self.status.connected = True
-            await ws.send(json.dumps({"type": "market", "assets_ids": list(by_asset.keys())}))
+            await ws.send(json.dumps({"type": "market", "assets_ids": list(by_asset.keys()), "custom_feature_enabled": True}))
             heartbeat = asyncio.create_task(self._heartbeat(ws), name="polymarket-ws-ping")
             try:
                 while not self._stop.is_set():
@@ -201,15 +202,28 @@ class PolymarketWebSocketAdapter(WorldModelStreamAdapter):
 
     async def _discover_subscriptions(self) -> list[PolymarketSubscription]:
         url = self.settings.world_model_polymarket_base_url.rstrip("/") + "/markets"
-        params = {"active": "true", "closed": "false", "limit": self.settings.world_model_adapter_max_items}
+        market_limit = self.settings.world_model_v2_prediction_max_markets if self.settings.world_model_v2_enabled else self.settings.world_model_adapter_max_items
+        params = {"active": "true", "closed": "false", "limit": min(500, max(100, market_limit * 4)), "order": "volume", "ascending": "false"}
         async with httpx.AsyncClient(timeout=self.settings.world_model_adapter_timeout_seconds) as client:
             response = await client.get(url, params=params)
             response.raise_for_status()
             data = response.json()
         markets = data.get("markets", data) if isinstance(data, dict) else data
         out: list[PolymarketSubscription] = []
-        for market in list(markets or [])[: self.settings.world_model_adapter_max_items]:
+        for market in list(markets or []):
+            if self.settings.world_model_v2_enabled:
+                mapped = map_prediction_market(
+                    venue="polymarket", market_id=str(market.get("id") or market.get("conditionId") or market.get("slug") or ""),
+                    question=str(market.get("question") or market.get("title") or ""),
+                    liquidity_usd=_safe_float(market.get("liquidity") or market.get("liquidityNum")),
+                    volume_usd=_safe_float(market.get("volume") or market.get("volumeNum")),
+                    desired_instruments={item.strip().upper() for item in self.settings.world_model_v2_instruments.split(",") if item.strip()},
+                )
+                if mapped.admission_status != "admitted":
+                    continue
             out.extend(_polymarket_subscriptions(market, self.settings))
+            if len({item.market_id for item in out}) >= market_limit:
+                break
         return out
 
     async def _handle_message(self, raw: Any, *, by_asset: dict[str, PolymarketSubscription], service: WorldModelService) -> None:
@@ -270,7 +284,7 @@ def _polymarket_ws_signals(message: dict[str, Any], *, by_asset: dict[str, Polym
     raw_type = str(message.get("event_type") or message.get("type") or "").lower()
     if raw_type == "market_resolved":
         return _polymarket_resolved_signals(message, by_asset=by_asset, now=now)
-    changes = message.get("changes") if isinstance(message.get("changes"), list) else [message]
+    changes = message.get("price_changes") if isinstance(message.get("price_changes"), list) else message.get("changes") if isinstance(message.get("changes"), list) else [message]
     out: list[PredictionMarketSignal] = []
     for change in changes:
         if not isinstance(change, dict):
@@ -279,12 +293,16 @@ def _polymarket_ws_signals(message: dict[str, Any], *, by_asset: dict[str, Polym
         subscription = by_asset.get(asset_id)
         if subscription is None:
             continue
-        probability = _first_float(change, message, keys=["price", "best_bid", "bestBid", "bid", "mid"])
         best_bid = _first_float(change, message, keys=["best_bid", "bestBid", "bid"])
         best_ask = _first_float(change, message, keys=["best_ask", "bestAsk", "ask"])
+        if raw_type == "book":
+            best_bid = _book_price(message.get("bids"), highest=True)
+            best_ask = _book_price(message.get("asks"), highest=False)
+        probability = _first_float(change, message, keys=["price", "mid"])
         if probability is None and best_bid is not None and best_ask is not None:
             probability = max(0.0, min(1.0, (best_bid + best_ask) / 2.0))
-        out.append(_signal_from_subscription(subscription, probability=probability, best_bid=best_bid, best_ask=best_ask, status="open", now=now, raw=message))
+        provider_now = _provider_timestamp_ms(change.get("timestamp") or message.get("timestamp"), fallback=now)
+        out.append(_signal_from_subscription(subscription, probability=probability, best_bid=best_bid, best_ask=best_ask, status="open", now=provider_now, raw=message))
     return out
 
 
@@ -344,3 +362,17 @@ def _first_float(*containers: dict[str, Any], keys: list[str]) -> float | None:
             if value is not None:
                 return max(0.0, min(1.0, value))
     return None
+
+
+def _book_price(levels: Any, *, highest: bool) -> float | None:
+    prices = [_safe_float(item.get("price") if isinstance(item, dict) else None) for item in (levels or [])]
+    clean = [value for value in prices if value is not None]
+    return (max(clean) if highest else min(clean)) if clean else None
+
+
+def _provider_timestamp_ms(value: Any, *, fallback: int) -> int:
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return fallback
+    return parsed * 1000 if parsed < 10_000_000_000 else parsed

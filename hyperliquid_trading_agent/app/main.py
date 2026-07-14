@@ -83,8 +83,8 @@ from hyperliquid_trading_agent.app.tradfi.factory import build_tradfi_client
 from hyperliquid_trading_agent.app.tradfi.options_flow import FlowEnricher, OptionsFlowDetector
 from hyperliquid_trading_agent.app.tradfi.paper.simulator import EquityPaperSimulator
 from hyperliquid_trading_agent.app.world_model.adapters import WorldModelAdapterService
+from hyperliquid_trading_agent.app.world_model.factory import build_world_model_service
 from hyperliquid_trading_agent.app.world_model.routes import register_world_model_routes
-from hyperliquid_trading_agent.app.world_model.service import WorldModelService
 from hyperliquid_trading_agent.app.world_model.streams import WorldModelStreamService
 
 log = get_logger(__name__)
@@ -151,7 +151,10 @@ async def lifespan(app: FastAPI):
     model_gateway = ModelGateway(settings=settings)
     shadow_service = ShadowComparisonService(repository=repository)
     review_service = ReviewWorkflowService(repository=repository, shadow_service=shadow_service)
-    world_model_service = WorldModelService(settings=settings, repository=repository)
+    world_model_service = build_world_model_service(settings=settings, repository=repository)
+    hydrate_world_model = getattr(world_model_service, "hydrate", None)
+    if callable(hydrate_world_model):
+        await hydrate_world_model()
 
     tradfi_client: TradFiClient | None = None
     options_flow_detector: OptionsFlowDetector | None = None

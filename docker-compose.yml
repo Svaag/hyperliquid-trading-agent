@@ -87,6 +87,7 @@ services:
       NEWSWIRE_ENABLED: "false"
       WORLD_MODEL_STREAMS_ENABLED: "false"
       WORLD_MODEL_ADAPTERS_ENABLED: "false"
+      WORLD_MODEL_V2_ENABLED: "${WORLD_MODEL_V2_ENABLED:-false}"
       ENGINE_ENABLED: "false"
       ENGINE_PNL_ATTRIBUTION_ENABLED: "false"
       POSITION_TRACKING_ENABLED: "false"
@@ -133,7 +134,11 @@ services:
       DISCORD_BOT_ENABLED: "false"
       DISCORD_PUBLISHER_ENABLED: "false"
       WORLD_MODEL_STREAMS_ENABLED: "${WORLD_MODEL_STREAMS_ENABLED:-true}"
+      WORLD_MODEL_ADAPTERS_ENABLED: "${WORLD_MODEL_ADAPTERS_ENABLED:-true}"
+      WORLD_MODEL_POLYMARKET_ENABLED: "${WORLD_MODEL_POLYMARKET_ENABLED:-true}"
       WORLD_MODEL_POLYMARKET_WS_ENABLED: "${WORLD_MODEL_POLYMARKET_WS_ENABLED:-true}"
+      WORLD_MODEL_V2_ENABLED: "${WORLD_MODEL_V2_ENABLED:-false}"
+      WORLD_MODEL_V2_SHADOW_FEATURES_ENABLED: "${WORLD_MODEL_V2_SHADOW_FEATURES_ENABLED:-false}"
     command: hyperliquid-trading-agent-runtime world_model
 
   trader:
@@ -145,6 +150,8 @@ services:
       ENGINE_PNL_ATTRIBUTION_ENABLED: "${ENGINE_PNL_ATTRIBUTION_ENABLED:-true}"
       DISCORD_BOT_ENABLED: "false"
       DISCORD_PUBLISHER_ENABLED: "false"
+      WORLD_MODEL_V2_ENABLED: "${WORLD_MODEL_V2_ENABLED:-false}"
+      WORLD_MODEL_V2_SHADOW_FEATURES_ENABLED: "${WORLD_MODEL_V2_SHADOW_FEATURES_ENABLED:-false}"
     command: hyperliquid-trading-agent-runtime trader
 
   agent:
@@ -156,6 +163,7 @@ services:
       ENGINE_ENABLED: "false"
       AUTONOMY_ENABLED: "false"
       HIP4_ENABLED: "false"
+      WORLD_MODEL_V2_ENABLED: "${WORLD_MODEL_V2_ENABLED:-false}"
     command: hyperliquid-trading-agent-runtime agent
 
   discord-publisher:

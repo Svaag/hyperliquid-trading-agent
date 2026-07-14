@@ -150,6 +150,17 @@ from hyperliquid_trading_agent.app.db.models import (
     WorldModelAnnotationRecord,
     WorldModelOutcomeRecord,
     WorldModelSnapshotRecord,
+    WorldModelV2AssetImpactRecord,
+    WorldModelV2EvidenceRecord,
+    WorldModelV2HypothesisRecord,
+    WorldModelV2MacroObservationRecord,
+    WorldModelV2MacroStateRecord,
+    WorldModelV2PredictionMarketRecord,
+    WorldModelV2PredictionQuoteHistoryRecord,
+    WorldModelV2PredictionQuoteRecord,
+    WorldModelV2PredictionQuoteRollupRecord,
+    WorldModelV2SnapshotRecord,
+    WorldModelV2SupervisionRecord,
 )
 from hyperliquid_trading_agent.app.logging import get_logger
 from hyperliquid_trading_agent.app.runtime_commands import COMMAND_REGISTRY
@@ -5365,6 +5376,185 @@ class Repository:
     async def nearest_world_model_snapshot(self, as_of_ms: int, *, symbol: str | None = None, topic: str | None = None) -> dict[str, Any] | None:
         items = await self.list_world_model_snapshots(limit=50, symbol=symbol, topic=topic, end_ms=as_of_ms)
         return items[0] if items else None
+
+    async def upsert_world_model_v2_evidence(self, item: dict[str, Any]) -> None:
+        await self._merge_world_model_v2(
+            WorldModelV2EvidenceRecord(
+                evidence_id=str(item["evidence_id"]), source_type=str(item["source_type"]),
+                provider=str(item["provider"]), available_at_ms=int(item["available_at_ms"]),
+                admission_status=str(item["admission_status"]), payload_json=item,
+            )
+        )
+
+    async def list_world_model_v2_evidence(self, *, limit: int = 100, admission_status: str | None = None) -> list[dict[str, Any]]:
+        filters = [WorldModelV2EvidenceRecord.admission_status == admission_status] if admission_status else []
+        return await self._list_world_model_v2(WorldModelV2EvidenceRecord, WorldModelV2EvidenceRecord.available_at_ms, limit, filters)
+
+    async def upsert_world_model_v2_macro_observation(self, item: dict[str, Any]) -> None:
+        await self._merge_world_model_v2(
+            WorldModelV2MacroObservationRecord(
+                observation_id=str(item["observation_id"]), series_id=str(item["series_id"]),
+                factor_id=str(item["factor_id"]), period=str(item["period"]), vintage=str(item["vintage"]),
+                available_at_ms=int(item["available_at_ms"]), payload_json=item,
+            )
+        )
+
+    async def upsert_world_model_v2_macro_observations(self, items: list[dict[str, Any]]) -> None:
+        if self.sessionmaker is None or not items:
+            return
+        async with self.sessionmaker() as session:
+            for item in items:
+                await session.merge(WorldModelV2MacroObservationRecord(
+                    observation_id=str(item["observation_id"]), series_id=str(item["series_id"]),
+                    factor_id=str(item["factor_id"]), period=str(item["period"]), vintage=str(item["vintage"]),
+                    available_at_ms=int(item["available_at_ms"]), payload_json=item,
+                ))
+            await session.commit()
+
+    async def list_world_model_v2_macro_observations(self, *, limit: int = 1000, as_of_ms: int | None = None, series_id: str | None = None) -> list[dict[str, Any]]:
+        filters: list[Any] = []
+        if as_of_ms is not None:
+            filters.append(WorldModelV2MacroObservationRecord.available_at_ms <= as_of_ms)
+        if series_id:
+            filters.append(WorldModelV2MacroObservationRecord.series_id == series_id)
+        return await self._list_world_model_v2(WorldModelV2MacroObservationRecord, WorldModelV2MacroObservationRecord.available_at_ms, limit, filters)
+
+    async def upsert_world_model_v2_macro_state(self, item: dict[str, Any]) -> None:
+        await self._merge_world_model_v2(WorldModelV2MacroStateRecord(factor_id=str(item["factor_id"]), as_of_ms=int(item["as_of_ms"]), payload_json=item))
+
+    async def list_world_model_v2_macro_states(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        return await self._list_world_model_v2(WorldModelV2MacroStateRecord, WorldModelV2MacroStateRecord.as_of_ms, limit)
+
+    async def upsert_world_model_v2_prediction_market(self, item: dict[str, Any]) -> None:
+        await self._merge_world_model_v2(
+            WorldModelV2PredictionMarketRecord(
+                market_key=str(item["market_key"]), venue=str(item["venue"]), market_id=str(item["market_id"]),
+                admission_status=str(item["admission_status"]), payload_json=item,
+            )
+        )
+
+    async def list_world_model_v2_prediction_markets(self, *, limit: int = 100, admission_status: str | None = "admitted", venue: str | None = None) -> list[dict[str, Any]]:
+        filters: list[Any] = []
+        if admission_status:
+            filters.append(WorldModelV2PredictionMarketRecord.admission_status == admission_status)
+        if venue:
+            filters.append(WorldModelV2PredictionMarketRecord.venue == venue)
+        return await self._list_world_model_v2(WorldModelV2PredictionMarketRecord, WorldModelV2PredictionMarketRecord.created_at, limit, filters)
+
+    async def upsert_world_model_v2_prediction_quote(self, item: dict[str, Any], *, write_history: bool = False) -> None:
+        quote = WorldModelV2PredictionQuoteRecord(
+            quote_key=str(item["quote_key"]), market_key=str(item["market_key"]), outcome_id=str(item["outcome_id"]),
+            observed_at_ms=int(item["observed_at_ms"]), payload_json=item,
+        )
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            await session.merge(quote)
+            if write_history:
+                history_id = f'{item["quote_key"]}:{int(item["observed_at_ms"])}'
+                await session.merge(WorldModelV2PredictionQuoteHistoryRecord(history_id=history_id, quote_key=str(item["quote_key"]), observed_at_ms=int(item["observed_at_ms"]), payload_json=item))
+            await session.commit()
+
+    async def list_world_model_v2_prediction_quotes(self, *, limit: int = 200, market_key: str | None = None) -> list[dict[str, Any]]:
+        filters = [WorldModelV2PredictionQuoteRecord.market_key == market_key] if market_key else []
+        return await self._list_world_model_v2(WorldModelV2PredictionQuoteRecord, WorldModelV2PredictionQuoteRecord.observed_at_ms, limit, filters)
+
+    async def list_world_model_v2_prediction_quote_history(self, *, quote_key: str, since_ms: int, limit: int = 1000) -> list[dict[str, Any]]:
+        return await self._list_world_model_v2(
+            WorldModelV2PredictionQuoteHistoryRecord, WorldModelV2PredictionQuoteHistoryRecord.observed_at_ms, limit,
+            [WorldModelV2PredictionQuoteHistoryRecord.quote_key == quote_key, WorldModelV2PredictionQuoteHistoryRecord.observed_at_ms >= since_ms],
+        )
+
+    async def compact_world_model_v2(self, *, now_ms: int) -> dict[str, int]:
+        """Roll quote ticks older than 30 days hourly and expire snapshots after 180 days."""
+        if self.sessionmaker is None:
+            return {"quote_history_compacted": 0, "snapshots_deleted": 0}
+        quote_cutoff = int(now_ms) - 30 * 86_400_000
+        snapshot_cutoff = int(now_ms) - 180 * 86_400_000
+        async with self.sessionmaker() as session:
+            result = await session.execute(select(WorldModelV2PredictionQuoteHistoryRecord).where(WorldModelV2PredictionQuoteHistoryRecord.observed_at_ms < quote_cutoff))
+            rows = list(result.scalars().all())
+            grouped: dict[tuple[str, int], list[WorldModelV2PredictionQuoteHistoryRecord]] = {}
+            for row in rows:
+                bucket = row.observed_at_ms // 3_600_000 * 3_600_000
+                grouped.setdefault((row.quote_key, bucket), []).append(row)
+            for (quote_key, bucket), bucket_rows in grouped.items():
+                probabilities = [float(row.payload_json["probability"]) for row in bucket_rows if row.payload_json.get("probability") is not None]
+                if not probabilities:
+                    continue
+                await session.merge(WorldModelV2PredictionQuoteRollupRecord(
+                    rollup_id=f"{quote_key}:{bucket}", quote_key=quote_key, bucket_at_ms=bucket,
+                    payload_json={"quote_key": quote_key, "bucket_at_ms": bucket, "open": probabilities[0], "high": max(probabilities), "low": min(probabilities), "close": probabilities[-1], "mean": statistics.fmean(probabilities), "sample_count": len(probabilities)},
+                ))
+            if rows:
+                await session.execute(delete(WorldModelV2PredictionQuoteHistoryRecord).where(WorldModelV2PredictionQuoteHistoryRecord.observed_at_ms < quote_cutoff))
+            deleted = await session.execute(delete(WorldModelV2SnapshotRecord).where(WorldModelV2SnapshotRecord.as_of_ms < snapshot_cutoff))
+            await session.commit()
+            return {"quote_history_compacted": len(rows), "snapshots_deleted": int(deleted.rowcount or 0)}
+
+    async def upsert_world_model_v2_hypothesis(self, item: dict[str, Any]) -> None:
+        await self._merge_world_model_v2(WorldModelV2HypothesisRecord(hypothesis_id=str(item["hypothesis_id"]), market_key=str(item["market_key"]), as_of_ms=int(item["as_of_ms"]), payload_json=item))
+
+    async def list_world_model_v2_hypotheses(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        return await self._list_world_model_v2(WorldModelV2HypothesisRecord, WorldModelV2HypothesisRecord.as_of_ms, limit)
+
+    async def upsert_world_model_v2_asset_impact(self, item: dict[str, Any]) -> None:
+        await self._merge_world_model_v2(WorldModelV2AssetImpactRecord(impact_id=str(item["impact_id"]), instrument_id=str(item["instrument_id"]), factor_id=str(item["factor_id"]), as_of_ms=int(item["as_of_ms"]), payload_json=item))
+
+    async def list_world_model_v2_asset_impacts(self, *, limit: int = 200, instrument_id: str | None = None) -> list[dict[str, Any]]:
+        filters = [WorldModelV2AssetImpactRecord.instrument_id == instrument_id.upper()] if instrument_id else []
+        return await self._list_world_model_v2(WorldModelV2AssetImpactRecord, WorldModelV2AssetImpactRecord.as_of_ms, limit, filters)
+
+    async def upsert_world_model_v2_snapshot(self, item: dict[str, Any]) -> None:
+        await self._merge_world_model_v2(WorldModelV2SnapshotRecord(snapshot_id=str(item["snapshot_id"]), as_of_ms=int(item["as_of_ms"]), payload_json=item))
+
+    async def latest_world_model_v2_snapshot(self, *, as_of_ms: int | None = None) -> dict[str, Any] | None:
+        filters = [WorldModelV2SnapshotRecord.as_of_ms <= as_of_ms] if as_of_ms is not None else []
+        items = await self._list_world_model_v2(WorldModelV2SnapshotRecord, WorldModelV2SnapshotRecord.as_of_ms, 1, filters)
+        return items[0] if items else None
+
+    async def get_world_model_v2_snapshot(self, snapshot_id: str) -> dict[str, Any] | None:
+        if self.sessionmaker is None:
+            return None
+        async with self.sessionmaker() as session:
+            item = await session.get(WorldModelV2SnapshotRecord, str(snapshot_id))
+            return dict(item.payload_json or {}) if item is not None else None
+
+    async def list_world_model_v2_snapshots(self, *, limit: int = 100, start_ms: int | None = None, end_ms: int | None = None) -> list[dict[str, Any]]:
+        filters: list[Any] = []
+        if start_ms is not None:
+            filters.append(WorldModelV2SnapshotRecord.as_of_ms >= start_ms)
+        if end_ms is not None:
+            filters.append(WorldModelV2SnapshotRecord.as_of_ms <= end_ms)
+        return await self._list_world_model_v2(WorldModelV2SnapshotRecord, WorldModelV2SnapshotRecord.as_of_ms, limit, filters)
+
+    async def upsert_world_model_v2_supervision(self, item: dict[str, Any]) -> None:
+        await self._merge_world_model_v2(WorldModelV2SupervisionRecord(supervision_id=str(item["supervision_id"]), target_type=str(item["target_type"]), target_id=str(item["target_id"]), created_at_ms=int(item["created_at_ms"]), payload_json=item))
+
+    async def list_world_model_v2_supervision(self, *, limit: int = 100, target_type: str | None = None, target_id: str | None = None) -> list[dict[str, Any]]:
+        filters: list[Any] = []
+        if target_type:
+            filters.append(WorldModelV2SupervisionRecord.target_type == target_type)
+        if target_id:
+            filters.append(WorldModelV2SupervisionRecord.target_id == target_id)
+        return await self._list_world_model_v2(WorldModelV2SupervisionRecord, WorldModelV2SupervisionRecord.created_at_ms, limit, filters)
+
+    async def _merge_world_model_v2(self, item: Any) -> None:
+        if self.sessionmaker is None:
+            return
+        async with self.sessionmaker() as session:
+            await session.merge(item)
+            await session.commit()
+
+    async def _list_world_model_v2(self, model: Any, order_column: Any, limit: int, filters: list[Any] | None = None) -> list[dict[str, Any]]:
+        if self.sessionmaker is None:
+            return []
+        async with self.sessionmaker() as session:
+            stmt = select(model).order_by(order_column.desc()).limit(max(1, min(int(limit), 5000)))
+            for condition in filters or []:
+                stmt = stmt.where(condition)
+            result = await session.execute(stmt)
+            return [dict(item.payload_json or {}) for item in result.scalars().all()]
 
     async def upsert_world_model_annotation(self, annotation: dict[str, Any]) -> str | None:
         if self.sessionmaker is None:
