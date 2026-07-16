@@ -101,6 +101,7 @@ def _context(**candidate_updates: Any) -> dict[str, Any]:
         "expires_at_ms": now + 60 * 60_000,
         "source_integrity": {
             "activation_scope": "paper_shadow",
+            "promotion_state": "paper_approved",
             "paper_eligible": True,
         },
     }
@@ -220,9 +221,15 @@ def test_non_breadth_and_candidates_below_hard_floors_never_produce_proposals() 
     assert non_breadth_repo.proposals == weak_repo.proposals == {}
 
 
-def test_shadow_digest_collapses_research_governance_blockers_for_display() -> None:
+def test_shadow_digest_displays_actual_research_governance_blockers() -> None:
     async def run() -> _ProposalRepository:
-        context = _context(source_integrity={"activation_scope": "shadow_only", "paper_eligible": False})
+        context = _context(
+            source_integrity={
+                "activation_scope": "shadow_only",
+                "promotion_state": "research_only",
+                "paper_eligible": False,
+            }
+        )
         repo = _ProposalRepository(context)
         settings = _settings().model_copy(
             update={
@@ -233,6 +240,7 @@ def test_shadow_digest_collapses_research_governance_blockers_for_display() -> N
         service = EngineOperatorProposalService(settings=settings, repository=repo)  # type: ignore[arg-type]
         result = await service.process_candidate_book("book_1")
         assert result["blockers"]["shadow_only_strategy"] == 1
+        assert result["blockers"]["strategy_version_research_only"] == 1
         assert result["blockers"]["not_paper_eligible"] == 1
         return repo
 
@@ -242,6 +250,6 @@ def test_shadow_digest_collapses_research_governance_blockers_for_display() -> N
     notification = repo.notifications[0]
     assert notification["category"] == "engine_shadow_digest"
     content = notification["payload"]["content"]
-    assert "blocked by `research_only`" in content
-    assert "shadow_only_strategy" not in content
-    assert "not_paper_eligible" not in content
+    assert "shadow_only_strategy" in content
+    assert "strategy_version_research_only" in content
+    assert "not_paper_eligible" in content

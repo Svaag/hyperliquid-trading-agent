@@ -1,6 +1,6 @@
 # Engine Shadow Observation and Paper-Promotion Package
 
-This package is intentionally operator-executed. The repository now defaults to shadow-only; do not enable paper until the readiness gate passes.
+This package is intentionally operator-executed. The repository defaults to shadow-only. Migration `0034` freezes every exact strategy version present at upgrade time; those versions are not paper-promotion candidates, regardless of how many additional samples arrive.
 
 ## Shadow deployment env
 
@@ -40,7 +40,11 @@ GET /engine/readiness
 GET /engine/council-reviews
 GET /engine/diversity-events
 GET /engine/strategy-catalog
+GET /engine/strategy-version-policies
+GET /engine/execution-cost-quotes
 GET /engine/strategy-regime-performance
+GET /engine/signal-quality
+GET /engine/strategy-research
 ```
 
 ## End-of-window evidence refresh
@@ -67,14 +71,18 @@ Paper promotion remains blocked until the integrated Wave 1/Wave 2 shadow window
 - Council packet coverage is at least 95%.
 - Latest replay is `passed` or `advisory_pass`.
 - Paper/live flags remain disabled during observation.
-- `GET /engine/strategy-catalog` shows every Wave 2A/2B/2C strategy as `paper_shadow`, `paper_eligible=true`, and first-class.
-- The normal digest and readiness reports include Wave 2 alongside Wave 1 rather than in a separate research population.
+- `GET /engine/strategy-version-policies` shows current exact versions as `frozen`; missing and newly introduced versions fail closed as `research_only`.
+- Research and paper-eligible allocation metrics are reported separately, and the digest lists exact readiness hard-block codes.
+- Strict native-horizon results report raw candidates separately from effective non-overlapping time blocks and confidence intervals.
+- Execution-adjusted results use only fresh multi-level book simulations with a verified fee tier; configured or stale cost evidence is modeled-only.
 
 If readiness hard-blocks, replay fails, or concentration breaches, keep execution shadow-only and investigate the failing strategies or data feeds.
 
 ## Promotion condition
 
-Paper promotion remains blocked unless:
+The current frozen versions must not be promoted. A separately implemented exact version may enter an external governance review only after strict walk-forward, measured execution, and non-overlapping-block evidence passes. The runtime exposes no policy mutation endpoint.
+
+For that new exact version, paper promotion remains blocked unless:
 
 ```json
 {
@@ -84,7 +92,7 @@ Paper promotion remains blocked unless:
 }
 ```
 
-Only after that human review may apply:
+Only after an audited external governance change records that exact version as `paper_approved` may an operator apply:
 
 ```env
 ENGINE_SHADOW_ENABLED=true

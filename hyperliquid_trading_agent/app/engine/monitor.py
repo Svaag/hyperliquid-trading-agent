@@ -105,13 +105,23 @@ class EngineValidationMonitorService:
 
     async def run_once(self, *, post: bool = True) -> dict[str, Any]:
         report = await build_engine_validation_report(self.repository, limit=500)
-        readiness = await build_paper_readiness_scorecard(self.repository, self.settings, self.engine_service, limit=1000)
+        readiness = await build_paper_readiness_scorecard(
+            self.repository, self.settings, self.engine_service, limit=1000
+        )
         latest_replay = await latest_engine_replay_comparison(self.repository)
         alerts = await self._detect_alerts(report)
         if readiness.get("grade") == "blocked":
-            alerts.append({"type": "readiness_blocked", "severity": "warning", "detail": f"score={readiness.get('score')} recommendation={readiness.get('recommendation')}"})
+            alerts.append(
+                {
+                    "type": "readiness_blocked",
+                    "severity": "warning",
+                    "detail": f"score={readiness.get('score')} recommendation={readiness.get('recommendation')}",
+                }
+            )
         if latest_replay and (latest_replay.get("metadata") or {}).get("verdict") == "candidate_worse":
-            alerts.append({"type": "replay_candidate_worse", "severity": "warning", "detail": str(latest_replay.get("replay_id"))})
+            alerts.append(
+                {"type": "replay_candidate_worse", "severity": "warning", "detail": str(latest_replay.get("replay_id"))}
+            )
         self.last_alerts = alerts
         self.alert_count += len(alerts)
         for alert in alerts:
@@ -137,7 +147,13 @@ class EngineValidationMonitorService:
             self.last_digest_at_ms = sent_at_ms
             self.digest_count += 1
             self._recent_recoveries.clear()
-        return {"report": report, "readiness": readiness, "latest_replay": latest_replay, "alerts": alerts, "message": message}
+        return {
+            "report": report,
+            "readiness": readiness,
+            "latest_replay": latest_replay,
+            "alerts": alerts,
+            "message": message,
+        }
 
     async def _run(self) -> None:
         # Allow the engine to finish its first loop before evaluating staleness.
@@ -206,7 +222,9 @@ class EngineValidationMonitorService:
             alert_type = str(alert.get("type") or "unknown")
             severity = str(alert.get("severity") or "warning")
             existing = selected.get(alert_type)
-            if existing is None or _severity_rank(severity) > _severity_rank(str(existing.get("severity") or "warning")):
+            if existing is None or _severity_rank(severity) > _severity_rank(
+                str(existing.get("severity") or "warning")
+            ):
                 selected[alert_type] = {**alert, "severity": severity}
         current: dict[str, dict[str, Any]] = {}
         for alert_type, alert in selected.items():
@@ -214,7 +232,11 @@ class EngineValidationMonitorService:
             previous = self._incident_states.get(alert_type) or {}
             was_open = str(previous.get("state") or "") == "open"
             previous_severity = str(previous.get("severity") or "warning")
-            severity = previous_severity if was_open and _severity_rank(previous_severity) > _severity_rank(requested_severity) else requested_severity
+            severity = (
+                previous_severity
+                if was_open and _severity_rank(previous_severity) > _severity_rank(requested_severity)
+                else requested_severity
+            )
             started_at_ms = int(previous.get("opened_at_ms") or now) if was_open else now
             current_alert = {**alert, "severity": severity, "started_at_ms": started_at_ms}
             current[alert_type] = current_alert
@@ -308,7 +330,9 @@ class EngineValidationMonitorService:
                 f"run_in_progress=true current_run_id={service_status.get('current_run_id')} "
                 f"run_age_ms={run_age_ms} stuck_after_ms={stale_after_ms}"
             )
-        elif self.settings.engine_enabled and (not last_completed_at_ms or now - int(last_completed_at_ms) > stale_after_ms):
+        elif self.settings.engine_enabled and (
+            not last_completed_at_ms or now - int(last_completed_at_ms) > stale_after_ms
+        ):
             stale = bool(last_completed_at_ms or now - self.started_at_ms > stale_after_ms)
             stale_detail = f"last_run_completed_at_ms={last_completed_at_ms}; stale_after_ms={stale_after_ms}"
         if self.settings.engine_enabled and stale:
@@ -320,7 +344,9 @@ class EngineValidationMonitorService:
                 }
             )
         if service_status.get("last_error"):
-            alerts.append({"type": "engine_loop_error", "severity": "critical", "detail": str(service_status.get("last_error"))})
+            alerts.append(
+                {"type": "engine_loop_error", "severity": "critical", "detail": str(service_status.get("last_error"))}
+            )
         newsfeed_health = await self._newsfeed_health()
         if newsfeed_health is not None:
             for reason in newsfeed_health.get("reasons") or []:
@@ -335,10 +361,18 @@ class EngineValidationMonitorService:
         if duration_alert is not None:
             alerts.append(duration_alert)
 
-        shadow_only = self.settings.engine_shadow_enabled and not self.settings.engine_paper_enabled and self.settings.engine_execution_mode_list == ["shadow"]
+        shadow_only = (
+            self.settings.engine_shadow_enabled
+            and not self.settings.engine_paper_enabled
+            and self.settings.engine_execution_mode_list == ["shadow"]
+        )
         if shadow_only:
             paper_intents = await self.repository.list_order_intents(execution_mode="paper", limit=10)
-            paper_reports = [item for item in await self.repository.list_execution_reports(limit=50) if item.get("execution_mode") == "paper"]
+            paper_reports = [
+                item
+                for item in await self.repository.list_execution_reports(limit=50)
+                if item.get("execution_mode") == "paper"
+            ]
             if paper_intents or paper_reports:
                 alerts.append(
                     {
@@ -379,7 +413,11 @@ class EngineValidationMonitorService:
             sample_count = int(values.get("realized_sample_count") or 0)
             avg_ev = float(values.get("avg_net_ev_bps") or 0)
             avg_realized = float(values.get("avg_realized_pnl_usd") or 0)
-            if sample_count >= self.settings.engine_validation_ev_drift_min_samples and avg_ev > 0 and avg_realized <= self.settings.engine_validation_ev_drift_loss_usd:
+            if (
+                sample_count >= self.settings.engine_validation_ev_drift_min_samples
+                and avg_ev > 0
+                and avg_realized <= self.settings.engine_validation_ev_drift_loss_usd
+            ):
                 alerts.append(
                     {
                         "type": "ev_calibration_drift",
@@ -529,9 +567,7 @@ class EngineValidationMonitorService:
             self.settings,
             runtime,
             offset,
-            newswire_active=bool(
-                stories and any(item.get("status") == "running" for item in newswire_heartbeats)
-            ),
+            newswire_active=bool(stories and any(item.get("status") == "running" for item in newswire_heartbeats)),
             latest_source_at_ms=int(stories[0].get("last_updated_at_ms") or 0) if stories else None,
         )
 
@@ -589,17 +625,33 @@ def format_engine_validation_digest(
     recently_resolved = recently_resolved or []
     mode = "shadow-only" if settings.engine_shadow_enabled and not settings.engine_paper_enabled else "paper/shadow"
     execution_line = (
-        f"Measured avg slippage `{execution.get('avg_slippage_bps')}` bps | fees `${execution.get('fees_usd')}`"
+        f"Measured depth-fill avg slippage `{execution.get('avg_slippage_bps')}` bps | fees `${execution.get('fees_usd')}`"
         if execution.get("measurement_state") == "measured"
-        else "Shadow execution costs `not measured`"
+        else f"Execution-adjusted costs `not measured` | qualities `{execution.get('cost_quality_counts') or {}}`"
+    )
+    allocation_by_scope = summary.get("allocation_by_scope") or {}
+    research_allocations = allocation_by_scope.get("research") or {}
+    paper_allocations = allocation_by_scope.get("paper_eligible") or {}
+    hard_block_codes = sorted(
+        {
+            str(item.get("code") or "unknown") if isinstance(item, dict) else str(item)
+            for item in readiness.get("hard_blocks") or []
+        }
     )
     lines = [
         f"🧪 **Engine validation digest — {mode}**",
         f"Loop: runs `{service_status.get('run_count', 0)}` | last error `{service_status.get('last_error') or 'none'}` | last run `{service_status.get('last_run_at_ms') or 'n/a'}`",
         f"Candidates `{summary.get('candidate_count', 0)}` | EVs `{summary.get('ev_estimate_count', 0)}` | allocations `{summary.get('allocated_count', 0)}/{summary.get('allocation_count', 0)}` ({summary.get('allocation_rate_pct', 0)}%)",
+        (
+            "Allocation scopes research "
+            f"`{research_allocations.get('allocated_count', 0)}/{research_allocations.get('decision_count', 0)}` | "
+            "paper-eligible "
+            f"`{paper_allocations.get('allocated_count', 0)}/{paper_allocations.get('decision_count', 0)}`"
+        ),
         f"Intents shadow/paper `{summary.get('shadow_intent_count', 0)}`/`{summary.get('paper_intent_count', 0)}` | reports `{summary.get('execution_report_count', 0)}` | risk rejects `{summary.get('risk_reject_count', 0)}`",
         f"{execution_line} | open positions `{summary.get('open_position_count', 0)}`",
         f"Readiness: `{str(readiness.get('grade') or 'unknown').upper()}` `{readiness.get('score', 'n/a')}/100` | hard blocks `{len(readiness.get('hard_blocks') or [])}` | recommendation `{readiness.get('recommendation') or 'n/a'}`",
+        f"Hard-block codes: `{','.join(hard_block_codes) if hard_block_codes else 'none'}`",
         "",
     ]
     if alerts:
@@ -618,7 +670,9 @@ def format_engine_validation_digest(
     if latest_replay:
         metadata = latest_replay.get("metadata") or {}
         diffs = latest_replay.get("diffs") or {}
-        lines.append(f"**Latest replay:** `{metadata.get('verdict', latest_replay.get('status'))}` variant `{metadata.get('variant_id', '-')}` | EV Δ `{diffs.get('avg_net_ev_delta_bps', 0)}` bps | reject Δ `{diffs.get('risk_reject_rate_delta_pct', 0)}`%")
+        lines.append(
+            f"**Latest replay:** `{metadata.get('verdict', latest_replay.get('status'))}` variant `{metadata.get('variant_id', '-')}` | EV Δ `{diffs.get('avg_net_ev_delta_bps', 0)}` bps | reject Δ `{diffs.get('risk_reject_rate_delta_pct', 0)}`%"
+        )
         lines.append("")
     throttle_summary = (service_status or {}).get("last_throttle_summary") or {}
     controller = throttle_summary.get("controller") or (service_status or {}).get("throttles") or {}
@@ -632,9 +686,14 @@ def format_engine_validation_digest(
             if key not in defensive_ids
         }
         if reason_counts:
-            lines.append("- Reasons: " + ", ".join(f"`{key}`={value}" for key, value in list(reason_counts.items())[:6]))
+            lines.append(
+                "- Reasons: " + ", ".join(f"`{key}`={value}" for key, value in list(reason_counts.items())[:6])
+            )
         if recent_share:
-            lines.append("- Recent allocation share: " + ", ".join(f"`{key}`={value}%" for key, value in list(recent_share.items())[:6]))
+            lines.append(
+                "- Recent allocation share: "
+                + ", ".join(f"`{key}`={value}%" for key, value in list(recent_share.items())[:6])
+            )
         if not reason_counts and not recent_share:
             lines.append("- No throttle blocks observed in this process yet.")
         lines.append("")
@@ -651,12 +710,18 @@ def format_engine_validation_digest(
     lines.append("**Top strategies:**")
     strict_groups = ((readiness.get("checks") or {}).get("strict_signal_performance") or {}).get("groups") or []
     if strict_groups:
-        for values in sorted(strict_groups, key=lambda item: int(item.get("unique_candidate_count") or 0), reverse=True)[:6]:
+        for values in sorted(
+            strict_groups, key=lambda item: int(item.get("unique_candidate_count") or 0), reverse=True
+        )[:6]:
             lines.append(
-                f"- `{values.get('strategy_id')}` horizon `{values.get('candidate_horizon')}` | strict samples `{values.get('unique_candidate_count', 0)}` | mean net `{values.get('mean_modeled_net_return_bps', 0)}` bps | mean R `{values.get('mean_realized_r', 0)}`"
+                f"- `{values.get('strategy_id')}` horizon `{values.get('candidate_horizon')}` | raw candidates `{values.get('unique_candidate_count', 0)}` | effective blocks `{values.get('non_overlapping_block_count', 0)}` | mean net `{values.get('mean_modeled_net_return_bps', 0)}` bps | CI95 `{values.get('mean_modeled_net_return_ci95_bps')}` | mean R `{values.get('mean_realized_r', 0)}`"
             )
     else:
-        ranked = sorted(by_strategy.items(), key=lambda item: (item[1].get("allocated_count", 0), item[1].get("candidate_count", 0)), reverse=True)
+        ranked = sorted(
+            by_strategy.items(),
+            key=lambda item: (item[1].get("allocated_count", 0), item[1].get("candidate_count", 0)),
+            reverse=True,
+        )
         for strategy, values in ranked[:6]:
             lines.append(
                 f"- `{strategy}` candidates `{values.get('candidate_count', 0)}` | allocated `{values.get('allocated_count', 0)}` | shadow `{values.get('shadow_intent_count', 0)}` | EV `{values.get('avg_net_ev_bps', 0)}` bps | latest mark PnL `${values.get('total_pnl_usd', 0)}`"

@@ -36,56 +36,305 @@ class FakeReadinessRepository:
         self.now_ms = now_ms
         anchor = now_ms - 2 * 60 * 60 * 1000
         old = now_ms - 30 * 60 * 1000
+        evidence_block_start = (old // 3_600_000) * 3_600_000
+        evidence_start = evidence_block_start + 5 * 60_000
+        evidence_end = evidence_start + 5 * 60_000
+        paper_source = {
+            "activation_scope": "paper_shadow",
+            "promotion_state": "paper_approved",
+            "paper_eligible": True,
+        }
         self.candidates = [
-            {"candidate_id": "cand_1", "strategy_id": "directional_momentum_v2", "asset": "BTC", "status": "new", "side": "long", "regime_snapshot_id": "reg_1", "created_at_ms": old, "metadata": {"strategy_version": "2.0.0", "strategy_family": "trend_following", "feature_coverage_pct": 100.0, "counts_for_breadth": True, "regime_label": "trend=bull"}},
-            {"candidate_id": "cand_2", "strategy_id": "microstructure_ofi_v2", "asset": "ETH", "status": "new", "side": "short", "regime_snapshot_id": "reg_2", "created_at_ms": now_ms - 1000, "metadata": {"strategy_version": "2.0.0", "strategy_family": "microstructure_orderflow", "feature_coverage_pct": 100.0, "counts_for_breadth": True, "regime_label": "orderflow=sell_pressure"}},
+            {
+                "candidate_id": "cand_1",
+                "strategy_id": "directional_momentum_v2",
+                "asset": "BTC",
+                "status": "new",
+                "side": "long",
+                "regime_snapshot_id": "reg_1",
+                "created_at_ms": old,
+                "source_integrity": dict(paper_source),
+                "metadata": {
+                    "strategy_version": "2.0.0",
+                    "strategy_family": "trend_following",
+                    "feature_coverage_pct": 100.0,
+                    "counts_for_breadth": True,
+                    "regime_label": "trend=bull",
+                },
+            },
+            {
+                "candidate_id": "cand_2",
+                "strategy_id": "microstructure_ofi_v2",
+                "asset": "ETH",
+                "status": "new",
+                "side": "short",
+                "regime_snapshot_id": "reg_2",
+                "created_at_ms": now_ms - 1000,
+                "source_integrity": dict(paper_source),
+                "metadata": {
+                    "strategy_version": "2.0.0",
+                    "strategy_family": "microstructure_orderflow",
+                    "feature_coverage_pct": 100.0,
+                    "counts_for_breadth": True,
+                    "regime_label": "orderflow=sell_pressure",
+                },
+            },
         ]
         self.evs = [
-            {"estimate_id": "ev_1", "candidate_id": "cand_1", "net_ev_bps": 12, "risk_adjusted_utility": 0.4, "uncertainty": 0.1, "calibration_bucket": "medium", "created_at_ms": old},
-            {"estimate_id": "ev_2", "candidate_id": "cand_2", "net_ev_bps": 9, "risk_adjusted_utility": 0.3, "uncertainty": 0.2, "calibration_bucket": "medium", "created_at_ms": now_ms - 1000},
+            {
+                "estimate_id": "ev_1",
+                "candidate_id": "cand_1",
+                "net_ev_bps": 12,
+                "risk_adjusted_utility": 0.4,
+                "uncertainty": 0.1,
+                "calibration_bucket": "medium",
+                "created_at_ms": old,
+            },
+            {
+                "estimate_id": "ev_2",
+                "candidate_id": "cand_2",
+                "net_ev_bps": 9,
+                "risk_adjusted_utility": 0.3,
+                "uncertainty": 0.2,
+                "calibration_bucket": "medium",
+                "created_at_ms": now_ms - 1000,
+            },
         ]
         self.allocations = [
-            {"allocation_id": "alloc_1", "candidate_id": "cand_1", "status": "allocate", "allocated_notional_usd": 1000, "created_at_ms": old, "metadata": {"strategy_id": "directional_momentum_v2", "strategy_family": "trend_following", "asset": "BTC"}},
-            {"allocation_id": "alloc_2", "candidate_id": "cand_2", "status": "allocate", "allocated_notional_usd": 900, "created_at_ms": now_ms - 1000, "metadata": {"strategy_id": "microstructure_ofi_v2", "strategy_family": "microstructure_orderflow", "asset": "ETH"}},
-            {"allocation_id": "alloc_3", "candidate_id": "cand_1", "status": "skip", "allocated_notional_usd": 0, "created_at_ms": old},
-            {"allocation_id": "alloc_4", "candidate_id": "cand_2", "status": "skip", "allocated_notional_usd": 0, "created_at_ms": now_ms - 1000},
+            {
+                "allocation_id": "alloc_1",
+                "candidate_id": "cand_1",
+                "status": "allocate",
+                "allocation_scope": "paper_eligible",
+                "allocated_notional_usd": 1000,
+                "created_at_ms": old,
+                "metadata": {
+                    "strategy_id": "directional_momentum_v2",
+                    "strategy_family": "trend_following",
+                    "asset": "BTC",
+                },
+            },
+            {
+                "allocation_id": "alloc_2",
+                "candidate_id": "cand_2",
+                "status": "allocate",
+                "allocation_scope": "paper_eligible",
+                "allocated_notional_usd": 900,
+                "created_at_ms": now_ms - 1000,
+                "metadata": {
+                    "strategy_id": "microstructure_ofi_v2",
+                    "strategy_family": "microstructure_orderflow",
+                    "asset": "ETH",
+                },
+            },
+            {
+                "allocation_id": "alloc_3",
+                "candidate_id": "cand_1",
+                "status": "skip",
+                "allocated_notional_usd": 0,
+                "created_at_ms": old,
+            },
+            {
+                "allocation_id": "alloc_4",
+                "candidate_id": "cand_2",
+                "status": "skip",
+                "allocated_notional_usd": 0,
+                "created_at_ms": now_ms - 1000,
+            },
         ]
         self.intents = [
-            {"intent_id": "intent_0", "parent_candidate_id": "cand_0", "strategy_id": "directional_momentum_v2", "execution_mode": "shadow", "created_at_ms": anchor},
-            {"intent_id": "intent_1", "parent_candidate_id": "cand_1", "strategy_id": "directional_momentum_v2", "execution_mode": "shadow", "created_at_ms": old},
+            {
+                "intent_id": "intent_0",
+                "parent_candidate_id": "cand_0",
+                "strategy_id": "directional_momentum_v2",
+                "execution_mode": "shadow",
+                "created_at_ms": anchor,
+            },
+            {
+                "intent_id": "intent_1",
+                "parent_candidate_id": "cand_1",
+                "strategy_id": "directional_momentum_v2",
+                "execution_mode": "shadow",
+                "created_at_ms": old,
+            },
         ]
         if paper_leak:
-            self.intents.append({"intent_id": "intent_paper", "parent_candidate_id": "cand_2", "strategy_id": "microstructure_ofi", "execution_mode": "paper", "created_at_ms": now_ms - 1000})
-        self.reports = [{"report_id": "er_1", "intent_id": "intent_1", "execution_mode": "shadow", "status": "accepted", "slippage_bps": 0, "fees_usd": 0, "created_at_ms": old}]
+            self.intents.append(
+                {
+                    "intent_id": "intent_paper",
+                    "parent_candidate_id": "cand_2",
+                    "strategy_id": "microstructure_ofi",
+                    "execution_mode": "paper",
+                    "created_at_ms": now_ms - 1000,
+                }
+            )
+        self.reports = [
+            {
+                "report_id": "er_1",
+                "intent_id": "intent_1",
+                "execution_mode": "shadow",
+                "status": "filled",
+                "slippage_bps": 1,
+                "fees_usd": 0.4,
+                "cost_quality": "measured",
+                "execution_cost_quote_id": "ecq_1",
+                "created_at_ms": old,
+            }
+        ]
         self.positions: list[dict[str, Any]] = []
         self.pnl: list[dict[str, Any]] = []
         self.risk_decisions = [
-            {"decision_id": "risk_allow_0", "intent_id": "intent_0", "decision": "allow", "violations": [], "created_at_ms": anchor},
-            {"decision_id": "risk_allow_1", "intent_id": "intent_1", "decision": "allow", "violations": [], "created_at_ms": old},
+            {
+                "decision_id": "risk_allow_0",
+                "intent_id": "intent_0",
+                "decision": "allow",
+                "violations": [],
+                "created_at_ms": anchor,
+            },
+            {
+                "decision_id": "risk_allow_1",
+                "intent_id": "intent_1",
+                "decision": "allow",
+                "violations": [],
+                "created_at_ms": old,
+            },
         ]
         self.risk_decisions.extend(
-            {"decision_id": f"risk_{idx}", "intent_id": f"intent_reject_{idx}", "decision": "reject", "violations": ["stale_market_data"], "created_at_ms": now_ms - 1000}
+            {
+                "decision_id": f"risk_{idx}",
+                "intent_id": f"intent_reject_{idx}",
+                "decision": "reject",
+                "violations": ["stale_market_data"],
+                "created_at_ms": now_ms - 1000,
+            }
             for idx in range(risk_rejects)
         )
         self.council_reviews = [
-            {"review_id": "council_1", "candidate_id": "cand_1", "strategy_id": "directional_momentum_v2", "decision": "allow_shadow", "created_at_ms": old},
-            {"review_id": "council_2", "candidate_id": "cand_2", "strategy_id": "microstructure_ofi_v2", "decision": "allow_shadow", "created_at_ms": now_ms - 1000},
+            {
+                "review_id": "council_1",
+                "candidate_id": "cand_1",
+                "strategy_id": "directional_momentum_v2",
+                "decision": "allow_shadow",
+                "created_at_ms": old,
+            },
+            {
+                "review_id": "council_2",
+                "candidate_id": "cand_2",
+                "strategy_id": "microstructure_ofi_v2",
+                "decision": "allow_shadow",
+                "created_at_ms": now_ms - 1000,
+            },
         ]
         self.candidate_evidence_links = [
-            {"link_id": "cel_1", "candidate_id": "cand_1", "strategy_id": "directional_momentum_v2", "risk_decision_id": "risk_pre_1", "council_review_id": "council_1", "outcome_window_ids": ["coa_1"], "created_at_ms": old, "metadata": {"council_decision": "allow_shadow"}},
-            {"link_id": "cel_2", "candidate_id": "cand_2", "strategy_id": "microstructure_ofi_v2", "risk_decision_id": "risk_pre_2", "council_review_id": "council_2", "outcome_window_ids": ["coa_2"], "created_at_ms": now_ms - 1000, "metadata": {"council_decision": "allow_shadow"}},
+            {
+                "link_id": "cel_1",
+                "candidate_id": "cand_1",
+                "strategy_id": "directional_momentum_v2",
+                "risk_decision_id": "risk_pre_1",
+                "council_review_id": "council_1",
+                "outcome_window_ids": ["coa_1"],
+                "created_at_ms": old,
+                "metadata": {"council_decision": "allow_shadow"},
+            },
+            {
+                "link_id": "cel_2",
+                "candidate_id": "cand_2",
+                "strategy_id": "microstructure_ofi_v2",
+                "risk_decision_id": "risk_pre_2",
+                "council_review_id": "council_2",
+                "outcome_window_ids": ["coa_2"],
+                "created_at_ms": now_ms - 1000,
+                "metadata": {"council_decision": "allow_shadow"},
+            },
         ]
         self.candidate_outcomes = [
-            {"attribution_id": "coa_1", "candidate_id": "cand_1", "strategy_id": "directional_momentum_v2", "strategy_family": "trend_following", "asset": "BTC", "venue": "hyperliquid", "regime_snapshot_id": "reg_1", "outcome_window": "5m", "net_return_bps": 20, "terminal_state": "matured", "created_at_ms": old, "window_end_ms": old, "metadata": {"regime_label": "trend=bull"}},
-            {"attribution_id": "coa_2", "candidate_id": "cand_2", "strategy_id": "microstructure_ofi_v2", "strategy_family": "microstructure_orderflow", "asset": "ETH", "venue": "hyperliquid", "regime_snapshot_id": "reg_2", "outcome_window": "5m", "net_return_bps": 10, "terminal_state": "matured", "created_at_ms": old, "window_end_ms": old, "metadata": {"regime_label": "orderflow=sell_pressure"}},
+            {
+                "attribution_id": "coa_1",
+                "candidate_id": "cand_1",
+                "strategy_id": "directional_momentum_v2",
+                "strategy_version": "2.0.0",
+                "strategy_family": "trend_following",
+                "asset": "BTC",
+                "instrument_id": "hyperliquid:BTC-PERP",
+                "venue": "hyperliquid",
+                "side": "long",
+                "regime_snapshot_id": "reg_1",
+                "candidate_horizon": "5m",
+                "outcome_window": "5m",
+                "gross_return_bps": 24,
+                "net_return_bps": 20,
+                "execution_adjusted_return_bps": 18,
+                "realized_r": 0.8,
+                "execution_cost_quality": "measured",
+                "execution_report_id": "er_1",
+                "terminal_state": "matured",
+                "created_at_ms": old,
+                "window_start_ms": evidence_start,
+                "window_end_ms": evidence_end,
+                "metadata": {"regime_label": "trend=bull", "mark_source": "feature_store_mid"},
+            },
+            {
+                "attribution_id": "coa_2",
+                "candidate_id": "cand_2",
+                "strategy_id": "microstructure_ofi_v2",
+                "strategy_version": "2.0.0",
+                "strategy_family": "microstructure_orderflow",
+                "asset": "ETH",
+                "instrument_id": "hyperliquid:ETH-PERP",
+                "venue": "hyperliquid",
+                "side": "short",
+                "regime_snapshot_id": "reg_2",
+                "candidate_horizon": "5m",
+                "outcome_window": "5m",
+                "gross_return_bps": 14,
+                "net_return_bps": 10,
+                "execution_adjusted_return_bps": 8,
+                "realized_r": 0.5,
+                "execution_cost_quality": "measured",
+                "execution_report_id": "er_2",
+                "terminal_state": "matured",
+                "created_at_ms": old,
+                "window_start_ms": evidence_start,
+                "window_end_ms": evidence_end,
+                "metadata": {"regime_label": "orderflow=sell_pressure", "mark_source": "feature_store_mid"},
+            },
         ]
         self.portfolio_concentration_events: list[dict[str, Any]] = []
         self.strategy_regime_performance = [
-            {"performance_id": "perf_1", "strategy_id": "directional_momentum_v2", "strategy_family": "trend_following", "regime_label": "trend=bull", "candidate_count": 2, "score": 60, "created_at_ms": old, "window_end_ms": old},
-            {"performance_id": "perf_2", "strategy_id": "microstructure_ofi_v2", "strategy_family": "microstructure_orderflow", "regime_label": "orderflow=sell_pressure", "candidate_count": 2, "score": 60, "created_at_ms": old, "window_end_ms": old},
+            {
+                "performance_id": "perf_1",
+                "strategy_id": "directional_momentum_v2",
+                "strategy_family": "trend_following",
+                "regime_label": "trend=bull",
+                "candidate_count": 2,
+                "score": 60,
+                "created_at_ms": old,
+                "window_end_ms": old,
+            },
+            {
+                "performance_id": "perf_2",
+                "strategy_id": "microstructure_ofi_v2",
+                "strategy_family": "microstructure_orderflow",
+                "regime_label": "orderflow=sell_pressure",
+                "candidate_count": 2,
+                "score": 60,
+                "created_at_ms": old,
+                "window_end_ms": old,
+            },
         ]
         self.replay_results = [
-            {"replay_id": "ereplay_1", "proposal_id": "engine:test", "status": "passed", "candidate_metrics": {"candidate_count": 2}, "created_at_ms": now_ms - 1000, "metadata": {"artifact_type": "engine_shadow_comparison", "data_window": {"start_ms": now_ms - 60 * 60 * 1000, "end_ms": now_ms}, "verdict": "candidate_better"}}
+            {
+                "replay_id": "ereplay_1",
+                "proposal_id": "engine:test",
+                "status": "passed",
+                "candidate_metrics": {"candidate_count": 2},
+                "created_at_ms": now_ms - 1000,
+                "metadata": {
+                    "artifact_type": "engine_shadow_comparison",
+                    "data_window": {"start_ms": now_ms - 60 * 60 * 1000, "end_ms": now_ms},
+                    "verdict": "candidate_better",
+                },
+            }
         ]
         self.heartbeats: list[dict[str, Any]] = []
         self.missing_data = missing_data
@@ -128,7 +377,11 @@ class FakeReadinessRepository:
     async def latest_regime_snapshot(self, **kwargs):
         if self.missing_data:
             return None
-        return {"regime_snapshot_id": "reg_1", "primary_asset": kwargs.get("primary_asset"), "as_of_ms": self.now_ms - 1000}
+        return {
+            "regime_snapshot_id": "reg_1",
+            "primary_asset": kwargs.get("primary_asset"),
+            "as_of_ms": self.now_ms - 1000,
+        }
 
     async def list_council_reviews(self, **kwargs):
         return self.council_reviews[: kwargs.get("limit", 100)]
@@ -222,6 +475,8 @@ def readiness_settings(**overrides) -> Settings:
         engine_readiness_min_replay_window_hours=1,
         engine_readiness_min_replay_sample_size=2,
         engine_readiness_min_matured_outcomes_per_active_strategy=1,
+        engine_promotion_min_effective_blocks=1,
+        engine_promotion_bootstrap_iterations=100,
     )
     defaults.update(overrides)
     return Settings(**defaults)
@@ -266,7 +521,9 @@ def test_paper_readiness_uses_trader_engine_loop_heartbeat_when_api_service_is_p
     settings = readiness_settings()
 
     async def run():
-        return await build_paper_readiness_scorecard(repo, settings, PassiveReadinessService(), window_hours=1, limit=100)
+        return await build_paper_readiness_scorecard(
+            repo, settings, PassiveReadinessService(), window_hours=1, limit=100
+        )
 
     scorecard = anyio.run(run)
     reliability = scorecard["checks"]["engine_reliability"]
@@ -317,7 +574,12 @@ def test_readiness_separates_shadow_research_breadth_from_paper_eligible_breadth
     now_ms = int(time.time() * 1000)
     repo = FakeReadinessRepository(now_ms=now_ms)
     for candidate in repo.candidates:
-        candidate["source_integrity"] = {"activation_scope": "shadow_only", "paper_eligible": False, "operator_promotion_required": True}
+        candidate["source_integrity"] = {
+            "activation_scope": "shadow_only",
+            "promotion_state": "research_only",
+            "paper_eligible": False,
+            "operator_promotion_required": True,
+        }
     service = FakeReadinessService(now_ms=now_ms)
     settings = readiness_settings()
 
@@ -346,6 +608,7 @@ def test_readiness_does_not_report_mixed_history_strategy_as_research_only():
             "candidate_id": "cand_legacy_shadow",
             "source_integrity": {
                 "activation_scope": "shadow_only",
+                "promotion_state": "research_only",
                 "paper_eligible": False,
                 "operator_promotion_required": True,
             },
@@ -364,7 +627,7 @@ def test_readiness_does_not_report_mixed_history_strategy_as_research_only():
     assert "directional_momentum_v2" not in diversity["shadow_research_strategies"]
 
 
-def test_integrated_catalog_does_not_report_legacy_wave2_rows_as_research_only():
+def test_frozen_integrated_catalog_reports_legacy_wave2_rows_as_research_only():
     now_ms = int(time.time() * 1000)
     repo = FakeReadinessRepository(now_ms=now_ms)
     repo.candidates = [
@@ -377,6 +640,7 @@ def test_integrated_catalog_does_not_report_legacy_wave2_rows_as_research_only()
             },
             "source_integrity": {
                 "activation_scope": "shadow_only",
+                "promotion_state": "frozen",
                 "paper_eligible": False,
                 "operator_promotion_required": True,
             },
@@ -393,7 +657,7 @@ def test_integrated_catalog_does_not_report_legacy_wave2_rows_as_research_only()
 
     assert "crowded_long_unwind_v1" in diversity["active_alpha_strategies"]
     assert "crowded_long_unwind_v1" not in diversity["raw_paper_eligible_strategies"]
-    assert "crowded_long_unwind_v1" not in diversity["shadow_research_strategies"]
+    assert "crowded_long_unwind_v1" in diversity["shadow_research_strategies"]
 
 
 def test_paper_readiness_blocks_paper_leak_missing_data_and_risk_spike():
@@ -441,7 +705,9 @@ def test_paper_signoff_preflight_requires_symbol_evidence_and_no_live_mode():
     settings = readiness_settings()
 
     async def run():
-        return await build_paper_signoff_preflight(repo, settings, service, symbols=["BTC", "ETH"], window_hours=1, limit=100)
+        return await build_paper_signoff_preflight(
+            repo, settings, service, symbols=["BTC", "ETH"], window_hours=1, limit=100
+        )
 
     preflight = anyio.run(run)
     assert preflight["ready_for_paper_signoff"] is True
@@ -450,7 +716,9 @@ def test_paper_signoff_preflight_requires_symbol_evidence_and_no_live_mode():
     assert preflight["evidence_quality"]["passes_minimums"] is True
 
     async def run_missing_symbol():
-        return await build_paper_signoff_preflight(repo, settings, service, symbols=["BTC", "HYPE"], window_hours=1, limit=100)
+        return await build_paper_signoff_preflight(
+            repo, settings, service, symbols=["BTC", "HYPE"], window_hours=1, limit=100
+        )
 
     missing_symbol = anyio.run(run_missing_symbol)
     assert missing_symbol["ready_for_paper_signoff"] is False
@@ -473,9 +741,12 @@ def test_engine_readiness_route_is_registered():
     assert payload["ready_for_paper"] is True
     assert payload["checks"]["shadow_integrity"]["paper_intent_count"] == 0
 
-    preflight = client.get("/engine/paper-signoff/preflight", params={"symbols": "BTC,ETH", "window_hours": 1, "limit": 100})
+    preflight = client.get(
+        "/engine/paper-signoff/preflight", params={"symbols": "BTC,ETH", "window_hours": 1, "limit": 100}
+    )
     assert preflight.status_code == 200
     assert preflight.json()["ready_for_paper_signoff"] is True
+
 
 def test_paper_readiness_surfaces_stale_trader_heartbeat_with_true_run_count():
     now_ms = int(time.time() * 1000)
@@ -499,7 +770,9 @@ def test_paper_readiness_surfaces_stale_trader_heartbeat_with_true_run_count():
     settings = readiness_settings()
 
     async def run():
-        return await build_paper_readiness_scorecard(repo, settings, PassiveReadinessService(), window_hours=1, limit=100)
+        return await build_paper_readiness_scorecard(
+            repo, settings, PassiveReadinessService(), window_hours=1, limit=100
+        )
 
     scorecard = anyio.run(run)
     reliability = scorecard["checks"]["engine_reliability"]
@@ -509,6 +782,7 @@ def test_paper_readiness_surfaces_stale_trader_heartbeat_with_true_run_count():
     assert reliability["runtime_age_ms"] >= 600_000
     assert "engine_loop_stale" in {block["code"] for block in scorecard["hard_blocks"]}
     assert scorecard["ready_for_paper"] is False
+
 
 def test_paper_readiness_blocks_zero_sample_replay_artifact():
     now_ms = int(time.time() * 1000)
@@ -520,13 +794,19 @@ def test_paper_readiness_blocks_zero_sample_replay_artifact():
             "status": "advisory_pass",
             "candidate_metrics": {"candidate_count": 0},
             "created_at_ms": now_ms - 1000,
-            "metadata": {"artifact_type": "engine_shadow_comparison", "data_window": {"start_ms": now_ms - 60 * 60 * 1000, "end_ms": now_ms}, "verdict": "baseline_equivalence"},
+            "metadata": {
+                "artifact_type": "engine_shadow_comparison",
+                "data_window": {"start_ms": now_ms - 60 * 60 * 1000, "end_ms": now_ms},
+                "verdict": "baseline_equivalence",
+            },
         }
     ]
     settings = readiness_settings()
 
     async def run():
-        return await build_paper_readiness_scorecard(repo, settings, FakeReadinessService(now_ms=now_ms), window_hours=1, limit=100)
+        return await build_paper_readiness_scorecard(
+            repo, settings, FakeReadinessService(now_ms=now_ms), window_hours=1, limit=100
+        )
 
     scorecard = anyio.run(run)
 

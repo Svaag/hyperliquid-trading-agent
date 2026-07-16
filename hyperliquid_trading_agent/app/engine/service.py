@@ -22,10 +22,11 @@ from hyperliquid_trading_agent.app.engine.debate_adjudicator import (
 from hyperliquid_trading_agent.app.engine.diversity import PortfolioDiversityController
 from hyperliquid_trading_agent.app.engine.event_ledger import EventLedger, now_ms
 from hyperliquid_trading_agent.app.engine.evidence_admission import ShadowEvidenceAdmissionController
-from hyperliquid_trading_agent.app.engine.execution import ExecutionGateway
+from hyperliquid_trading_agent.app.engine.execution import ExecutionCostService, ExecutionGateway
 from hyperliquid_trading_agent.app.engine.feature_store import FeatureStore
 from hyperliquid_trading_agent.app.engine.portfolio_allocator import PortfolioAllocator
 from hyperliquid_trading_agent.app.engine.position_manager import PositionManager
+from hyperliquid_trading_agent.app.engine.promotion import StrategyPromotionPolicyService
 from hyperliquid_trading_agent.app.engine.regime import RegimeEngine
 from hyperliquid_trading_agent.app.engine.replay_compare import latest_engine_replay_comparison
 from hyperliquid_trading_agent.app.engine.schemas import AlphaCandidate, AssetClass, OrderIntent
@@ -77,7 +78,7 @@ class InstitutionalEngineService:
             news_risk_overlay_mode=getattr(settings, "engine_news_risk_overlay_mode", "shadow"),
         )
         self.candidate_book = CandidateBook(repository)
-        self.scorer = EVScorerService(repository)
+        self.scorer = EVScorerService(repository=repository, settings=settings)
         self.allocator = PortfolioAllocator(
             min_net_ev_bps=settings.engine_min_net_ev_bps,
             min_risk_adjusted_utility=settings.engine_min_risk_adjusted_utility,
@@ -90,6 +91,7 @@ class InstitutionalEngineService:
         self.council = DeterministicCouncil()
         self.debate = DebateAdjudicator(repository)
         self.execution = ExecutionGateway(repository=repository)
+        self.execution_costs = ExecutionCostService(settings=settings, repository=repository, hyperliquid=hyperliquid)
         self.positions = PositionManager(repository)
         self.candidate_outcomes = CandidateOutcomeAttributionService(repository)
         self.diversity = PortfolioDiversityController(settings)
@@ -101,6 +103,7 @@ class InstitutionalEngineService:
             enable_wave_1c=bool(getattr(settings, "engine_wave1c_enabled", False)),
             news_event_alpha_mode=getattr(settings, "engine_news_alpha_mode", "off"),
         )
+        self.promotion = StrategyPromotionPolicyService(repository)
         self.strategies = self.strategy_registry.strategies(enabled_only=True)
         for strategy in self.strategies:
             configure = getattr(strategy, "configure", None)
@@ -159,19 +162,23 @@ class InstitutionalEngineService:
             "strategy_catalog": self.strategy_registry.catalog_summary(),
             "strategy_specs_persisted": self.strategy_specs_persisted,
             "strategy_specs_persisted_count": self.strategy_specs_persisted_count,
+            "strategy_promotion": self.promotion.status(),
+            "ev_scorer": self.scorer.status(),
             "wave_policy": {
                 "wave1c_enabled": bool(getattr(self.settings, "engine_wave1c_enabled", False)),
                 "wave2_enabled": bool(getattr(self.settings, "engine_wave2_enabled", False)),
-                "wave2_status": "first_class_integrated" if self.strategy_registry.catalog_mode == "integrated" else "disabled",
+                "wave2_status": "first_class_integrated"
+                if self.strategy_registry.catalog_mode == "integrated"
+                else "disabled",
             },
         }
 
     async def run_once(self, *, symbols: list[str] | None = None) -> dict[str, Any]:
         ts = now_ms()
-        symbols = [symbol.upper() for symbol in (symbols or self.settings.autonomy_core_symbols or ["BTC", "ETH", "HYPE"])]
-        engine_run_id = "erun_" + hashlib.sha1(
-            f"{ts}:{','.join(symbols)}:{self.run_count}".encode()
-        ).hexdigest()[:24]
+        symbols = [
+            symbol.upper() for symbol in (symbols or self.settings.autonomy_core_symbols or ["BTC", "ETH", "HYPE"])
+        ]
+        engine_run_id = "erun_" + hashlib.sha1(f"{ts}:{','.join(symbols)}:{self.run_count}".encode()).hexdigest()[:24]
         run_started = time.perf_counter()
         stage_ms: dict[str, float] = {}
         self.run_in_progress = True
@@ -209,11 +216,19 @@ class InstitutionalEngineService:
             _stage_done("cross_venue", stage_started)
             # Add L2 for a bounded hot set to produce execution/microstructure features.
             stage_started = time.perf_counter()
+            l2_book_cache: dict[str, dict[str, Any]] = {}
             for symbol in symbols[: max(1, self.settings.autonomy_max_hot_l2_assets)]:
                 try:
                     book = await self.hyperliquid.l2_book(symbol)
                 except Exception:
                     continue
+                received_at_ms = now_ms()
+                if isinstance(book, dict):
+                    l2_book_cache[symbol] = {
+                        **book,
+                        "snapshot_id": str(book.get("snapshot_id") or f"hl_l2_{symbol}_{received_at_ms}"),
+                        "received_ts_ms": int(book.get("time") or received_at_ms),
+                    }
                 event = await self.ledger.normalize_and_record(
                     event_type="l2_book",
                     source="hyperliquid",
@@ -221,7 +236,7 @@ class InstitutionalEngineService:
                     payload={"coin": symbol, **(book if isinstance(book, dict) else {"raw": book})},
                     asset_class="crypto",
                     symbols=[symbol],
-                    received_ts_ms=now_ms(),
+                    received_ts_ms=received_at_ms,
                 )
                 await self.feature_store.features_for_event(event)
             _stage_done("l2_books", stage_started)
@@ -229,6 +244,7 @@ class InstitutionalEngineService:
             all_candidates: list[AlphaCandidate] = []
             estimates = {}
             allocations = {}
+            execution_quotes = {}
             executed = []
             current_loop_allocations = []
             throttle_events = []
@@ -247,9 +263,13 @@ class InstitutionalEngineService:
                         allocation_history = []
                 list_intents = getattr(self.repository, "list_order_intents", None)
                 if callable(list_intents):
-                    evidence_lookback = max(10, int(getattr(self.settings, "engine_shadow_evidence_lookback_intents", 100)))
+                    evidence_lookback = max(
+                        10, int(getattr(self.settings, "engine_shadow_evidence_lookback_intents", 100))
+                    )
                     try:
-                        shadow_intent_history = list(await list_intents(execution_mode="shadow", limit=evidence_lookback))
+                        shadow_intent_history = list(
+                            await list_intents(execution_mode="shadow", limit=evidence_lookback)
+                        )
                     except TypeError:
                         try:
                             shadow_intent_history = [
@@ -295,9 +315,7 @@ class InstitutionalEngineService:
                 )
                 strategy_selection_summaries[symbol] = selection.summary()
                 selected_ids = {strategy.spec.strategy_id for strategy in selection.strategies}
-                skipped_by_id = {
-                    str(item.get("strategy_id") or ""): item for item in selection.skipped
-                }
+                skipped_by_id = {str(item.get("strategy_id") or ""): item for item in selection.skipped}
                 for strategy in self.strategies:
                     trace: StrategyGenerationTrace | None = None
                     if strategy.spec.strategy_id in selected_ids:
@@ -317,27 +335,32 @@ class InstitutionalEngineService:
                     )
                 evidence_epoch_id = str(getattr(self.settings, "engine_evidence_epoch_id", "") or "runtime")
                 symbol_candidates = [
-                    candidate.model_copy(
-                        update={
-                            "instrument_id": snapshot.instrument_id,
-                            "underlying_id": snapshot.underlying_id,
-                            "venue_id": snapshot.venue_id,
-                            "provider_symbol": snapshot.provider_symbol,
-                            "venue": snapshot.venue_id,
-                            "evidence_epoch_id": evidence_epoch_id,
-                            "metadata": {
-                                **candidate.metadata,
-                                "evidence_epoch_id": evidence_epoch_id,
+                    self.promotion.apply(
+                        candidate.model_copy(
+                            update={
                                 "instrument_id": snapshot.instrument_id,
                                 "underlying_id": snapshot.underlying_id,
                                 "venue_id": snapshot.venue_id,
-                            },
-                        }
+                                "provider_symbol": snapshot.provider_symbol,
+                                "venue": snapshot.venue_id,
+                                "evidence_epoch_id": evidence_epoch_id,
+                                "metadata": {
+                                    **candidate.metadata,
+                                    "evidence_epoch_id": evidence_epoch_id,
+                                    "instrument_id": snapshot.instrument_id,
+                                    "underlying_id": snapshot.underlying_id,
+                                    "venue_id": snapshot.venue_id,
+                                    "research_features": _research_features(snapshot.features),
+                                },
+                            }
+                        )
                     )
                     for candidate in symbol_candidates
                 ]
                 symbol_candidates = symbol_candidates[: self.settings.engine_max_candidates_per_loop]
-                symbol_candidates, symbol_throttle_events = await self.throttles.filter_candidates(symbol_candidates, repository=self.repository, timestamp_ms=ts)
+                symbol_candidates, symbol_throttle_events = await self.throttles.filter_candidates(
+                    symbol_candidates, repository=self.repository, timestamp_ms=ts
+                )
                 throttle_events.extend(symbol_throttle_events)
                 all_candidates.extend(symbol_candidates)
                 await self.candidate_book.add_many(symbol_candidates)
@@ -347,9 +370,28 @@ class InstitutionalEngineService:
                 directional_family_ids = {item.strategy_family for item in symbol_candidates if item.side != "flat"}
                 for candidate in symbol_candidates:
                     candidate_step_started = time.perf_counter()
-                    ev = await self.scorer.score(candidate, regime)
+                    sizing = self.allocator.propose_size(
+                        candidate,
+                        regime=regime,
+                        portfolio_state=self._portfolio_snapshot(),
+                    )
+                    quote = await self.execution_costs.quote_candidate(
+                        candidate,
+                        requested_size=max(sizing.allocated_size, 1e-12),
+                        requested_notional_usd=max(sizing.allocated_notional_usd, 1e-9),
+                        order_book=l2_book_cache.get(candidate.asset.upper()),
+                    )
+                    execution_quotes[candidate.candidate_id] = quote
+                    ev = await self.scorer.score(candidate, regime, cost_quote=quote)
                     estimates[candidate.candidate_id] = ev
-                    allocation = await self.allocator.allocate(candidate, ev, regime=regime, portfolio_state=self._portfolio_snapshot())
+                    allocation = await self.allocator.allocate(
+                        candidate,
+                        ev,
+                        regime=regime,
+                        portfolio_state=self._portfolio_snapshot(),
+                        sizing=sizing,
+                        allocation_scope=self.promotion.allocation_scope(candidate),
+                    )
                     allocation = self._enrich_allocation_metadata(allocation, candidate)
                     _stage_done("candidate_score_allocate", candidate_step_started)
                     candidate_step_started = time.perf_counter()
@@ -359,6 +401,7 @@ class InstitutionalEngineService:
                         snapshot_features=snapshot.features,
                         timestamp_ms=ts,
                         market_snapshot_cache=risk_market_snapshot_cache,
+                        cost_quote=quote,
                     )
                     if candidate_risk is not None and not candidate_risk.allowed:
                         allocation = allocation.model_copy(
@@ -372,7 +415,12 @@ class InstitutionalEngineService:
                         )
                     _stage_done("candidate_risk", candidate_step_started)
                     candidate_step_started = time.perf_counter()
-                    allowed_by_throttle, throttle_reasons, throttle_metadata = await self.throttles.allow_allocation(candidate, current_loop_allocations=current_loop_allocations, repository=self.repository, timestamp_ms=ts)
+                    allowed_by_throttle, throttle_reasons, throttle_metadata = await self.throttles.allow_allocation(
+                        candidate,
+                        current_loop_allocations=current_loop_allocations,
+                        repository=self.repository,
+                        timestamp_ms=ts,
+                    )
                     if not allowed_by_throttle:
                         allocation = allocation.model_copy(
                             update={
@@ -402,7 +450,14 @@ class InstitutionalEngineService:
                     order_risk = None
                     if allocation.status in {"allocate", "reduce", "require_debate"}:
                         order_ts = now_ms()
-                        intent = self._order_intent(candidate, ev.model_version_id, allocation.allocation_id, allocation.allocated_size, allocation.allocated_notional_usd, order_ts)
+                        intent = self._order_intent(
+                            candidate,
+                            ev.model_version_id,
+                            allocation.allocation_id,
+                            allocation.allocated_size,
+                            allocation.allocated_notional_usd,
+                            order_ts,
+                        )
                         market_snapshot = await self._risk_market_snapshot(
                             candidate,
                             snapshot_features=snapshot.features,
@@ -413,10 +468,24 @@ class InstitutionalEngineService:
                             market_snapshot=market_snapshot,
                             portfolio_snapshot=self._portfolio_snapshot(),
                             strategy_snapshot={"net_ev_bps": ev.net_ev_bps, "regime_permission": True},
-                            operator_context={"kill_switch_active": False, "config_approved": True, "model_approved": ev.model_version_id == "deterministic_fallback_v1" or bool(self.settings.engine_approved_scorer_model_id)},
+                            operator_context={
+                                "kill_switch_active": False,
+                                "config_approved": True,
+                                "model_approved": self.scorer.model_approved,
+                                "strategy_version_approved": self.promotion.paper_eligible(candidate),
+                                "execution_cost_measured": quote.cost_quality == "measured",
+                            },
                         )
                         if not order_risk.allowed:
-                            allocation = allocation.model_copy(update={"status": "risk_rejected", "allocated_size": 0.0, "allocated_notional_usd": 0.0, "risk_usd": 0.0, "reason_codes": [*allocation.reason_codes, "risk_gateway_reject"]})
+                            allocation = allocation.model_copy(
+                                update={
+                                    "status": "risk_rejected",
+                                    "allocated_size": 0.0,
+                                    "allocated_notional_usd": 0.0,
+                                    "risk_usd": 0.0,
+                                    "reason_codes": [*allocation.reason_codes, "risk_gateway_reject"],
+                                }
+                            )
                             allocation = self._enrich_allocation_metadata(allocation, candidate)
                             allocations[candidate.candidate_id] = allocation
                             await self._persist_allocation(allocation)
@@ -450,8 +519,20 @@ class InstitutionalEngineService:
                             await self._persist_allocation(allocation)
                     _stage_done("candidate_admission", candidate_step_started)
                     candidate_step_started = time.perf_counter()
-                    packet_risk = order_risk or candidate_risk or {"decision_id": None, "decision": "not_applicable", "allowed": True, "violations": []}
-                    packet = build_candidate_trade_packet(candidate=candidate, ev=ev, allocation=allocation, order_intent=intent, risk_decision=packet_risk, replay_context=replay_context, created_at_ms=ts)
+                    packet_risk = (
+                        order_risk
+                        or candidate_risk
+                        or {"decision_id": None, "decision": "not_applicable", "allowed": True, "violations": []}
+                    )
+                    packet = build_candidate_trade_packet(
+                        candidate=candidate,
+                        ev=ev,
+                        allocation=allocation,
+                        order_intent=intent,
+                        risk_decision=packet_risk,
+                        replay_context=replay_context,
+                        created_at_ms=ts,
+                    )
                     await self._persist_candidate_trade_packet(packet)
                     council_review = self.council.review(packet, regime)
                     self.council_reviews_created += 1
@@ -472,12 +553,22 @@ class InstitutionalEngineService:
                     current_loop_allocations.append(allocation)
                     risk = order_risk
                     if risk is None or not risk.allowed:
-                        allocation = allocation.model_copy(update={"status": "risk_rejected", "allocated_size": 0.0, "allocated_notional_usd": 0.0, "risk_usd": 0.0, "reason_codes": [*allocation.reason_codes, "risk_gateway_reject"]})
+                        allocation = allocation.model_copy(
+                            update={
+                                "status": "risk_rejected",
+                                "allocated_size": 0.0,
+                                "allocated_notional_usd": 0.0,
+                                "risk_usd": 0.0,
+                                "reason_codes": [*allocation.reason_codes, "risk_gateway_reject"],
+                            }
+                        )
                         allocation = self._enrich_allocation_metadata(allocation, candidate)
                         current_loop_allocations.pop()
                         await self._persist_allocation(allocation)
                         continue
-                    if intent is None or not council_allows_execution(council_review, execution_mode=intent.execution_mode):
+                    if intent is None or not council_allows_execution(
+                        council_review, execution_mode=intent.execution_mode
+                    ):
                         allocation = allocation.model_copy(
                             update={
                                 "status": "skip",
@@ -501,9 +592,21 @@ class InstitutionalEngineService:
                         current_loop_allocations.pop()
                         await self._persist_allocation(allocation)
                         continue
-                    priority = debate_priority(candidate, ev, allocation, regime, portfolio_equity=float(self._portfolio_snapshot().get("equity_usd") or 100_000))
-                    if self.settings.engine_debate_enabled and self.debate_count_today < self.settings.engine_debate_max_per_day and priority >= self.settings.engine_debate_priority_min:
-                        pack = self.pack_builder.build(candidate, ev, allocation, regime, feature_snapshot=snapshot.features)
+                    priority = debate_priority(
+                        candidate,
+                        ev,
+                        allocation,
+                        regime,
+                        portfolio_equity=float(self._portfolio_snapshot().get("equity_usd") or 100_000),
+                    )
+                    if (
+                        self.settings.engine_debate_enabled
+                        and self.debate_count_today < self.settings.engine_debate_max_per_day
+                        and priority >= self.settings.engine_debate_priority_min
+                    ):
+                        pack = self.pack_builder.build(
+                            candidate, ev, allocation, regime, feature_snapshot=snapshot.features
+                        )
                         await self._persist_evidence_pack(pack)
                         debate = await self.debate.adjudicate_fallback(pack)
                         self.debate_count_today += 1
@@ -521,22 +624,50 @@ class InstitutionalEngineService:
                             current_loop_allocations.pop()
                             await self._persist_allocation(allocation)
                             continue
-                        allocation = allocation.model_copy(update={"allocated_size": allocation.allocated_size * debate.max_size_multiplier, "allocated_notional_usd": allocation.allocated_notional_usd * debate.max_size_multiplier, "risk_usd": allocation.risk_usd * debate.max_size_multiplier})
+                        allocation = allocation.model_copy(
+                            update={
+                                "allocated_size": allocation.allocated_size * debate.max_size_multiplier,
+                                "allocated_notional_usd": allocation.allocated_notional_usd
+                                * debate.max_size_multiplier,
+                                "risk_usd": allocation.risk_usd * debate.max_size_multiplier,
+                            }
+                        )
                         allocation = self._enrich_allocation_metadata(allocation, candidate)
                         current_loop_allocations[-1] = allocation
                         await self._persist_allocation(allocation)
                         if allocation.allocated_size <= 0:
                             continue
-                        intent = self._order_intent(candidate, ev.model_version_id, allocation.allocation_id, allocation.allocated_size, allocation.allocated_notional_usd, now_ms())
+                        intent = self._order_intent(
+                            candidate,
+                            ev.model_version_id,
+                            allocation.allocation_id,
+                            allocation.allocated_size,
+                            allocation.allocated_notional_usd,
+                            now_ms(),
+                        )
                     candidate_step_started = time.perf_counter()
-                    report = await self.execution.submit(intent)
+                    final_quote = execution_quotes.get(candidate.candidate_id)
+                    if final_quote is None or abs(final_quote.requested_size - intent.target_size) > 1e-12:
+                        final_quote = await self.execution_costs.quote_candidate(
+                            candidate,
+                            requested_size=intent.target_size,
+                            requested_notional_usd=intent.target_notional_usd,
+                            order_book=l2_book_cache.get(candidate.asset.upper()),
+                        )
+                    report = await self.execution.submit(intent, final_quote)
                     self.order_intents_created += 1
                     self.execution_reports_created += 1
                     executed.append(report)
+                    await self.candidate_outcomes.attach_execution_report(
+                        candidate_id=candidate.candidate_id,
+                        report=report,
+                    )
                     await self.positions.open_from_execution(candidate, report)
                     if intent.execution_mode == "shadow":
                         shadow_intent_history.insert(0, intent.model_dump(mode="json"))
-                        shadow_intent_history = shadow_intent_history[: max(10, int(getattr(self.settings, "engine_shadow_evidence_lookback_intents", 100)))]
+                        shadow_intent_history = shadow_intent_history[
+                            : max(10, int(getattr(self.settings, "engine_shadow_evidence_lookback_intents", 100)))
+                        ]
                     _stage_done("candidate_execution", candidate_step_started)
                 _stage_done("candidate_pipeline", stage_started)
             stage_started = time.perf_counter()
@@ -544,7 +675,9 @@ class InstitutionalEngineService:
             _stage_done("book_snapshot", stage_started)
             self.candidates_created += len(all_candidates)
             self.last_throttle_summary = self._throttle_summary(throttle_events=throttle_events, timestamp_ms=ts)
-            self.last_diversity_summary = self._diversity_summary(diversity_decisions=diversity_decisions, timestamp_ms=ts)
+            self.last_diversity_summary = self._diversity_summary(
+                diversity_decisions=diversity_decisions, timestamp_ms=ts
+            )
             self.last_strategy_selection_summary = {"timestamp_ms": ts, "symbols": strategy_selection_summaries}
             self.last_run_at_ms = ts
             self.last_run_id = engine_run_id
@@ -618,15 +751,14 @@ class InstitutionalEngineService:
         ages_value = snapshot.metadata.get("feature_ages_ms") if isinstance(snapshot.metadata, dict) else {}
         ages = dict(ages_value) if isinstance(ages_value, dict) else {}
         missing = [name for name in required if snapshot.features.get(name) is None]
-        stale_threshold_ms = max(
-            1,
-            int(getattr(self.settings, "engine_validation_missing_data_seconds", 300)),
-        ) * 1000
-        stale = [
-            name
-            for name in required
-            if name not in missing and int(ages.get(name) or 0) > stale_threshold_ms
-        ]
+        stale_threshold_ms = (
+            max(
+                1,
+                int(getattr(self.settings, "engine_validation_missing_data_seconds", 300)),
+            )
+            * 1000
+        )
+        stale = [name for name in required if name not in missing and int(ages.get(name) or 0) > stale_threshold_ms]
         present_count = max(0, len(required) - len(missing))
         fresh_count = max(0, present_count - len(stale))
         if trace is None:
@@ -719,11 +851,10 @@ class InstitutionalEngineService:
         diagnostics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         spec = strategy.spec
-        activation_scope = str(spec.metadata.get("activation_scope") or "paper_shadow")
-        paper_eligible = bool(spec.metadata.get("paper_eligible", True)) and activation_scope != "shadow_only"
-        evaluation_id = "seval_" + hashlib.sha1(
-            f"{engine_run_id}:{asset}:{spec.strategy_id}".encode()
-        ).hexdigest()[:24]
+        policy = self.promotion.get(spec.strategy_id, spec.version)
+        paper_eligible = policy.state == "paper_approved"
+        activation_scope = "paper_shadow" if paper_eligible else "research_shadow"
+        evaluation_id = "seval_" + hashlib.sha1(f"{engine_run_id}:{asset}:{spec.strategy_id}".encode()).hexdigest()[:24]
         ids = list(candidate_ids or [])
         return {
             "evaluation_id": evaluation_id,
@@ -762,6 +893,9 @@ class InstitutionalEngineService:
                 "schema_version": 1,
                 "artifact_type": "engine_strategy_evaluation",
                 "freshness_is_report_only": True,
+                "strategy_version_key": policy.strategy_version_key,
+                "promotion_state": policy.state,
+                "promotion_reason_codes": policy.reason_codes,
             },
         }
 
@@ -805,6 +939,7 @@ class InstitutionalEngineService:
         }
 
     def _enrich_allocation_metadata(self, allocation, candidate: AlphaCandidate):
+        policy = self.promotion.get(candidate.strategy_id, candidate.strategy_version)
         return allocation.model_copy(
             update={
                 "metadata": {
@@ -817,6 +952,9 @@ class InstitutionalEngineService:
                     "counts_for_breadth": candidate.counts_for_breadth,
                     "regime_snapshot_id": candidate.regime_snapshot_id,
                     "feature_coverage_pct": candidate.feature_coverage_pct,
+                    "strategy_version_key": policy.strategy_version_key,
+                    "promotion_state": policy.state,
+                    "allocation_scope": allocation.allocation_scope,
                 }
             }
         )
@@ -844,15 +982,18 @@ class InstitutionalEngineService:
 
         if self.strategy_specs_persisted:
             return self.strategy_specs_persisted_count
-        if self.repository is None or not getattr(self.repository, "enabled", False):
-            return 0
-        record = getattr(self.repository, "upsert_strategy_spec", None)
-        if not callable(record):
-            return 0
+        specs = self.strategy_registry.specs(enabled_only=False)
+        record = (
+            getattr(self.repository, "upsert_strategy_spec", None)
+            if self.repository is not None and getattr(self.repository, "enabled", False)
+            else None
+        )
         count = 0
-        for spec in self.strategy_registry.specs(enabled_only=False):
-            await record(spec.model_dump(mode="json"))
+        for spec in specs:
+            if callable(record):
+                await record(spec.model_dump(mode="json"))
             count += 1
+        await self.promotion.ensure_registry(specs)
         self.strategy_specs_persisted = True
         self.strategy_specs_persisted_count = count
         return count
@@ -865,13 +1006,16 @@ class InstitutionalEngineService:
         snapshot_features: dict[str, Any],
         timestamp_ms: int,
         market_snapshot_cache: dict[str, dict[str, Any]] | None = None,
+        cost_quote: Any | None = None,
     ) -> Any | None:
         decision_ts = now_ms()
         if candidate.side == "flat":
             decision = RiskGatewayDecision(
                 decision_id="rgd_no_trade_" + hashlib.sha1(candidate.candidate_id.encode()).hexdigest()[:24],
                 intent_id=_no_trade_intent_id(candidate.candidate_id),
-                mode="shadow" if self.settings.engine_shadow_enabled and not self.settings.engine_paper_enabled else "paper",
+                mode="shadow"
+                if self.settings.engine_shadow_enabled and not self.settings.engine_paper_enabled
+                else "paper",
                 decision="allow",
                 violations=[],
                 limits_snapshot={"asset_class": candidate.asset_class, "no_trade": True},
@@ -893,7 +1037,9 @@ class InstitutionalEngineService:
             return decision
         notional = max(1.0, min(10.0, float(candidate.proposed_entry) * 0.001))
         size = notional / max(float(candidate.proposed_entry), 1e-9)
-        intent = self._order_intent(candidate, ev.model_version_id, f"precheck_{candidate.candidate_id}", size, notional, decision_ts)
+        intent = self._order_intent(
+            candidate, ev.model_version_id, f"precheck_{candidate.candidate_id}", size, notional, decision_ts
+        )
         intent = intent.model_copy(update={"intent_id": f"precheck_{candidate.candidate_id}"})
         market_snapshot = await self._risk_market_snapshot(
             candidate,
@@ -904,8 +1050,18 @@ class InstitutionalEngineService:
             intent,
             market_snapshot=market_snapshot,
             portfolio_snapshot=self._portfolio_snapshot(),
-            strategy_snapshot={"net_ev_bps": ev.net_ev_bps, "regime_permission": True, "candidate_level_precheck": True},
-            operator_context={"kill_switch_active": False, "config_approved": True, "model_approved": ev.model_version_id == "deterministic_fallback_v1" or bool(self.settings.engine_approved_scorer_model_id)},
+            strategy_snapshot={
+                "net_ev_bps": ev.net_ev_bps,
+                "regime_permission": True,
+                "candidate_level_precheck": True,
+            },
+            operator_context={
+                "kill_switch_active": False,
+                "config_approved": True,
+                "model_approved": self.scorer.model_approved,
+                "strategy_version_approved": self.promotion.paper_eligible(candidate),
+                "execution_cost_measured": getattr(cost_quote, "cost_quality", "unavailable") == "measured",
+            },
         )
 
     async def _risk_market_snapshot(
@@ -987,7 +1143,9 @@ class InstitutionalEngineService:
             if display not in wanted:
                 continue
             key = (display, str(row.get("comparison_instrument_id") or ""))
-            if key not in latest_by_pair or int(row.get("as_of_ms") or 0) > int(latest_by_pair[key].get("as_of_ms") or 0):
+            if key not in latest_by_pair or int(row.get("as_of_ms") or 0) > int(
+                latest_by_pair[key].get("as_of_ms") or 0
+            ):
                 latest_by_pair[key] = row
         for (symbol, _), row in latest_by_pair.items():
             metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
@@ -1138,7 +1296,10 @@ class InstitutionalEngineService:
             snapshot = self.portfolio_service.latest_snapshot()
             if snapshot is not None:
                 return snapshot.model_dump(mode="json")
-        return {"equity_usd": self.settings.autonomy_paper_initial_equity_usd, "initial_equity_usd": self.settings.autonomy_paper_initial_equity_usd}
+        return {
+            "equity_usd": self.settings.autonomy_paper_initial_equity_usd,
+            "initial_equity_usd": self.settings.autonomy_paper_initial_equity_usd,
+        }
 
     async def _record_world_model_features(self, symbol: str) -> None:
         if self.world_model_service is None:
@@ -1156,15 +1317,27 @@ class InstitutionalEngineService:
         except Exception:
             return
 
-    def _order_intent(self, candidate: AlphaCandidate, model_version_id: str, allocation_id: str, size: float, notional: float, ts: int) -> OrderIntent:
+    def _order_intent(
+        self,
+        candidate: AlphaCandidate,
+        model_version_id: str,
+        allocation_id: str,
+        size: float,
+        notional: float,
+        ts: int,
+    ) -> OrderIntent:
         side = "buy" if candidate.side == "long" else "sell"
-        mode = "shadow" if self.settings.engine_shadow_enabled and not self.settings.engine_paper_enabled else "paper"
+        policy = self.promotion.get(candidate.strategy_id, candidate.strategy_version)
+        paper_eligible = policy.state == "paper_approved" and self.scorer.model_approved
+        mode = "paper" if self.settings.engine_paper_enabled and paper_eligible else "shadow"
         if candidate.strategy_id == "news_event_alpha_v2":
             # A Newswire strategy configured for shadow evaluation must stay shadow even
             # when the wider engine is paper-enabled.  "paper" remains subject to the
             # engine's global paper switch; no Newswire path has live authority.
             news_mode = str(candidate.metadata.get("news_alpha_mode") or "shadow")
-            mode = "paper" if news_mode == "paper" and self.settings.engine_paper_enabled else "shadow"
+            mode = (
+                "paper" if news_mode == "paper" and self.settings.engine_paper_enabled and paper_eligible else "shadow"
+            )
         return OrderIntent(
             intent_id="intent_" + candidate.candidate_id.removeprefix("cand_"),
             parent_candidate_id=candidate.candidate_id,
@@ -1198,6 +1371,10 @@ class InstitutionalEngineService:
                 "instrument_id": candidate.instrument_id,
                 "underlying_id": candidate.underlying_id,
                 "venue_id": candidate.venue_id,
+                "strategy_version": candidate.strategy_version,
+                "strategy_version_key": policy.strategy_version_key,
+                "promotion_state": policy.state,
+                "paper_eligible": paper_eligible,
             },
         )
 
@@ -1282,6 +1459,26 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+def _research_features(features: dict[str, Any]) -> dict[str, Any]:
+    """Bounded point-in-time features needed by predeclared research slices."""
+
+    names = {
+        "top_imbalance",
+        "top_depth_usd",
+        "bid_depth_usd",
+        "ask_depth_usd",
+        "depth_replenishment_rate",
+        "depth_imbalance_10_levels",
+        "spread_bps",
+        "realized_vol_5m_bps",
+        "depth_thinning_5m_pct",
+        "mid_return_5m_bps",
+        "aggressive_trade_to_visible_depth_ratio",
+        "price_nonresponse_after_aggression",
+    }
+    return {name: features[name] for name in sorted(names) if name in features}
+
+
 def _asset_class_from_underlying(underlying_id: str) -> AssetClass:
     prefix = underlying_id.split(":", 1)[0].upper()
     return {
@@ -1318,7 +1515,9 @@ def _spread_bps_from_l2_book(book: Any) -> float | None:
 
 def _level_px_sz(level: Any) -> tuple[float | None, float | None]:
     if isinstance(level, dict):
-        return _float_or_none(level.get("px") or level.get("price")), _float_or_none(level.get("sz") or level.get("size"))
+        return _float_or_none(level.get("px") or level.get("price")), _float_or_none(
+            level.get("sz") or level.get("size")
+        )
     if isinstance(level, (list, tuple)):
         px = level[0] if len(level) > 0 else None
         sz = level[1] if len(level) > 1 else None

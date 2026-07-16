@@ -52,6 +52,7 @@ from hyperliquid_trading_agent.app.db.models import (
     EquityPortfolioSnapshotRecord,
     EVEstimateRecord,
     EvidencePackRecord,
+    ExecutionCostQuoteRecord,
     ExecutionReportRecord,
     FeatureRollupRecord,
     FeatureSchemaVersionRecord,
@@ -132,6 +133,7 @@ from hyperliquid_trading_agent.app.db.models import (
     SourceCredibilityRecord,
     StrategyRegimePerformanceRecord,
     StrategySpecRecord,
+    StrategyVersionPolicyRecord,
     TokenCapitalSnapshotRecord,
     ToolCall,
     TrackedLevel,
@@ -257,7 +259,9 @@ class Repository:
                         )
                         .values(status="superseded", updated_at_ms=now_ms)
                     )
-            item = await session.get(ServiceHeartbeatRecord, {"service_role": str(service_role), "instance_id": str(instance_id)})
+            item = await session.get(
+                ServiceHeartbeatRecord, {"service_role": str(service_role), "instance_id": str(instance_id)}
+            )
             if item is None:
                 item = ServiceHeartbeatRecord(
                     service_role=str(service_role),
@@ -282,11 +286,19 @@ class Repository:
             await session.commit()
             return item.instance_id
 
-    async def mark_service_stopping(self, service_role: str, instance_id: str, *, metadata: dict[str, Any] | None = None) -> None:
-        await self.upsert_service_heartbeat(service_role=service_role, instance_id=instance_id, status="stopping", metadata=metadata)
+    async def mark_service_stopping(
+        self, service_role: str, instance_id: str, *, metadata: dict[str, Any] | None = None
+    ) -> None:
+        await self.upsert_service_heartbeat(
+            service_role=service_role, instance_id=instance_id, status="stopping", metadata=metadata
+        )
 
-    async def mark_service_stopped(self, service_role: str, instance_id: str, *, metadata: dict[str, Any] | None = None) -> None:
-        await self.upsert_service_heartbeat(service_role=service_role, instance_id=instance_id, status="stopped", metadata=metadata)
+    async def mark_service_stopped(
+        self, service_role: str, instance_id: str, *, metadata: dict[str, Any] | None = None
+    ) -> None:
+        await self.upsert_service_heartbeat(
+            service_role=service_role, instance_id=instance_id, status="stopped", metadata=metadata
+        )
 
     async def mark_service_failed(
         self,
@@ -384,18 +396,34 @@ class Repository:
 
     async def get_consumer_offset(self, consumer_name: str, *, source_table: str = "newswire_events") -> dict[str, Any]:
         if self.sessionmaker is None:
-            return {"consumer_name": consumer_name, "source_table": source_table, "last_event_id": None, "last_event_ts_ms": 0, "updated_at_ms": 0, "metadata": {}}
+            return {
+                "consumer_name": consumer_name,
+                "source_table": source_table,
+                "last_event_id": None,
+                "last_event_ts_ms": 0,
+                "updated_at_ms": 0,
+                "metadata": {},
+            }
         async with self.sessionmaker() as session:
             item = await session.get(ConsumerOffsetRecord, str(consumer_name))
             if item is None:
-                return {"consumer_name": consumer_name, "source_table": source_table, "last_event_id": None, "last_event_ts_ms": 0, "updated_at_ms": 0, "metadata": {}}
+                return {
+                    "consumer_name": consumer_name,
+                    "source_table": source_table,
+                    "last_event_id": None,
+                    "last_event_ts_ms": 0,
+                    "updated_at_ms": 0,
+                    "metadata": {},
+                }
             return _consumer_offset_to_dict(item)
 
     async def list_consumer_offsets(self, *, limit: int = 100) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            result = await session.execute(select(ConsumerOffsetRecord).order_by(ConsumerOffsetRecord.updated_at_ms.desc()).limit(limit))
+            result = await session.execute(
+                select(ConsumerOffsetRecord).order_by(ConsumerOffsetRecord.updated_at_ms.desc()).limit(limit)
+            )
             return [_consumer_offset_to_dict(item) for item in result.scalars().all()]
 
     async def update_consumer_offset(
@@ -414,7 +442,12 @@ class Repository:
         async with self.sessionmaker() as session:
             item = await session.get(ConsumerOffsetRecord, str(consumer_name))
             if item is None:
-                item = ConsumerOffsetRecord(consumer_name=str(consumer_name), source_table=str(source_table), last_event_ts_ms=0, updated_at_ms=now_ms)
+                item = ConsumerOffsetRecord(
+                    consumer_name=str(consumer_name),
+                    source_table=str(source_table),
+                    last_event_ts_ms=0,
+                    updated_at_ms=now_ms,
+                )
                 session.add(item)
             item.source_table = str(source_table)
             item.last_event_id = last_event_id
@@ -424,13 +457,27 @@ class Repository:
                 item.metadata_json = redact_secrets(metadata)
             await session.commit()
 
-    async def list_newswire_events_after(self, *, last_event_ts_ms: int = 0, last_event_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_newswire_events_after(
+        self, *, last_event_ts_ms: int = 0, last_event_id: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(NewswireEventRow).order_by(NewswireEventRow.received_at_ms.asc(), NewswireEventRow.event_id.asc()).limit(max(1, limit))
+            stmt = (
+                select(NewswireEventRow)
+                .order_by(NewswireEventRow.received_at_ms.asc(), NewswireEventRow.event_id.asc())
+                .limit(max(1, limit))
+            )
             if last_event_id:
-                stmt = stmt.where(or_(NewswireEventRow.received_at_ms > int(last_event_ts_ms), and_(NewswireEventRow.received_at_ms == int(last_event_ts_ms), NewswireEventRow.event_id > str(last_event_id))))
+                stmt = stmt.where(
+                    or_(
+                        NewswireEventRow.received_at_ms > int(last_event_ts_ms),
+                        and_(
+                            NewswireEventRow.received_at_ms == int(last_event_ts_ms),
+                            NewswireEventRow.event_id > str(last_event_id),
+                        ),
+                    )
+                )
             else:
                 stmt = stmt.where(NewswireEventRow.received_at_ms > int(last_event_ts_ms))
             result = await session.execute(stmt)
@@ -450,8 +497,12 @@ class Repository:
         command_id = "cmd_" + uuid4().hex
         now_ms = requested_at_ms or _runtime_now_ms()
         clean_payload = redact_secrets(payload or {})
-        derived_idempotency_key = idempotency_key or _default_worker_command_idempotency_key(str(target_role), str(command_type), clean_payload)
-        clean_metadata = _append_command_history(redact_secrets(metadata or {}), "enqueued", at_ms=now_ms, actor=requested_by)
+        derived_idempotency_key = idempotency_key or _default_worker_command_idempotency_key(
+            str(target_role), str(command_type), clean_payload
+        )
+        clean_metadata = _append_command_history(
+            redact_secrets(metadata or {}), "enqueued", at_ms=now_ms, actor=requested_by
+        )
         if self.sessionmaker is None:
             return {
                 "command_id": command_id,
@@ -467,7 +518,11 @@ class Repository:
         created = False
         async with self.sessionmaker() as session:
             if derived_idempotency_key:
-                existing_result = await session.execute(select(WorkerCommandRecord).where(WorkerCommandRecord.idempotency_key == str(derived_idempotency_key)).limit(1))
+                existing_result = await session.execute(
+                    select(WorkerCommandRecord)
+                    .where(WorkerCommandRecord.idempotency_key == str(derived_idempotency_key))
+                    .limit(1)
+                )
                 existing = existing_result.scalars().first()
                 if existing is not None:
                     return _worker_command_to_dict(existing)
@@ -489,14 +544,20 @@ class Repository:
             except IntegrityError:
                 await session.rollback()
                 if derived_idempotency_key:
-                    existing_result = await session.execute(select(WorkerCommandRecord).where(WorkerCommandRecord.idempotency_key == str(derived_idempotency_key)).limit(1))
+                    existing_result = await session.execute(
+                        select(WorkerCommandRecord)
+                        .where(WorkerCommandRecord.idempotency_key == str(derived_idempotency_key))
+                        .limit(1)
+                    )
                     existing = existing_result.scalars().first()
                     if existing is not None:
                         return _worker_command_to_dict(existing)
                 raise
             command = _worker_command_to_dict(item)
         if created:
-            await self.record_audit_event("worker_command_enqueued", actor=requested_by or "", payload=_worker_command_audit_payload(command))
+            await self.record_audit_event(
+                "worker_command_enqueued", actor=requested_by or "", payload=_worker_command_audit_payload(command)
+            )
         return command
 
     async def get_worker_command(self, command_id: str) -> dict[str, Any] | None:
@@ -506,7 +567,14 @@ class Repository:
             item = await session.get(WorkerCommandRecord, str(command_id))
             return _worker_command_to_dict(item) if item is not None else None
 
-    async def list_worker_commands(self, *, target_role: str | None = None, status: str | None = None, command_type: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_worker_commands(
+        self,
+        *,
+        target_role: str | None = None,
+        status: str | None = None,
+        command_type: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
@@ -520,7 +588,9 @@ class Repository:
             result = await session.execute(stmt)
             return [_worker_command_to_dict(item) for item in result.scalars().all()]
 
-    async def cancel_worker_command(self, command_id: str, *, cancelled_by: str = "api", completed_at_ms: int | None = None) -> dict[str, Any] | None:
+    async def cancel_worker_command(
+        self, command_id: str, *, cancelled_by: str = "api", completed_at_ms: int | None = None
+    ) -> dict[str, Any] | None:
         if self.sessionmaker is None:
             return None
         command: dict[str, Any]
@@ -539,12 +609,16 @@ class Repository:
             else:
                 item.status = "cancelling"
                 event = "cancellation_requested"
-            item.metadata_json = _append_command_history({**(item.metadata_json or {}), "cancelled_by": cancelled_by}, event, at_ms=now_ms, actor=cancelled_by)
+            item.metadata_json = _append_command_history(
+                {**(item.metadata_json or {}), "cancelled_by": cancelled_by}, event, at_ms=now_ms, actor=cancelled_by
+            )
             await session.commit()
             command = _worker_command_to_dict(item)
             audit = True
         if audit:
-            await self.record_audit_event("worker_command_cancelled", actor=cancelled_by, payload=_worker_command_audit_payload(command))
+            await self.record_audit_event(
+                "worker_command_cancelled", actor=cancelled_by, payload=_worker_command_audit_payload(command)
+            )
         return command
 
     async def retry_worker_command(self, command_id: str, *, requested_by: str = "api") -> dict[str, Any] | None:
@@ -562,10 +636,16 @@ class Repository:
             idempotency_key=f"retry:{command_id}:{retry_attempt}",
             metadata={"retry_of": command_id, "retry_attempt": retry_attempt},
         )
-        await self.record_audit_event("worker_command_retry_requested", actor=requested_by, payload={"original_command_id": command_id, **_worker_command_audit_payload(retried)})
+        await self.record_audit_event(
+            "worker_command_retry_requested",
+            actor=requested_by,
+            payload={"original_command_id": command_id, **_worker_command_audit_payload(retried)},
+        )
         return retried
 
-    async def claim_next_worker_command(self, *, target_role: str, instance_id: str, stale_after_ms: int) -> dict[str, Any] | None:
+    async def claim_next_worker_command(
+        self, *, target_role: str, instance_id: str, stale_after_ms: int
+    ) -> dict[str, Any] | None:
         if self.sessionmaker is None:
             return None
         now_ms = _runtime_now_ms()
@@ -575,7 +655,10 @@ class Repository:
                 select(WorkerCommandRecord)
                 .where(
                     WorkerCommandRecord.target_role == str(target_role),
-                    or_(WorkerCommandRecord.status == "pending", and_(WorkerCommandRecord.status == "claimed", WorkerCommandRecord.claimed_at_ms < stale_before)),
+                    or_(
+                        WorkerCommandRecord.status == "pending",
+                        and_(WorkerCommandRecord.status == "claimed", WorkerCommandRecord.claimed_at_ms < stale_before),
+                    ),
                 )
                 .order_by(WorkerCommandRecord.requested_at_ms.asc())
                 .limit(1)
@@ -590,13 +673,23 @@ class Repository:
             item.claimed_at_ms = now_ms
             item.attempt_count = int(item.attempt_count or 0) + 1
             item.last_error = None
-            item.metadata_json = _append_command_history(item.metadata_json or {}, "claimed", at_ms=now_ms, actor=instance_id, extra={"attempt_count": item.attempt_count})
+            item.metadata_json = _append_command_history(
+                item.metadata_json or {},
+                "claimed",
+                at_ms=now_ms,
+                actor=instance_id,
+                extra={"attempt_count": item.attempt_count},
+            )
             await session.commit()
             command = _worker_command_to_dict(item)
-        await self.record_audit_event("worker_command_claimed", actor=instance_id, payload=_worker_command_audit_payload(command))
+        await self.record_audit_event(
+            "worker_command_claimed", actor=instance_id, payload=_worker_command_audit_payload(command)
+        )
         return command
 
-    async def complete_worker_command(self, command_id: str, *, result: dict[str, Any] | None = None, completed_at_ms: int | None = None) -> None:
+    async def complete_worker_command(
+        self, command_id: str, *, result: dict[str, Any] | None = None, completed_at_ms: int | None = None
+    ) -> None:
         if self.sessionmaker is None:
             return
         async with self.sessionmaker() as session:
@@ -611,12 +704,24 @@ class Repository:
             item.completed_at_ms = now_ms
             item.result_json = redact_secrets(result or {})
             item.last_error = None
-            item.metadata_json = _append_command_history(item.metadata_json or {}, item.status, at_ms=now_ms, actor=item.claimed_by, extra={"attempt_count": item.attempt_count})
+            item.metadata_json = _append_command_history(
+                item.metadata_json or {},
+                item.status,
+                at_ms=now_ms,
+                actor=item.claimed_by,
+                extra={"attempt_count": item.attempt_count},
+            )
             await session.commit()
             command = _worker_command_to_dict(item)
-        await self.record_audit_event(f"worker_command_{command['status']}", actor=str(command.get("claimed_by") or ""), payload=_worker_command_audit_payload(command))
+        await self.record_audit_event(
+            f"worker_command_{command['status']}",
+            actor=str(command.get("claimed_by") or ""),
+            payload=_worker_command_audit_payload(command),
+        )
 
-    async def fail_worker_command(self, command_id: str, *, error: str, result: dict[str, Any] | None = None, completed_at_ms: int | None = None) -> None:
+    async def fail_worker_command(
+        self, command_id: str, *, error: str, result: dict[str, Any] | None = None, completed_at_ms: int | None = None
+    ) -> None:
         if self.sessionmaker is None:
             return
         async with self.sessionmaker() as session:
@@ -628,10 +733,20 @@ class Repository:
             item.completed_at_ms = now_ms
             item.result_json = redact_secrets(result or {}) if result is not None else item.result_json
             item.last_error = str(error)[:1000]
-            item.metadata_json = _append_command_history(item.metadata_json or {}, item.status, at_ms=now_ms, actor=item.claimed_by, extra={"error": item.last_error, "attempt_count": item.attempt_count})
+            item.metadata_json = _append_command_history(
+                item.metadata_json or {},
+                item.status,
+                at_ms=now_ms,
+                actor=item.claimed_by,
+                extra={"error": item.last_error, "attempt_count": item.attempt_count},
+            )
             await session.commit()
             command = _worker_command_to_dict(item)
-        await self.record_audit_event(f"worker_command_{command['status']}", actor=str(command.get("claimed_by") or ""), payload=_worker_command_audit_payload(command))
+        await self.record_audit_event(
+            f"worker_command_{command['status']}",
+            actor=str(command.get("claimed_by") or ""),
+            payload=_worker_command_audit_payload(command),
+        )
 
     async def record_audit_event(self, event_type: str, actor: str = "", payload: dict[str, Any] | None = None) -> None:
         if self.sessionmaker is None:
@@ -951,7 +1066,9 @@ class Repository:
                 await session.commit()
                 return item.decision_id
         except Exception as exc:  # pragma: no cover
-            log.warning("risk_gateway_decision_record_failed", intent_id=decision.get("intent_id"), error=type(exc).__name__)
+            log.warning(
+                "risk_gateway_decision_record_failed", intent_id=decision.get("intent_id"), error=type(exc).__name__
+            )
             return None
 
     async def list_risk_gateway_decisions(
@@ -965,7 +1082,11 @@ class Repository:
             return []
         try:
             async with self.sessionmaker() as session:
-                stmt = select(RiskGatewayDecisionRecord).order_by(RiskGatewayDecisionRecord.created_at_ms.desc()).limit(limit)
+                stmt = (
+                    select(RiskGatewayDecisionRecord)
+                    .order_by(RiskGatewayDecisionRecord.created_at_ms.desc())
+                    .limit(limit)
+                )
                 if decision:
                     stmt = stmt.where(RiskGatewayDecisionRecord.decision == decision)
                 if since_ms is not None:
@@ -1035,7 +1156,9 @@ class Repository:
                     item.side0_name = str(data.get("side0_name") or "YES")
                     item.side1_name = str(data.get("side1_name") or "NO")
                     item.status = "settled" if data.get("settled") else "open"
-                    item.settle_fraction = str(data.get("settle_fraction")) if data.get("settle_fraction") is not None else None
+                    item.settle_fraction = (
+                        str(data.get("settle_fraction")) if data.get("settle_fraction") is not None else None
+                    )
                     item.settlement_details = data.get("settlement_details")
                     item.raw_json = redact_secrets(dict(data.get("raw") or {}))
                     item.as_of_ms = as_of_ms
@@ -1122,7 +1245,9 @@ class Repository:
             async with self.sessionmaker() as session:
                 item = Hip4SettlementRecord(
                     outcome_id=int(settlement.get("outcome_id") or settlement.get("outcome") or 0),
-                    settle_fraction=str(settlement.get("settle_fraction") or settlement.get("settleFraction")) if settlement.get("settle_fraction") is not None or settlement.get("settleFraction") is not None else None,
+                    settle_fraction=str(settlement.get("settle_fraction") or settlement.get("settleFraction"))
+                    if settlement.get("settle_fraction") is not None or settlement.get("settleFraction") is not None
+                    else None,
                     details=settlement.get("details") or settlement.get("settlement_details"),
                     raw_json=redact_secrets(dict(settlement.get("raw") or settlement)),
                     as_of_ms=int(settlement.get("as_of_ms") or 0),
@@ -1156,11 +1281,39 @@ class Repository:
                 )
                 candidate_id = str((execution.get("candidate") or {}).get("candidate_id") or "")
                 for token, balance in dict(portfolio.get("balances") or {}).items():
-                    session.add(Hip4PaperPositionRecord(portfolio_id=str(portfolio.get("portfolio_id") or "hip4_default"), token=str(token), balance=str(balance), updated_at_ms=int(portfolio.get("updated_at_ms") or 0)))
+                    session.add(
+                        Hip4PaperPositionRecord(
+                            portfolio_id=str(portfolio.get("portfolio_id") or "hip4_default"),
+                            token=str(token),
+                            balance=str(balance),
+                            updated_at_ms=int(portfolio.get("updated_at_ms") or 0),
+                        )
+                    )
                 for action in execution.get("actions") or []:
-                    session.add(Hip4PaperActionRecord(candidate_id=candidate_id, action_type=str(action.get("action_type") or "unknown"), amount=str(action.get("amount") or "0"), price=str(action.get("price")) if action.get("price") is not None else None, action_json=redact_secrets(dict(action)), created_at_ms=int(execution.get("created_at_ms") or 0)))
+                    session.add(
+                        Hip4PaperActionRecord(
+                            candidate_id=candidate_id,
+                            action_type=str(action.get("action_type") or "unknown"),
+                            amount=str(action.get("amount") or "0"),
+                            price=str(action.get("price")) if action.get("price") is not None else None,
+                            action_json=redact_secrets(dict(action)),
+                            created_at_ms=int(execution.get("created_at_ms") or 0),
+                        )
+                    )
                 for fill in execution.get("fills") or []:
-                    session.add(Hip4PaperFillRecord(fill_id=str(fill["fill_id"]), candidate_id=str(fill.get("candidate_id") or candidate_id), coin=str(fill.get("coin") or ""), side=str(fill.get("side") or ""), size=str(fill.get("size") or "0"), price=str(fill.get("price") or "0"), notional=str(fill.get("notional") or "0"), fee=str(fill.get("fee") or "0"), created_at_ms=int(fill.get("created_at_ms") or 0)))
+                    session.add(
+                        Hip4PaperFillRecord(
+                            fill_id=str(fill["fill_id"]),
+                            candidate_id=str(fill.get("candidate_id") or candidate_id),
+                            coin=str(fill.get("coin") or ""),
+                            side=str(fill.get("side") or ""),
+                            size=str(fill.get("size") or "0"),
+                            price=str(fill.get("price") or "0"),
+                            notional=str(fill.get("notional") or "0"),
+                            fee=str(fill.get("fee") or "0"),
+                            created_at_ms=int(fill.get("created_at_ms") or 0),
+                        )
+                    )
                 await session.commit()
         except Exception as exc:  # pragma: no cover
             log.warning("hip4_paper_execution_record_failed", error=type(exc).__name__)
@@ -1208,13 +1361,17 @@ class Repository:
     async def get_normalized_event(self, event_id: str) -> dict[str, Any] | None:
         return await self._get_engine_record(NormalizedEventRecord, event_id)
 
-    async def list_normalized_events(self, *, limit: int = 100, event_type: str | None = None, asset_class: str | None = None) -> list[dict[str, Any]]:
+    async def list_normalized_events(
+        self, *, limit: int = 100, event_type: str | None = None, asset_class: str | None = None
+    ) -> list[dict[str, Any]]:
         filters = []
         if event_type:
             filters.append(NormalizedEventRecord.event_type == event_type)
         if asset_class:
             filters.append(NormalizedEventRecord.asset_class == asset_class)
-        return await self._list_engine_records(NormalizedEventRecord, order_by=NormalizedEventRecord.received_ts_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            NormalizedEventRecord, order_by=NormalizedEventRecord.received_ts_ms, limit=limit, filters=filters
+        )
 
     async def record_feature_value(self, feature: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -1242,13 +1399,17 @@ class Repository:
             "feature_id",
         )
 
-    async def list_feature_values(self, *, asset: str | None = None, feature_name: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_feature_values(
+        self, *, asset: str | None = None, feature_name: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         filters = []
         if asset:
             filters.append(FeatureValueRecord.asset == asset.upper())
         if feature_name:
             filters.append(FeatureValueRecord.feature_name == feature_name)
-        return await self._list_engine_records(FeatureValueRecord, order_by=FeatureValueRecord.computed_ts_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            FeatureValueRecord, order_by=FeatureValueRecord.computed_ts_ms, limit=limit, filters=filters
+        )
 
     async def list_latest_feature_assets(self, *, feature_name: str, limit: int = 20) -> list[dict[str, Any]]:
         """Return the latest scalar per asset, ranked by value.
@@ -1262,14 +1423,18 @@ class Repository:
         async with self.sessionmaker() as session:
             result = await session.execute(
                 select(FeatureValueRecord)
-                .where(FeatureValueRecord.feature_name == str(feature_name), FeatureValueRecord.scalar_value.is_not(None))
+                .where(
+                    FeatureValueRecord.feature_name == str(feature_name), FeatureValueRecord.scalar_value.is_not(None)
+                )
                 .order_by(FeatureValueRecord.computed_ts_ms.desc())
                 .limit(scan_limit)
             )
             latest: dict[str, FeatureValueRecord] = {}
             for item in result.scalars().all():
                 latest.setdefault(item.asset, item)
-            ranked = sorted(latest.values(), key=lambda item: float(item.scalar_value or 0.0), reverse=True)[: max(1, int(limit))]
+            ranked = sorted(latest.values(), key=lambda item: float(item.scalar_value or 0.0), reverse=True)[
+                : max(1, int(limit))
+            ]
             return [_engine_record_to_dict(item) for item in ranked]
 
     async def record_feature_rollup(self, rollup: dict[str, Any]) -> str | None:
@@ -1317,13 +1482,56 @@ class Repository:
             "strategy_id",
         )
 
-    async def list_strategy_specs(self, *, family: str | None = None, enabled: bool | None = None, limit: int = 500) -> list[dict[str, Any]]:
+    async def list_strategy_specs(
+        self, *, family: str | None = None, enabled: bool | None = None, limit: int = 500
+    ) -> list[dict[str, Any]]:
         filters = []
         if family:
             filters.append(StrategySpecRecord.family == family)
         if enabled is not None:
             filters.append(StrategySpecRecord.enabled == enabled)
-        return await self._list_engine_records(StrategySpecRecord, order_by=StrategySpecRecord.strategy_id, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            StrategySpecRecord, order_by=StrategySpecRecord.strategy_id, limit=limit, filters=filters
+        )
+
+    async def upsert_strategy_version_policy(self, policy: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            StrategyVersionPolicyRecord(
+                strategy_version_key=str(policy["strategy_version_key"]),
+                strategy_id=str(policy.get("strategy_id") or "unknown"),
+                strategy_version=str(policy.get("strategy_version") or "unknown"),
+                state=str(policy.get("state") or "research_only"),
+                reason_codes_json=list(policy.get("reason_codes") or []),
+                effective_from_ms=int(policy.get("effective_from_ms") or 0),
+                effective_until_ms=policy.get("effective_until_ms"),
+                created_at_ms=int(policy.get("created_at_ms") or 0),
+                updated_at_ms=int(policy.get("updated_at_ms") or policy.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(policy.get("metadata") or {})),
+            ),
+            "strategy_version_key",
+        )
+
+    async def get_strategy_version_policy(self, strategy_version_key: str) -> dict[str, Any] | None:
+        return await self._get_engine_record(StrategyVersionPolicyRecord, strategy_version_key)
+
+    async def list_strategy_version_policies(
+        self,
+        *,
+        state: str | None = None,
+        strategy_id: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        filters = []
+        if state:
+            filters.append(StrategyVersionPolicyRecord.state == state)
+        if strategy_id:
+            filters.append(StrategyVersionPolicyRecord.strategy_id == strategy_id)
+        return await self._list_engine_records(
+            StrategyVersionPolicyRecord,
+            order_by=StrategyVersionPolicyRecord.updated_at_ms,
+            limit=limit,
+            filters=filters,
+        )
 
     async def record_engine_strategy_evaluation(self, evaluation: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -1425,13 +1633,17 @@ class Repository:
         )
         return items[0] if items else None
 
-    async def list_regime_snapshots(self, *, primary_asset: str | None = None, since_ms: int | None = None, limit: int = 500) -> list[dict[str, Any]]:
+    async def list_regime_snapshots(
+        self, *, primary_asset: str | None = None, since_ms: int | None = None, limit: int = 500
+    ) -> list[dict[str, Any]]:
         filters = []
         if primary_asset:
             filters.append(RegimeSnapshotRecord.primary_asset == primary_asset.upper())
         if since_ms is not None:
             filters.append(RegimeSnapshotRecord.created_at_ms >= int(since_ms))
-        return await self._list_engine_records(RegimeSnapshotRecord, order_by=RegimeSnapshotRecord.created_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            RegimeSnapshotRecord, order_by=RegimeSnapshotRecord.created_at_ms, limit=limit, filters=filters
+        )
 
     async def list_regime_snapshots_by_ids(self, regime_snapshot_ids: list[str]) -> list[dict[str, Any]]:
         ids = sorted({str(item) for item in regime_snapshot_ids if item})
@@ -1512,7 +1724,9 @@ class Repository:
             filters.append(AlphaCandidateRecord.created_at_ms >= int(since_ms))
         if until_ms is not None:
             filters.append(AlphaCandidateRecord.created_at_ms <= int(until_ms))
-        return await self._list_engine_records(AlphaCandidateRecord, order_by=AlphaCandidateRecord.created_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            AlphaCandidateRecord, order_by=AlphaCandidateRecord.created_at_ms, limit=limit, filters=filters
+        )
 
     async def record_candidate_book_snapshot(self, snapshot: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -1530,7 +1744,9 @@ class Repository:
         )
 
     async def latest_candidate_book_snapshot(self) -> dict[str, Any] | None:
-        items = await self._list_engine_records(CandidateBookSnapshotRecord, order_by=CandidateBookSnapshotRecord.created_at_ms, limit=1)
+        items = await self._list_engine_records(
+            CandidateBookSnapshotRecord, order_by=CandidateBookSnapshotRecord.created_at_ms, limit=1
+        )
         return items[0] if items else None
 
     async def record_ev_estimate(self, estimate: dict[str, Any]) -> str | None:
@@ -1551,10 +1767,12 @@ class Repository:
                 expected_market_impact_bps=float(estimate.get("expected_market_impact_bps") or 0),
                 expected_funding_cost_bps=float(estimate.get("expected_funding_cost_bps") or 0),
                 tail_loss_bps=float(estimate.get("tail_loss_bps") or 0),
+                gross_ev_bps=float(estimate.get("gross_ev_bps") or 0),
                 net_ev_bps=float(estimate.get("net_ev_bps") or 0),
                 risk_adjusted_utility=float(estimate.get("risk_adjusted_utility") or 0),
                 uncertainty=float(estimate.get("uncertainty") or 0),
                 calibration_bucket=str(estimate.get("calibration_bucket") or "unknown"),
+                execution_cost_quote_id=estimate.get("execution_cost_quote_id"),
                 created_at_ms=int(estimate.get("created_at_ms") or 0),
                 metadata_json=redact_secrets(dict(estimate.get("metadata") or {})),
             ),
@@ -1574,7 +1792,9 @@ class Repository:
             filters.append(EVEstimateRecord.created_at_ms >= int(since_ms))
         if until_ms is not None:
             filters.append(EVEstimateRecord.created_at_ms <= int(until_ms))
-        return await self._list_engine_records(EVEstimateRecord, order_by=EVEstimateRecord.created_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            EVEstimateRecord, order_by=EVEstimateRecord.created_at_ms, limit=limit, filters=filters
+        )
 
     async def record_allocation_decision(self, allocation: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -1583,10 +1803,13 @@ class Repository:
                 candidate_id=str(allocation.get("candidate_id") or ""),
                 candidate_book_id=allocation.get("candidate_book_id"),
                 status=str(allocation.get("status") or "skip"),
+                allocation_scope=str(allocation.get("allocation_scope") or "unknown"),
                 allocated_size=float(allocation.get("allocated_size") or 0),
                 allocated_notional_usd=float(allocation.get("allocated_notional_usd") or 0),
                 risk_usd=float(allocation.get("risk_usd") or 0),
-                max_size_multiplier=float(allocation.get("max_size_multiplier") if allocation.get("max_size_multiplier") is not None else 1.0),
+                max_size_multiplier=float(
+                    allocation.get("max_size_multiplier") if allocation.get("max_size_multiplier") is not None else 1.0
+                ),
                 opportunity_cost_rank=allocation.get("opportunity_cost_rank"),
                 constraints_json=redact_secrets(dict(allocation.get("constraints") or {})),
                 reason_codes_json=list(allocation.get("reason_codes") or []),
@@ -1609,7 +1832,9 @@ class Repository:
             filters.append(AllocationDecisionRecord.created_at_ms >= int(since_ms))
         if until_ms is not None:
             filters.append(AllocationDecisionRecord.created_at_ms <= int(until_ms))
-        return await self._list_engine_records(AllocationDecisionRecord, order_by=AllocationDecisionRecord.created_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            AllocationDecisionRecord, order_by=AllocationDecisionRecord.created_at_ms, limit=limit, filters=filters
+        )
 
     async def list_allocation_decisions_by_ids(self, allocation_ids: list[str]) -> list[dict[str, Any]]:
         ids = sorted({str(item) for item in allocation_ids if item})
@@ -1643,13 +1868,20 @@ class Repository:
             "event_id",
         )
 
-    async def list_allocation_diversity_events(self, *, strategy_id: str | None = None, decision: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_allocation_diversity_events(
+        self, *, strategy_id: str | None = None, decision: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         filters = []
         if strategy_id:
             filters.append(AllocationDiversityEventRecord.strategy_id == strategy_id)
         if decision:
             filters.append(AllocationDiversityEventRecord.decision == decision)
-        return await self._list_engine_records(AllocationDiversityEventRecord, order_by=AllocationDiversityEventRecord.created_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            AllocationDiversityEventRecord,
+            order_by=AllocationDiversityEventRecord.created_at_ms,
+            limit=limit,
+            filters=filters,
+        )
 
     async def record_portfolio_concentration_event(self, event: dict[str, Any]) -> str | None:
         projected = event.get("metadata", {}).get("projected", {}) if isinstance(event.get("metadata"), dict) else {}
@@ -1667,14 +1899,24 @@ class Repository:
                 reason_codes_json=list(event.get("reason_codes") or []),
                 strategy_share_pct=float(event.get("strategy_share_pct") or projected.get("strategy_share_pct") or 0),
                 family_share_pct=float(event.get("family_share_pct") or projected.get("family_share_pct") or 0),
-                symbol_strategy_share_pct=float(event.get("symbol_strategy_share_pct") or projected.get("symbol_strategy_share_pct") or 0),
+                symbol_strategy_share_pct=float(
+                    event.get("symbol_strategy_share_pct") or projected.get("symbol_strategy_share_pct") or 0
+                ),
                 created_at_ms=int(event.get("created_at_ms") or 0),
                 metadata_json=redact_secrets(dict(event.get("metadata") or {})),
             ),
             "event_id",
         )
 
-    async def list_portfolio_concentration_events(self, *, strategy_id: str | None = None, decision: str | None = None, since_ms: int | None = None, until_ms: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_portfolio_concentration_events(
+        self,
+        *,
+        strategy_id: str | None = None,
+        decision: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
         filters = []
         if strategy_id:
             filters.append(PortfolioConcentrationEventRecord.strategy_id == strategy_id)
@@ -1684,7 +1926,12 @@ class Repository:
             filters.append(PortfolioConcentrationEventRecord.created_at_ms >= int(since_ms))
         if until_ms is not None:
             filters.append(PortfolioConcentrationEventRecord.created_at_ms < int(until_ms))
-        return await self._list_engine_records(PortfolioConcentrationEventRecord, order_by=PortfolioConcentrationEventRecord.created_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            PortfolioConcentrationEventRecord,
+            order_by=PortfolioConcentrationEventRecord.created_at_ms,
+            limit=limit,
+            filters=filters,
+        )
 
     async def upsert_candidate_evidence_link(self, link: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -1714,7 +1961,15 @@ class Repository:
             "link_id",
         )
 
-    async def list_candidate_evidence_links(self, *, candidate_id: str | None = None, strategy_id: str | None = None, since_ms: int | None = None, until_ms: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_candidate_evidence_links(
+        self,
+        *,
+        candidate_id: str | None = None,
+        strategy_id: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
         filters = []
         if candidate_id:
             filters.append(CandidateEvidenceLinkRecord.candidate_id == candidate_id)
@@ -1724,7 +1979,12 @@ class Repository:
             filters.append(CandidateEvidenceLinkRecord.created_at_ms >= int(since_ms))
         if until_ms is not None:
             filters.append(CandidateEvidenceLinkRecord.created_at_ms < int(until_ms))
-        return await self._list_engine_records(CandidateEvidenceLinkRecord, order_by=CandidateEvidenceLinkRecord.created_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            CandidateEvidenceLinkRecord,
+            order_by=CandidateEvidenceLinkRecord.created_at_ms,
+            limit=limit,
+            filters=filters,
+        )
 
     async def upsert_candidate_outcome_attribution(self, item: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -1757,6 +2017,10 @@ class Repository:
                 slippage_bps=float(item.get("slippage_bps") or 0),
                 funding_bps=float(item.get("funding_bps") or 0),
                 net_return_bps=float(item.get("net_return_bps") or 0),
+                execution_adjusted_return_bps=item.get("execution_adjusted_return_bps"),
+                execution_cost_quote_id=item.get("execution_cost_quote_id"),
+                execution_report_id=item.get("execution_report_id"),
+                execution_cost_quality=str(item.get("execution_cost_quality") or "unavailable"),
                 realized_r=float(item.get("realized_r") or 0),
                 mfe_bps=float(item.get("mfe_bps") or 0),
                 mae_bps=float(item.get("mae_bps") or 0),
@@ -1781,6 +2045,9 @@ class Repository:
         terminal_state: str | None = None,
         since_ms: int | None = None,
         until_ms: int | None = None,
+        cohort_start_ms: int | None = None,
+        cohort_end_ms: int | None = None,
+        native_horizon_only: bool = False,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -1797,6 +2064,15 @@ class Repository:
             filters.append(CandidateOutcomeAttributionRecord.window_end_ms >= int(since_ms))
         if until_ms is not None:
             filters.append(CandidateOutcomeAttributionRecord.window_end_ms <= int(until_ms))
+        if cohort_start_ms is not None:
+            filters.append(CandidateOutcomeAttributionRecord.created_at_ms >= int(cohort_start_ms))
+        if cohort_end_ms is not None:
+            filters.append(CandidateOutcomeAttributionRecord.created_at_ms < int(cohort_end_ms))
+        if native_horizon_only:
+            filters.append(
+                CandidateOutcomeAttributionRecord.candidate_horizon
+                == CandidateOutcomeAttributionRecord.outcome_window
+            )
         return await self._list_engine_records(
             CandidateOutcomeAttributionRecord,
             order_by=CandidateOutcomeAttributionRecord.window_end_ms,
@@ -1805,7 +2081,9 @@ class Repository:
             filters=filters,
         )
 
-    async def list_due_candidate_outcome_attributions(self, *, timestamp_ms: int, limit: int = 1000) -> list[dict[str, Any]]:
+    async def list_due_candidate_outcome_attributions(
+        self, *, timestamp_ms: int, limit: int = 1000
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         try:
@@ -1843,13 +2121,17 @@ class Repository:
             "link_id",
         )
 
-    async def list_replay_result_links(self, *, replay_id: str | None = None, candidate_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_replay_result_links(
+        self, *, replay_id: str | None = None, candidate_id: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         filters = []
         if replay_id:
             filters.append(ReplayResultLinkRecord.replay_id == replay_id)
         if candidate_id:
             filters.append(ReplayResultLinkRecord.candidate_id == candidate_id)
-        return await self._list_engine_records(ReplayResultLinkRecord, order_by=ReplayResultLinkRecord.created_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            ReplayResultLinkRecord, order_by=ReplayResultLinkRecord.created_at_ms, limit=limit, filters=filters
+        )
 
     async def record_candidate_trade_packet(self, packet: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -1871,13 +2153,17 @@ class Repository:
             "packet_id",
         )
 
-    async def list_candidate_trade_packets(self, *, candidate_id: str | None = None, strategy_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_candidate_trade_packets(
+        self, *, candidate_id: str | None = None, strategy_id: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         filters = []
         if candidate_id:
             filters.append(CandidateTradePacketRecord.candidate_id == candidate_id)
         if strategy_id:
             filters.append(CandidateTradePacketRecord.strategy_id == strategy_id)
-        return await self._list_engine_records(CandidateTradePacketRecord, order_by=CandidateTradePacketRecord.created_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            CandidateTradePacketRecord, order_by=CandidateTradePacketRecord.created_at_ms, limit=limit, filters=filters
+        )
 
     async def list_candidate_trade_packet_summaries(
         self,
@@ -1962,7 +2248,16 @@ class Repository:
             await self.record_council_vote(vote)
         return review_id
 
-    async def list_council_reviews(self, *, candidate_id: str | None = None, strategy_id: str | None = None, decision: str | None = None, since_ms: int | None = None, until_ms: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_council_reviews(
+        self,
+        *,
+        candidate_id: str | None = None,
+        strategy_id: str | None = None,
+        decision: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
         filters = []
         if candidate_id:
             filters.append(CouncilReviewRecord.candidate_id == candidate_id)
@@ -1974,7 +2269,9 @@ class Repository:
             filters.append(CouncilReviewRecord.created_at_ms >= int(since_ms))
         if until_ms is not None:
             filters.append(CouncilReviewRecord.created_at_ms < int(until_ms))
-        return await self._list_engine_records(CouncilReviewRecord, order_by=CouncilReviewRecord.created_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            CouncilReviewRecord, order_by=CouncilReviewRecord.created_at_ms, limit=limit, filters=filters
+        )
 
     async def record_council_vote(self, vote: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -1994,13 +2291,17 @@ class Repository:
             "vote_id",
         )
 
-    async def list_council_votes(self, *, review_id: str | None = None, role: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_council_votes(
+        self, *, review_id: str | None = None, role: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         filters = []
         if review_id:
             filters.append(CouncilVoteRecord.review_id == review_id)
         if role:
             filters.append(CouncilVoteRecord.role == role)
-        return await self._list_engine_records(CouncilVoteRecord, order_by=CouncilVoteRecord.created_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            CouncilVoteRecord, order_by=CouncilVoteRecord.created_at_ms, limit=limit, filters=filters
+        )
 
     async def upsert_strategy_regime_performance(self, item: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -2035,7 +2336,15 @@ class Repository:
             "performance_id",
         )
 
-    async def list_strategy_regime_performance(self, *, strategy_id: str | None = None, regime_label: str | None = None, since_ms: int | None = None, until_ms: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_strategy_regime_performance(
+        self,
+        *,
+        strategy_id: str | None = None,
+        regime_label: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
         filters = []
         if strategy_id:
             filters.append(StrategyRegimePerformanceRecord.strategy_id == strategy_id)
@@ -2045,7 +2354,12 @@ class Repository:
             filters.append(StrategyRegimePerformanceRecord.window_end_ms >= int(since_ms))
         if until_ms is not None:
             filters.append(StrategyRegimePerformanceRecord.window_end_ms < int(until_ms))
-        return await self._list_engine_records(StrategyRegimePerformanceRecord, order_by=StrategyRegimePerformanceRecord.window_end_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            StrategyRegimePerformanceRecord,
+            order_by=StrategyRegimePerformanceRecord.window_end_ms,
+            limit=limit,
+            filters=filters,
+        )
 
     async def upsert_bandit_policy_snapshot(self, snapshot: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -2082,13 +2396,17 @@ class Repository:
             "recommendation_id",
         )
 
-    async def list_bandit_recommendations(self, *, strategy_id: str | None = None, policy_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_bandit_recommendations(
+        self, *, strategy_id: str | None = None, policy_id: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         filters = []
         if strategy_id:
             filters.append(BanditRecommendationRecord.strategy_id == strategy_id)
         if policy_id:
             filters.append(BanditRecommendationRecord.policy_id == policy_id)
-        return await self._list_engine_records(BanditRecommendationRecord, order_by=BanditRecommendationRecord.created_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            BanditRecommendationRecord, order_by=BanditRecommendationRecord.created_at_ms, limit=limit, filters=filters
+        )
 
     async def record_evidence_pack(self, pack: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -2118,7 +2436,9 @@ class Repository:
                 candidate_id=str(decision.get("candidate_id") or ""),
                 decision=str(decision.get("decision") or "require_more_data"),
                 confidence_adjustment=float(decision.get("confidence_adjustment") or 0),
-                max_size_multiplier=float(decision.get("max_size_multiplier") if decision.get("max_size_multiplier") is not None else 1.0),
+                max_size_multiplier=float(
+                    decision.get("max_size_multiplier") if decision.get("max_size_multiplier") is not None else 1.0
+                ),
                 reason_codes_json=list(decision.get("reason_codes") or []),
                 required_invalidation_checks_json=list(decision.get("required_invalidation_checks") or []),
                 audit_summary=str(decision.get("audit_summary") or ""),
@@ -2132,7 +2452,9 @@ class Repository:
 
     async def list_debate_decisions(self, *, candidate_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         filters = [DebateDecisionRecord.candidate_id == candidate_id] if candidate_id else []
-        return await self._list_engine_records(DebateDecisionRecord, order_by=DebateDecisionRecord.created_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            DebateDecisionRecord, order_by=DebateDecisionRecord.created_at_ms, limit=limit, filters=filters
+        )
 
     async def record_order_intent(self, intent: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -2168,13 +2490,72 @@ class Repository:
             "intent_id",
         )
 
-    async def list_order_intents(self, *, execution_mode: str | None = None, since_ms: int | None = None, until_ms: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_order_intents(
+        self,
+        *,
+        execution_mode: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
         filters = [OrderIntentRecord.execution_mode == execution_mode] if execution_mode else []
         if since_ms is not None:
             filters.append(OrderIntentRecord.created_at_ms >= int(since_ms))
         if until_ms is not None:
             filters.append(OrderIntentRecord.created_at_ms < int(until_ms))
-        return await self._list_engine_records(OrderIntentRecord, order_by=OrderIntentRecord.created_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            OrderIntentRecord, order_by=OrderIntentRecord.created_at_ms, limit=limit, filters=filters
+        )
+
+    async def record_execution_cost_quote(self, quote: dict[str, Any]) -> str | None:
+        return await self._merge_engine_record(
+            ExecutionCostQuoteRecord(
+                quote_id=str(quote["quote_id"]),
+                candidate_id=str(quote.get("candidate_id") or ""),
+                venue_id=str(quote.get("venue_id") or "unknown"),
+                instrument_id=str(quote.get("instrument_id") or "unknown"),
+                side=str(quote.get("side") or "buy"),
+                requested_size=float(quote.get("requested_size") or 0),
+                requested_notional_usd=float(quote.get("requested_notional_usd") or 0),
+                reference_price=float(quote.get("reference_price") or 0),
+                simulated_fill_size=float(quote.get("simulated_fill_size") or 0),
+                simulated_avg_fill_px=quote.get("simulated_avg_fill_px"),
+                fee_bps=float(quote.get("fee_bps") or 0),
+                spread_cost_bps=float(quote.get("spread_cost_bps") or 0),
+                slippage_bps=float(quote.get("slippage_bps") or 0),
+                market_impact_bps=float(quote.get("market_impact_bps") or 0),
+                latency_slippage_bps=float(quote.get("latency_slippage_bps") or 0),
+                total_execution_cost_bps=float(quote.get("total_execution_cost_bps") or 0),
+                cost_quality=str(quote.get("cost_quality") or "unavailable"),
+                book_snapshot_id=quote.get("book_snapshot_id"),
+                fee_schedule_id=quote.get("fee_schedule_id"),
+                simulation_model_version=str(quote.get("simulation_model_version") or "depth_walk_v1"),
+                book_as_of_ms=quote.get("book_as_of_ms"),
+                created_at_ms=int(quote.get("created_at_ms") or 0),
+                reason_codes_json=list(quote.get("reason_codes") or []),
+                metadata_json=redact_secrets(dict(quote.get("metadata") or {})),
+            ),
+            "quote_id",
+        )
+
+    async def list_execution_cost_quotes(
+        self,
+        *,
+        candidate_id: str | None = None,
+        cost_quality: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        filters = []
+        if candidate_id:
+            filters.append(ExecutionCostQuoteRecord.candidate_id == candidate_id)
+        if cost_quality:
+            filters.append(ExecutionCostQuoteRecord.cost_quality == cost_quality)
+        return await self._list_engine_records(
+            ExecutionCostQuoteRecord,
+            order_by=ExecutionCostQuoteRecord.created_at_ms,
+            limit=limit,
+            filters=filters,
+        )
 
     async def record_execution_report(self, report: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -2189,6 +2570,15 @@ class Repository:
                 fees_usd=float(report.get("fees_usd") or 0),
                 slippage_bps=float(report.get("slippage_bps") or 0),
                 market_impact_bps=report.get("market_impact_bps"),
+                execution_cost_quote_id=report.get("execution_cost_quote_id"),
+                fee_bps=float(report.get("fee_bps") or 0),
+                spread_cost_bps=float(report.get("spread_cost_bps") or 0),
+                latency_slippage_bps=float(report.get("latency_slippage_bps") or 0),
+                total_execution_cost_bps=float(report.get("total_execution_cost_bps") or 0),
+                book_snapshot_id=report.get("book_snapshot_id"),
+                fee_schedule_id=report.get("fee_schedule_id"),
+                simulation_model_version=report.get("simulation_model_version"),
+                cost_quality=str(report.get("cost_quality") or "unavailable"),
                 adapter=str(report.get("adapter") or report.get("execution_mode") or "paper"),
                 assumptions_json=redact_secrets(dict(report.get("assumptions") or {})),
                 created_at_ms=int(report.get("created_at_ms") or 0),
@@ -2210,7 +2600,9 @@ class Repository:
             filters.append(ExecutionReportRecord.created_at_ms >= int(since_ms))
         if until_ms is not None:
             filters.append(ExecutionReportRecord.created_at_ms <= int(until_ms))
-        return await self._list_engine_records(ExecutionReportRecord, order_by=ExecutionReportRecord.created_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            ExecutionReportRecord, order_by=ExecutionReportRecord.created_at_ms, limit=limit, filters=filters
+        )
 
     async def record_position_thesis(self, thesis: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -2228,7 +2620,9 @@ class Repository:
                 targets_json=list(thesis.get("targets") or []),
                 invalidation_rules_json=list(thesis.get("invalidation_rules") or []),
                 thesis_features_at_entry_json=redact_secrets(dict(thesis.get("thesis_features_at_entry") or {})),
-                current_thesis_score=float(thesis.get("current_thesis_score") if thesis.get("current_thesis_score") is not None else 1.0),
+                current_thesis_score=float(
+                    thesis.get("current_thesis_score") if thesis.get("current_thesis_score") is not None else 1.0
+                ),
                 degradation_reasons_json=list(thesis.get("degradation_reasons") or []),
                 position_state=str(thesis.get("position_state") or "proposed"),
                 execution_report_ids_json=list(thesis.get("execution_report_ids") or []),
@@ -2240,7 +2634,15 @@ class Repository:
             "position_id",
         )
 
-    async def list_position_theses(self, *, state: str | None = None, asset: str | None = None, since_ms: int | None = None, until_ms: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_position_theses(
+        self,
+        *,
+        state: str | None = None,
+        asset: str | None = None,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
         filters = []
         if state:
             filters.append(PositionThesisRecord.position_state == state)
@@ -2250,7 +2652,9 @@ class Repository:
             filters.append(PositionThesisRecord.updated_at_ms >= int(since_ms))
         if until_ms is not None:
             filters.append(PositionThesisRecord.updated_at_ms < int(until_ms))
-        return await self._list_engine_records(PositionThesisRecord, order_by=PositionThesisRecord.updated_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            PositionThesisRecord, order_by=PositionThesisRecord.updated_at_ms, limit=limit, filters=filters
+        )
 
     async def close_stale_position_theses(
         self,
@@ -2273,7 +2677,10 @@ class Repository:
             stmt = (
                 select(PositionThesisRecord)
                 .where(PositionThesisRecord.position_state.in_(normalized_states))
-                .where(func.coalesce(PositionThesisRecord.opened_at_ms, PositionThesisRecord.updated_at_ms) < int(before_ms))
+                .where(
+                    func.coalesce(PositionThesisRecord.opened_at_ms, PositionThesisRecord.updated_at_ms)
+                    < int(before_ms)
+                )
                 .order_by(PositionThesisRecord.updated_at_ms)
                 .limit(max(1, int(limit)))
             )
@@ -2304,9 +2711,13 @@ class Repository:
             "reconciliation_id",
         )
 
-    async def list_reconciliation_runs(self, *, execution_mode: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_reconciliation_runs(
+        self, *, execution_mode: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         filters = [ReconciliationRunRecord.execution_mode == execution_mode] if execution_mode else []
-        return await self._list_engine_records(ReconciliationRunRecord, order_by=ReconciliationRunRecord.started_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            ReconciliationRunRecord, order_by=ReconciliationRunRecord.started_at_ms, limit=limit, filters=filters
+        )
 
     async def record_pnl_attribution(self, item: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -2349,7 +2760,9 @@ class Repository:
             filters.append(PnLAttributionRecord.window_end_ms >= int(since_ms))
         if until_ms is not None:
             filters.append(PnLAttributionRecord.window_end_ms <= int(until_ms))
-        return await self._list_engine_records(PnLAttributionRecord, order_by=PnLAttributionRecord.window_end_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            PnLAttributionRecord, order_by=PnLAttributionRecord.window_end_ms, limit=limit, filters=filters
+        )
 
     async def record_kill_switch_event(self, event: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -2389,13 +2802,20 @@ class Repository:
             "model_version_id",
         )
 
-    async def list_model_versions(self, *, status: str | None = None, model_type: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_model_versions(
+        self, *, status: str | None = None, model_type: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         filters = []
         if status:
             filters.append(ModelVersionRecord.status == status)
         if model_type:
             filters.append(ModelVersionRecord.model_type == model_type)
-        return await self._list_engine_records(ModelVersionRecord, order_by=ModelVersionRecord.created_at_ms, limit=limit, filters=filters)
+        return await self._list_engine_records(
+            ModelVersionRecord, order_by=ModelVersionRecord.created_at_ms, limit=limit, filters=filters
+        )
+
+    async def get_model_version(self, model_version_id: str) -> dict[str, Any] | None:
+        return await self._get_engine_record(ModelVersionRecord, model_version_id)
 
     async def record_model_training_run(self, run: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -2447,7 +2867,9 @@ class Repository:
         )
 
     async def list_retention_runs(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        return await self._list_engine_records(RetentionRunRecord, order_by=RetentionRunRecord.started_at_ms, limit=limit)
+        return await self._list_engine_records(
+            RetentionRunRecord, order_by=RetentionRunRecord.started_at_ms, limit=limit
+        )
 
     async def upsert_instrument(self, instrument: dict[str, Any], *, observed_at_ms: int) -> str | None:
         if self.sessionmaker is None:
@@ -2556,7 +2978,9 @@ class Repository:
         )
         return items[0] if items else None
 
-    async def list_watchlist_memberships(self, *, tier: str | None = None, enabled: bool | None = None, limit: int = 1000) -> list[dict[str, Any]]:
+    async def list_watchlist_memberships(
+        self, *, tier: str | None = None, enabled: bool | None = None, limit: int = 1000
+    ) -> list[dict[str, Any]]:
         filters = []
         if tier:
             filters.append(WatchlistMembershipRecord.tier == tier)
@@ -2614,7 +3038,9 @@ class Repository:
             await session.commit()
             return True
 
-    async def list_watchlist_change_events(self, *, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_watchlist_change_events(
+        self, *, status: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         filters = [WatchlistChangeEventRecord.status == status] if status else []
         return await self._list_engine_records(
             WatchlistChangeEventRecord,
@@ -2639,11 +3065,15 @@ class Repository:
         )
 
     async def latest_universe_snapshot(self) -> dict[str, Any] | None:
-        items = await self._list_engine_records(UniverseSnapshotRecord, order_by=UniverseSnapshotRecord.version, limit=1)
+        items = await self._list_engine_records(
+            UniverseSnapshotRecord, order_by=UniverseSnapshotRecord.version, limit=1
+        )
         return items[0] if items else None
 
     async def list_universe_snapshots(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        return await self._list_engine_records(UniverseSnapshotRecord, order_by=UniverseSnapshotRecord.version, limit=limit)
+        return await self._list_engine_records(
+            UniverseSnapshotRecord, order_by=UniverseSnapshotRecord.version, limit=limit
+        )
 
     async def record_venue_market_snapshot(self, snapshot: dict[str, Any]) -> str | None:
         return await self._merge_engine_record(
@@ -2720,7 +3150,9 @@ class Repository:
             "snapshot_id",
         )
 
-    async def list_cross_venue_feature_snapshots(self, *, underlying_id: str | None = None, since_ms: int | None = None, limit: int = 1000) -> list[dict[str, Any]]:
+    async def list_cross_venue_feature_snapshots(
+        self, *, underlying_id: str | None = None, since_ms: int | None = None, limit: int = 1000
+    ) -> list[dict[str, Any]]:
         filters = []
         if underlying_id:
             filters.append(CrossVenueFeatureSnapshotRecord.underlying_id == underlying_id)
@@ -2733,18 +3165,23 @@ class Repository:
             filters=filters,
         )
 
-    async def get_engine_validation_counts(self, *, start_ms: int, end_ms: int) -> dict[str, int]:
+    async def get_engine_validation_counts(self, *, start_ms: int, end_ms: int) -> dict[str, Any]:
         """Return uncapped headline counts for one common half-open cohort."""
 
         if self.sessionmaker is None:
             return {}
 
         async with self.sessionmaker() as session:
+
             async def count(model: Any, time_column: Any, *conditions: Any) -> int:
-                stmt = select(func.count()).select_from(model).where(time_column >= int(start_ms), time_column < int(end_ms), *conditions)
+                stmt = (
+                    select(func.count())
+                    .select_from(model)
+                    .where(time_column >= int(start_ms), time_column < int(end_ms), *conditions)
+                )
                 return int((await session.execute(stmt)).scalar_one() or 0)
 
-            return {
+            counts: dict[str, Any] = {
                 "candidate_count": await count(AlphaCandidateRecord, AlphaCandidateRecord.created_at_ms),
                 "ev_estimate_count": await count(EVEstimateRecord, EVEstimateRecord.created_at_ms),
                 "allocation_count": await count(AllocationDecisionRecord, AllocationDecisionRecord.created_at_ms),
@@ -2753,22 +3190,129 @@ class Repository:
                     AllocationDecisionRecord.created_at_ms,
                     AllocationDecisionRecord.status.in_(["allocate", "reduce", "require_debate"]),
                 ),
-                "shadow_intent_count": await count(OrderIntentRecord, OrderIntentRecord.created_at_ms, OrderIntentRecord.execution_mode == "shadow"),
-                "paper_intent_count": await count(OrderIntentRecord, OrderIntentRecord.created_at_ms, OrderIntentRecord.execution_mode == "paper"),
-                "live_intent_count": await count(OrderIntentRecord, OrderIntentRecord.created_at_ms, OrderIntentRecord.execution_mode == "live"),
+                "shadow_intent_count": await count(
+                    OrderIntentRecord, OrderIntentRecord.created_at_ms, OrderIntentRecord.execution_mode == "shadow"
+                ),
+                "paper_intent_count": await count(
+                    OrderIntentRecord, OrderIntentRecord.created_at_ms, OrderIntentRecord.execution_mode == "paper"
+                ),
+                "live_intent_count": await count(
+                    OrderIntentRecord, OrderIntentRecord.created_at_ms, OrderIntentRecord.execution_mode == "live"
+                ),
                 "execution_report_count": await count(ExecutionReportRecord, ExecutionReportRecord.created_at_ms),
                 "risk_decision_count": await count(RiskGatewayDecisionRecord, RiskGatewayDecisionRecord.created_at_ms),
-                "risk_reject_count": await count(RiskGatewayDecisionRecord, RiskGatewayDecisionRecord.created_at_ms, RiskGatewayDecisionRecord.decision == "reject"),
+                "risk_reject_count": await count(
+                    RiskGatewayDecisionRecord,
+                    RiskGatewayDecisionRecord.created_at_ms,
+                    RiskGatewayDecisionRecord.decision == "reject",
+                ),
                 "pnl_attribution_count": await count(PnLAttributionRecord, PnLAttributionRecord.window_end_ms),
                 "open_position_count": int(
                     (
                         await session.execute(
-                            select(func.count()).select_from(PositionThesisRecord).where(PositionThesisRecord.position_state == "open")
+                            select(func.count())
+                            .select_from(PositionThesisRecord)
+                            .where(PositionThesisRecord.position_state == "open")
                         )
                     ).scalar_one()
                     or 0
                 ),
             }
+            measured_report_stats = (
+                await session.execute(
+                    select(
+                        func.count(),
+                        func.sum(ExecutionReportRecord.slippage_bps),
+                        func.sum(ExecutionReportRecord.fees_usd),
+                    ).where(
+                        ExecutionReportRecord.created_at_ms >= int(start_ms),
+                        ExecutionReportRecord.created_at_ms < int(end_ms),
+                        ExecutionReportRecord.status.in_(["filled", "partial"]),
+                        ExecutionReportRecord.avg_fill_px.is_not(None),
+                        ExecutionReportRecord.filled_size > 0,
+                        ExecutionReportRecord.cost_quality == "measured",
+                    )
+                )
+            ).one()
+            counts.update(
+                {
+                    "measured_execution_report_count": int(measured_report_stats[0] or 0),
+                    "measured_slippage_total_bps": float(measured_report_stats[1] or 0.0),
+                    "measured_fees_total_usd": float(measured_report_stats[2] or 0.0),
+                }
+            )
+            execution_status_rows = (
+                await session.execute(
+                    select(ExecutionReportRecord.status, func.count())
+                    .where(
+                        ExecutionReportRecord.created_at_ms >= int(start_ms),
+                        ExecutionReportRecord.created_at_ms < int(end_ms),
+                    )
+                    .group_by(ExecutionReportRecord.status)
+                )
+            ).all()
+            execution_quality_rows = (
+                await session.execute(
+                    select(ExecutionReportRecord.cost_quality, func.count())
+                    .where(
+                        ExecutionReportRecord.created_at_ms >= int(start_ms),
+                        ExecutionReportRecord.created_at_ms < int(end_ms),
+                    )
+                    .group_by(ExecutionReportRecord.cost_quality)
+                )
+            ).all()
+            risk_violation_rows = (
+                await session.execute(
+                    select(RiskGatewayDecisionRecord.violations_json).where(
+                        RiskGatewayDecisionRecord.created_at_ms >= int(start_ms),
+                        RiskGatewayDecisionRecord.created_at_ms < int(end_ms),
+                        RiskGatewayDecisionRecord.decision == "reject",
+                    )
+                )
+            ).scalars()
+            risk_violation_counts: dict[str, int] = {}
+            for violations in risk_violation_rows:
+                for violation in violations or []:
+                    code = str(violation.get("code") or "unknown") if isinstance(violation, dict) else str(violation)
+                    risk_violation_counts[code] = risk_violation_counts.get(code, 0) + 1
+            counts.update(
+                {
+                    "execution_status_counts": {
+                        str(status or "unknown"): int(value or 0)
+                        for status, value in execution_status_rows
+                    },
+                    "execution_cost_quality_counts": {
+                        str(quality or "unavailable"): int(value or 0)
+                        for quality, value in execution_quality_rows
+                    },
+                    "risk_violation_counts": risk_violation_counts,
+                }
+            )
+            scope_rows = (
+                await session.execute(
+                    select(
+                        AllocationDecisionRecord.allocation_scope,
+                        AllocationDecisionRecord.status,
+                        func.count(),
+                    )
+                    .where(
+                        AllocationDecisionRecord.created_at_ms >= int(start_ms),
+                        AllocationDecisionRecord.created_at_ms < int(end_ms),
+                    )
+                    .group_by(AllocationDecisionRecord.allocation_scope, AllocationDecisionRecord.status)
+                )
+            ).all()
+            for scope, status, value in scope_rows:
+                scope_key = str(scope or "unknown")
+                count_key = f"allocation_scope_{scope_key}_count"
+                counts[count_key] = counts.get(count_key, 0) + int(value or 0)
+                if status in {"allocate", "reduce", "require_debate"}:
+                    allocated_key = f"allocation_scope_{scope_key}_allocated_count"
+                    counts[allocated_key] = counts.get(allocated_key, 0) + int(value or 0)
+            for scope in ("research", "paper_eligible", "defensive", "unknown"):
+                counts.setdefault(f"allocation_scope_{scope}_count", 0)
+                counts.setdefault(f"allocation_scope_{scope}_allocated_count", 0)
+            return counts
 
     async def get_engine_readiness_aggregates(self, *, start_ms: int, end_ms: int) -> dict[str, Any]:
         """Return uncapped promotion-gate evidence for one half-open cohort."""
@@ -2802,7 +3346,9 @@ class Repository:
                 )
             ).all()
             intent_counts = {str(mode): int(count or 0) for mode, count, _, _ in intent_rows}
-            shadow_first = min([int(first) for mode, _, first, _ in intent_rows if mode == "shadow" and first] or [0]) or None
+            shadow_first = (
+                min([int(first) for mode, _, first, _ in intent_rows if mode == "shadow" and first] or [0]) or None
+            )
             report_rows = (
                 await session.execute(
                     select(ExecutionReportRecord.execution_mode, func.count())
@@ -2828,16 +3374,19 @@ class Repository:
                     ).where(
                         ExecutionReportRecord.created_at_ms >= start,
                         ExecutionReportRecord.created_at_ms < end,
-                        ExecutionReportRecord.status == "filled",
+                        ExecutionReportRecord.status.in_(["filled", "partial"]),
                         ExecutionReportRecord.avg_fill_px.is_not(None),
                         ExecutionReportRecord.filled_size > 0,
+                        ExecutionReportRecord.cost_quality == "measured",
                     )
                 )
             ).one()
             risk_rows = (
                 await session.execute(
                     select(RiskGatewayDecisionRecord.decision, func.count())
-                    .where(RiskGatewayDecisionRecord.created_at_ms >= start, RiskGatewayDecisionRecord.created_at_ms < end)
+                    .where(
+                        RiskGatewayDecisionRecord.created_at_ms >= start, RiskGatewayDecisionRecord.created_at_ms < end
+                    )
                     .group_by(RiskGatewayDecisionRecord.decision)
                 )
             ).all()
@@ -2973,7 +3522,10 @@ class Repository:
                     await session.execute(
                         select(func.count(func.distinct(OrderIntentRecord.intent_id)))
                         .select_from(OrderIntentRecord)
-                        .join(RiskGatewayDecisionRecord, RiskGatewayDecisionRecord.intent_id == OrderIntentRecord.intent_id)
+                        .join(
+                            RiskGatewayDecisionRecord,
+                            RiskGatewayDecisionRecord.intent_id == OrderIntentRecord.intent_id,
+                        )
                         .where(OrderIntentRecord.created_at_ms >= start, OrderIntentRecord.created_at_ms < end)
                     )
                 ).scalar_one()
@@ -2982,8 +3534,7 @@ class Repository:
             allocated_candidate_count = int(
                 (
                     await session.execute(
-                        select(func.count(func.distinct(AllocationDecisionRecord.candidate_id)))
-                        .where(
+                        select(func.count(func.distinct(AllocationDecisionRecord.candidate_id))).where(
                             AllocationDecisionRecord.created_at_ms >= start,
                             AllocationDecisionRecord.created_at_ms < end,
                             AllocationDecisionRecord.status.in_(["allocate", "reduce", "require_debate"]),
@@ -2997,7 +3548,10 @@ class Repository:
                     await session.execute(
                         select(func.count(func.distinct(AllocationDecisionRecord.candidate_id)))
                         .select_from(AllocationDecisionRecord)
-                        .join(CouncilReviewRecord, CouncilReviewRecord.candidate_id == AllocationDecisionRecord.candidate_id)
+                        .join(
+                            CouncilReviewRecord,
+                            CouncilReviewRecord.candidate_id == AllocationDecisionRecord.candidate_id,
+                        )
                         .where(
                             AllocationDecisionRecord.created_at_ms >= start,
                             AllocationDecisionRecord.created_at_ms < end,
@@ -3011,15 +3565,18 @@ class Repository:
             allocation_rows = (
                 await session.execute(
                     select(AllocationDecisionRecord.status, func.count())
-                    .where(AllocationDecisionRecord.created_at_ms >= start, AllocationDecisionRecord.created_at_ms < end)
+                    .where(
+                        AllocationDecisionRecord.created_at_ms >= start, AllocationDecisionRecord.created_at_ms < end
+                    )
                     .group_by(AllocationDecisionRecord.status)
                 )
             ).all()
             allocation_counts = {str(status): int(count or 0) for status, count in allocation_rows}
             allocated_rows = (
                 await session.execute(
-                    select(AllocationDecisionRecord.allocated_notional_usd, AllocationDecisionRecord.metadata_json)
-                    .where(
+                    select(
+                        AllocationDecisionRecord.allocated_notional_usd, AllocationDecisionRecord.metadata_json
+                    ).where(
                         AllocationDecisionRecord.created_at_ms >= start,
                         AllocationDecisionRecord.created_at_ms < end,
                         AllocationDecisionRecord.status.in_(["allocate", "reduce", "require_debate"]),
@@ -3037,10 +3594,14 @@ class Repository:
                 family = str(metadata.get("strategy_family") or "unknown")
                 asset = str(metadata.get("asset") or "UNKNOWN").upper()
                 total_allocated_notional += notional
-                allocation_notional_by_strategy[strategy] = allocation_notional_by_strategy.get(strategy, 0.0) + notional
+                allocation_notional_by_strategy[strategy] = (
+                    allocation_notional_by_strategy.get(strategy, 0.0) + notional
+                )
                 allocation_notional_by_family[family] = allocation_notional_by_family.get(family, 0.0) + notional
                 symbol_strategy = f"{asset}:{strategy}"
-                allocation_notional_by_symbol_strategy[symbol_strategy] = allocation_notional_by_symbol_strategy.get(symbol_strategy, 0.0) + notional
+                allocation_notional_by_symbol_strategy[symbol_strategy] = (
+                    allocation_notional_by_symbol_strategy.get(symbol_strategy, 0.0) + notional
+                )
 
             matured_rows = (
                 await session.execute(
@@ -3062,6 +3623,33 @@ class Repository:
                 )
             ).all()
             matured_by_strategy = {str(strategy): int(count or 0) for strategy, count in matured_rows}
+            matured_version_rows = (
+                await session.execute(
+                    select(
+                        CandidateOutcomeAttributionRecord.strategy_id,
+                        CandidateOutcomeAttributionRecord.strategy_version,
+                        func.count(func.distinct(CandidateOutcomeAttributionRecord.candidate_id)),
+                    )
+                    .select_from(CandidateOutcomeAttributionRecord)
+                    .join(
+                        AlphaCandidateRecord,
+                        AlphaCandidateRecord.candidate_id == CandidateOutcomeAttributionRecord.candidate_id,
+                    )
+                    .where(
+                        AlphaCandidateRecord.created_at_ms >= start,
+                        AlphaCandidateRecord.created_at_ms < end,
+                        CandidateOutcomeAttributionRecord.terminal_state == "matured",
+                    )
+                    .group_by(
+                        CandidateOutcomeAttributionRecord.strategy_id,
+                        CandidateOutcomeAttributionRecord.strategy_version,
+                    )
+                )
+            ).all()
+            matured_by_strategy_version = {
+                f"{strategy}@{version}": int(count or 0)
+                for strategy, version, count in matured_version_rows
+            }
             candidate_metadata_rows = (
                 await session.execute(
                     select(
@@ -3076,6 +3664,7 @@ class Repository:
             active_families: set[str] = set()
             raw_paper_strategies: set[str] = set()
             raw_paper_families: set[str] = set()
+            raw_paper_strategy_versions: set[str] = set()
             paper_strategy_families: dict[str, str] = {}
             candidate_strategy_metadata_covered_count = 0
             for strategy_value, side, regime_snapshot_id, metadata_value in candidate_metadata_rows:
@@ -3096,12 +3685,24 @@ class Repository:
                 strategy = str(strategy_value or "unknown")
                 active_strategies.add(strategy)
                 active_families.add(family)
-                source_integrity = metadata.get("source_integrity") if isinstance(metadata.get("source_integrity"), dict) else {}
-                activation_scope = str(metadata.get("activation_scope") or source_integrity.get("activation_scope") or "paper_shadow")
-                paper_eligible = bool(metadata.get("paper_eligible", source_integrity.get("paper_eligible", True))) and activation_scope != "shadow_only"
+                source_integrity = (
+                    metadata.get("source_integrity") if isinstance(metadata.get("source_integrity"), dict) else {}
+                )
+                activation_scope = str(
+                    metadata.get("activation_scope") or source_integrity.get("activation_scope") or "paper_shadow"
+                )
+                promotion_state = str(
+                    metadata.get("promotion_state") or source_integrity.get("promotion_state") or "research_only"
+                )
+                paper_eligible = (
+                    promotion_state == "paper_approved"
+                    and bool(metadata.get("paper_eligible", source_integrity.get("paper_eligible", False)))
+                    and activation_scope != "shadow_only"
+                )
                 if paper_eligible:
                     raw_paper_strategies.add(strategy)
                     raw_paper_families.add(family)
+                    raw_paper_strategy_versions.add(f"{strategy}@{strategy_version}")
                     paper_strategy_families[strategy] = family
 
             performance_rows = (
@@ -3118,7 +3719,9 @@ class Repository:
                         CandidateOutcomeAttributionRecord.metadata_json,
                     )
                     .select_from(OrderIntentRecord)
-                    .join(AlphaCandidateRecord, AlphaCandidateRecord.candidate_id == OrderIntentRecord.parent_candidate_id)
+                    .join(
+                        AlphaCandidateRecord, AlphaCandidateRecord.candidate_id == OrderIntentRecord.parent_candidate_id
+                    )
                     .join(
                         CandidateOutcomeAttributionRecord,
                         and_(
@@ -3136,9 +3739,21 @@ class Repository:
             ).all()
             strict_groups: dict[tuple[str, str, str], list[tuple[str, float, float]]] = {}
             strict_exclusions: dict[str, int] = {}
-            for strategy_value, candidate_id, horizon, candidate_metadata, outcome_window, net_return, realized_r, flags_value, outcome_metadata in performance_rows:
+            for (
+                strategy_value,
+                candidate_id,
+                horizon,
+                candidate_metadata,
+                outcome_window,
+                net_return,
+                realized_r,
+                flags_value,
+                outcome_metadata,
+            ) in performance_rows:
                 metadata = candidate_metadata if isinstance(candidate_metadata, dict) else {}
-                source_integrity = metadata.get("source_integrity") if isinstance(metadata.get("source_integrity"), dict) else {}
+                source_integrity = (
+                    metadata.get("source_integrity") if isinstance(metadata.get("source_integrity"), dict) else {}
+                )
                 flags = {str(item) for item in (flags_value or [])}
                 mark_metadata = outcome_metadata if isinstance(outcome_metadata, dict) else {}
                 exclusion = None
@@ -3146,7 +3761,15 @@ class Repository:
                     exclusion = "non_strict_mark"
                 elif str(mark_metadata.get("mark_source") or "unknown") != "feature_store_mid":
                     exclusion = "non_strict_mark_source"
-                elif not bool(metadata.get("paper_eligible", source_integrity.get("paper_eligible", True))) or str(metadata.get("activation_scope") or source_integrity.get("activation_scope") or "paper_shadow") == "shadow_only":
+                elif (
+                    str(metadata.get("promotion_state") or source_integrity.get("promotion_state") or "research_only")
+                    != "paper_approved"
+                    or not bool(metadata.get("paper_eligible", source_integrity.get("paper_eligible", False)))
+                    or str(
+                        metadata.get("activation_scope") or source_integrity.get("activation_scope") or "paper_shadow"
+                    )
+                    == "shadow_only"
+                ):
                     exclusion = "not_paper_eligible"
                 elif not bool(metadata.get("counts_for_breadth", True)):
                     exclusion = "excluded_from_breadth"
@@ -3155,7 +3778,9 @@ class Repository:
                     continue
                 family = str(metadata.get("strategy_family") or "unknown")
                 key = (str(strategy_value or "unknown"), str(horizon or outcome_window or "unknown"), family)
-                strict_groups.setdefault(key, []).append((str(candidate_id), float(net_return or 0.0), float(realized_r or 0.0)))
+                strict_groups.setdefault(key, []).append(
+                    (str(candidate_id), float(net_return or 0.0), float(realized_r or 0.0))
+                )
             strict_performance = []
             for (strategy, horizon, family), values in sorted(strict_groups.items()):
                 returns = [item[1] for item in values]
@@ -3195,8 +3820,7 @@ class Repository:
                     "intent_count": sum(intent_counts.values()),
                     "execution_report_count": sum(report_counts.values()),
                     "execution_failure_count": sum(
-                        report_status_counts.get(status, 0)
-                        for status in ("failed", "rejected", "expired", "cancelled")
+                        report_status_counts.get(status, 0) for status in ("failed", "rejected", "expired", "cancelled")
                     ),
                     "measured_execution_report_count": int(measured_report_stats[0] or 0),
                     "measured_slippage_total_bps": float(measured_report_stats[1] or 0.0),
@@ -3207,7 +3831,9 @@ class Repository:
                     "risk_decision_count": sum(risk_counts.values()),
                     "risk_reject_count": risk_counts.get("reject", 0),
                     "allocation_count": sum(allocation_counts.values()),
-                    "allocated_count": sum(allocation_counts.get(status, 0) for status in ("allocate", "reduce", "require_debate")),
+                    "allocated_count": sum(
+                        allocation_counts.get(status, 0) for status in ("allocate", "reduce", "require_debate")
+                    ),
                     "matured_candidate_count": matured_candidate_count,
                     "allocated_candidate_count": allocated_candidate_count,
                     "candidate_outcome_attribution_count": candidate_outcome_attribution_count,
@@ -3228,18 +3854,26 @@ class Repository:
                     "active_shadow_families": sorted(active_families),
                     "raw_paper_eligible_strategies": sorted(raw_paper_strategies),
                     "raw_paper_eligible_families": sorted(raw_paper_families),
+                    "raw_paper_eligible_strategy_versions": sorted(raw_paper_strategy_versions),
                     "paper_eligible_strategy_families": paper_strategy_families,
                     "matured_outcome_candidate_count_by_strategy": matured_by_strategy,
+                    "matured_outcome_candidate_count_by_strategy_version": matured_by_strategy_version,
                 },
                 "concentration": {
                     "total_allocated_notional_usd": round(total_allocated_notional, 4),
-                    "allocation_notional_by_strategy": {key: round(value, 4) for key, value in allocation_notional_by_strategy.items()},
-                    "allocation_notional_by_family": {key: round(value, 4) for key, value in allocation_notional_by_family.items()},
-                    "allocation_notional_by_symbol_strategy": {key: round(value, 4) for key, value in allocation_notional_by_symbol_strategy.items()},
+                    "allocation_notional_by_strategy": {
+                        key: round(value, 4) for key, value in allocation_notional_by_strategy.items()
+                    },
+                    "allocation_notional_by_family": {
+                        key: round(value, 4) for key, value in allocation_notional_by_family.items()
+                    },
+                    "allocation_notional_by_symbol_strategy": {
+                        key: round(value, 4) for key, value in allocation_notional_by_symbol_strategy.items()
+                    },
                 },
                 "execution": {
                     "status_counts": report_status_counts,
-                    "measurement_semantics": "filled reports with positive size and an actual fill price",
+                    "measurement_semantics": "filled/partial reports with positive size, actual simulated fill price, and measured depth+fee cost quality",
                 },
                 "strict_performance": {
                     "rows_seen": len(performance_rows),
@@ -3258,7 +3892,9 @@ class Repository:
                 await session.commit()
                 return str(getattr(merged, primary_key_attr))
         except Exception as exc:  # pragma: no cover - engine persistence should not break runtime loop
-            log.warning("engine_record_merge_failed", table=getattr(item, "__tablename__", "unknown"), error=type(exc).__name__)
+            log.warning(
+                "engine_record_merge_failed", table=getattr(item, "__tablename__", "unknown"), error=type(exc).__name__
+            )
             return None
 
     async def _get_engine_record(self, record_cls: Any, primary_key: str) -> dict[str, Any] | None:
@@ -3269,7 +3905,11 @@ class Repository:
                 item = await session.get(record_cls, primary_key)
                 return _engine_record_to_dict(item) if item is not None else None
         except Exception as exc:  # pragma: no cover
-            log.warning("engine_record_get_failed", table=getattr(record_cls, "__tablename__", "unknown"), error=type(exc).__name__)
+            log.warning(
+                "engine_record_get_failed",
+                table=getattr(record_cls, "__tablename__", "unknown"),
+                error=type(exc).__name__,
+            )
             return None
 
     async def _list_engine_records(
@@ -3292,7 +3932,11 @@ class Repository:
                 result = await session.execute(stmt)
                 return [_engine_record_to_dict(item) for item in result.scalars().all()]
         except Exception as exc:  # pragma: no cover
-            log.warning("engine_record_list_failed", table=getattr(record_cls, "__tablename__", "unknown"), error=type(exc).__name__)
+            log.warning(
+                "engine_record_list_failed",
+                table=getattr(record_cls, "__tablename__", "unknown"),
+                error=type(exc).__name__,
+            )
             return []
 
     async def record_memory_injection_event(self, event: dict[str, Any]) -> str | None:
@@ -3322,7 +3966,11 @@ class Repository:
             return []
         try:
             async with self.sessionmaker() as session:
-                stmt = select(MemoryInjectionEventRecord).order_by(MemoryInjectionEventRecord.created_at_ms.desc()).limit(limit)
+                stmt = (
+                    select(MemoryInjectionEventRecord)
+                    .order_by(MemoryInjectionEventRecord.created_at_ms.desc())
+                    .limit(limit)
+                )
                 if role:
                     stmt = stmt.where(MemoryInjectionEventRecord.role == role)
                 result = await session.execute(stmt)
@@ -3513,7 +4161,9 @@ class Repository:
             log.warning("trade_proposal_get_failed", proposal_id=proposal_id, error=type(exc).__name__)
             return None
 
-    async def create_position_tracker(self, plan: PositionTrackingPlan, proposal_id: str | None = None, run_id: str | None = None) -> str | None:
+    async def create_position_tracker(
+        self, plan: PositionTrackingPlan, proposal_id: str | None = None, run_id: str | None = None
+    ) -> str | None:
         if self.sessionmaker is None:
             return None
         try:
@@ -3572,7 +4222,9 @@ class Repository:
             return []
         try:
             async with self.sessionmaker() as session:
-                result = await session.execute(select(PositionTracker).where(PositionTracker.status.in_(["pending", "active"])))
+                result = await session.execute(
+                    select(PositionTracker).where(PositionTracker.status.in_(["pending", "active"]))
+                )
                 trackers = list(result.scalars().all())
                 return [await self._tracker_to_dict(session, item) for item in trackers]
         except Exception as exc:  # pragma: no cover
@@ -3615,7 +4267,9 @@ class Repository:
             log.warning("position_trackers_list_failed", error=type(exc).__name__)
             return []
 
-    async def update_position_tracker_price(self, tracker_id: str, current_px: float, previous_px: float | None, timestamp_ms: int) -> None:
+    async def update_position_tracker_price(
+        self, tracker_id: str, current_px: float, previous_px: float | None, timestamp_ms: int
+    ) -> None:
         if self.sessionmaker is None:
             return
         try:
@@ -3632,7 +4286,9 @@ class Repository:
         except Exception as exc:  # pragma: no cover
             log.warning("position_tracker_price_update_failed", tracker_id=tracker_id, error=type(exc).__name__)
 
-    async def update_tracked_level_state(self, level_id: str, armed: bool, hit_count: int, last_triggered_at: datetime | None = None) -> None:
+    async def update_tracked_level_state(
+        self, level_id: str, armed: bool, hit_count: int, last_triggered_at: datetime | None = None
+    ) -> None:
         if self.sessionmaker is None:
             return
         try:
@@ -3675,9 +4331,13 @@ class Repository:
                         tracker.completed_at = datetime.now(UTC)
                     await session.commit()
             if reason:
-                await self.record_tracking_event(tracker_id=tracker_id, event_type=f"tracker_{status}", coin="", payload={"reason": reason})
+                await self.record_tracking_event(
+                    tracker_id=tracker_id, event_type=f"tracker_{status}", coin="", payload={"reason": reason}
+                )
         except Exception as exc:  # pragma: no cover
-            log.warning("position_tracker_status_update_failed", tracker_id=tracker_id, status=status, error=type(exc).__name__)
+            log.warning(
+                "position_tracker_status_update_failed", tracker_id=tracker_id, status=status, error=type(exc).__name__
+            )
 
     async def record_tracking_event(
         self,
@@ -3709,7 +4369,9 @@ class Repository:
                 await session.commit()
                 return event.id
         except Exception as exc:  # pragma: no cover
-            log.warning("tracking_event_record_failed", tracker_id=tracker_id, event_type=event_type, error=type(exc).__name__)
+            log.warning(
+                "tracking_event_record_failed", tracker_id=tracker_id, event_type=event_type, error=type(exc).__name__
+            )
             return None
 
     async def list_tracking_events(self, tracker_id: str, limit: int = 100) -> list[dict[str, Any]]:
@@ -3717,18 +4379,30 @@ class Repository:
             return []
         try:
             async with self.sessionmaker() as session:
-                result = await session.execute(select(TrackingEvent).where(TrackingEvent.tracker_id == tracker_id).order_by(TrackingEvent.created_at.desc()).limit(limit))
+                result = await session.execute(
+                    select(TrackingEvent)
+                    .where(TrackingEvent.tracker_id == tracker_id)
+                    .order_by(TrackingEvent.created_at.desc())
+                    .limit(limit)
+                )
                 return [_event_to_dict(item) for item in result.scalars().all()]
         except Exception as exc:  # pragma: no cover
             log.warning("tracking_events_list_failed", tracker_id=tracker_id, error=type(exc).__name__)
             return []
 
-    async def record_autonomy_event(self, event_type: str, actor: str = "", symbol: str | None = None, payload: dict[str, Any] | None = None) -> str | None:
+    async def record_autonomy_event(
+        self, event_type: str, actor: str = "", symbol: str | None = None, payload: dict[str, Any] | None = None
+    ) -> str | None:
         if self.sessionmaker is None:
             return None
         try:
             async with self.sessionmaker() as session:
-                event = AutonomyEvent(event_type=event_type, actor=actor, symbol=symbol.upper() if symbol else None, payload_json=redact_secrets(payload or {}))
+                event = AutonomyEvent(
+                    event_type=event_type,
+                    actor=actor,
+                    symbol=symbol.upper() if symbol else None,
+                    payload_json=redact_secrets(payload or {}),
+                )
                 session.add(event)
                 await session.flush()
                 await session.commit()
@@ -3744,7 +4418,12 @@ class Repository:
             symbol = str(asset["symbol"]).upper()
             item = await session.get(MarketAssetRecord, symbol)
             if item is None:
-                item = MarketAssetRecord(symbol=symbol, display_name=str(asset.get("display_name") or symbol), kind=str(asset.get("kind") or "perp"), source=str(asset.get("source") or "top_volume"))
+                item = MarketAssetRecord(
+                    symbol=symbol,
+                    display_name=str(asset.get("display_name") or symbol),
+                    kind=str(asset.get("kind") or "perp"),
+                    source=str(asset.get("source") or "top_volume"),
+                )
                 session.add(item)
             item.display_name = str(asset.get("display_name") or symbol)
             item.kind = str(asset.get("kind") or "perp")
@@ -3795,7 +4474,17 @@ class Repository:
             for level in levels:
                 item = await session.get(MarketLevelRecord, str(level["id"]))
                 if item is None:
-                    item = MarketLevelRecord(id=str(level["id"]), symbol=str(level.get("symbol") or "").upper(), kind=str(level.get("kind") or "support"), price=float(level.get("price") or 0), strength=float(level.get("strength") or 0), timeframe=str(level.get("timeframe") or ""), source=str(level.get("source") or "inferred"), first_seen_ms=int(level.get("first_seen_ms") or 0), last_seen_ms=int(level.get("last_seen_ms") or 0))
+                    item = MarketLevelRecord(
+                        id=str(level["id"]),
+                        symbol=str(level.get("symbol") or "").upper(),
+                        kind=str(level.get("kind") or "support"),
+                        price=float(level.get("price") or 0),
+                        strength=float(level.get("strength") or 0),
+                        timeframe=str(level.get("timeframe") or ""),
+                        source=str(level.get("source") or "inferred"),
+                        first_seen_ms=int(level.get("first_seen_ms") or 0),
+                        last_seen_ms=int(level.get("last_seen_ms") or 0),
+                    )
                     session.add(item)
                 item.symbol = str(level.get("symbol") or item.symbol).upper()
                 item.kind = str(level.get("kind") or item.kind)
@@ -3843,7 +4532,9 @@ class Repository:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            result = await session.execute(select(AutonomyNewsEvent).order_by(AutonomyNewsEvent.observed_at_ms.desc()).limit(limit))
+            result = await session.execute(
+                select(AutonomyNewsEvent).order_by(AutonomyNewsEvent.observed_at_ms.desc()).limit(limit)
+            )
             return [_news_event_to_dict(item) for item in result.scalars().all()]
 
     async def record_newswire_event(self, event: dict[str, Any]) -> str | None:
@@ -3865,7 +4556,9 @@ class Repository:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            result = await session.execute(select(NewswireEventRow).order_by(NewswireEventRow.received_at_ms.desc()).limit(limit))
+            result = await session.execute(
+                select(NewswireEventRow).order_by(NewswireEventRow.received_at_ms.desc()).limit(limit)
+            )
             return [_newswire_event_to_dict(item) for item in result.scalars().all()]
 
     async def get_newswire_event(self, event_id: str) -> dict[str, Any] | None:
@@ -3917,7 +4610,9 @@ class Repository:
                 wanted = symbol.upper()
                 rows = [row for row in rows if wanted in {str(item).upper() for item in row.get("symbols") or []}]
             if feed_action:
-                rows = [row for row in rows if str((row.get("assessment") or {}).get("feed_action") or "") == feed_action]
+                rows = [
+                    row for row in rows if str((row.get("assessment") or {}).get("feed_action") or "") == feed_action
+                ]
             return rows[:limit]
 
     async def record_newswire_story_revision(self, revision: dict[str, Any]) -> str | None:
@@ -3950,7 +4645,11 @@ class Repository:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(NewswireStoryRevisionRow).order_by(NewswireStoryRevisionRow.emitted_at_ms.desc(), NewswireStoryRevisionRow.revision_id.desc()).limit(max(1, limit))
+            stmt = (
+                select(NewswireStoryRevisionRow)
+                .order_by(NewswireStoryRevisionRow.emitted_at_ms.desc(), NewswireStoryRevisionRow.revision_id.desc())
+                .limit(max(1, limit))
+            )
             if story_id:
                 stmt = stmt.where(NewswireStoryRevisionRow.story_id == str(story_id))
             result = await session.execute(stmt)
@@ -3966,7 +4665,11 @@ class Repository:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(NewswireStoryRevisionRow).order_by(NewswireStoryRevisionRow.emitted_at_ms.asc(), NewswireStoryRevisionRow.revision_id.asc()).limit(max(1, limit))
+            stmt = (
+                select(NewswireStoryRevisionRow)
+                .order_by(NewswireStoryRevisionRow.emitted_at_ms.asc(), NewswireStoryRevisionRow.revision_id.asc())
+                .limit(max(1, limit))
+            )
             if last_event_id:
                 stmt = stmt.where(
                     or_(
@@ -4057,7 +4760,13 @@ class Repository:
                 await session.execute(
                     update(NewswirePublishLedgerRow)
                     .where(NewswirePublishLedgerRow.publish_id.in_(ids))
-                    .values(status="posted", discord_message_id=message_id, posted_at_ms=now_ms, last_attempt_ms=now_ms, last_error=None)
+                    .values(
+                        status="posted",
+                        discord_message_id=message_id,
+                        posted_at_ms=now_ms,
+                        last_attempt_ms=now_ms,
+                        last_error=None,
+                    )
                 )
                 await session.commit()
         except Exception as exc:  # pragma: no cover
@@ -4093,13 +4802,19 @@ class Repository:
             async with self.sessionmaker() as session:
                 result = await session.execute(
                     select(NewswirePublishLedgerRow.status, func.count())
-                    .where(NewswirePublishLedgerRow.destination == destination, NewswirePublishLedgerRow.channel_id == str(channel_id))
+                    .where(
+                        NewswirePublishLedgerRow.destination == destination,
+                        NewswirePublishLedgerRow.channel_id == str(channel_id),
+                    )
                     .group_by(NewswirePublishLedgerRow.status)
                 )
                 counts = {str(status): int(count) for status, count in result.all()}
                 last_result = await session.execute(
                     select(NewswirePublishLedgerRow)
-                    .where(NewswirePublishLedgerRow.destination == destination, NewswirePublishLedgerRow.channel_id == str(channel_id))
+                    .where(
+                        NewswirePublishLedgerRow.destination == destination,
+                        NewswirePublishLedgerRow.channel_id == str(channel_id),
+                    )
                     .order_by(NewswirePublishLedgerRow.last_attempt_ms.desc())
                     .limit(1)
                 )
@@ -4274,7 +4989,9 @@ class Repository:
             await session.commit()
             return [_newswire_delivery_to_dict(item) for item in rows]
 
-    async def mark_newswire_deliveries_posted(self, delivery_ids: list[str], *, message_id: str | None, now_ms: int) -> None:
+    async def mark_newswire_deliveries_posted(
+        self, delivery_ids: list[str], *, message_id: str | None, now_ms: int
+    ) -> None:
         if self.sessionmaker is None or not delivery_ids:
             return
         async with self.sessionmaker() as session:
@@ -4295,7 +5012,9 @@ class Repository:
         if self.sessionmaker is None or not delivery_ids:
             return
         async with self.sessionmaker() as session:
-            result = await session.execute(select(NewswireDeliveryRow).where(NewswireDeliveryRow.delivery_id.in_(delivery_ids)))
+            result = await session.execute(
+                select(NewswireDeliveryRow).where(NewswireDeliveryRow.delivery_id.in_(delivery_ids))
+            )
             for item in result.scalars().all():
                 item.status = "failed"
                 item.attempt_count = int(item.attempt_count or 0) + 1
@@ -4310,7 +5029,9 @@ class Repository:
         async with self.sessionmaker() as session:
             result = await session.execute(
                 select(NewswireDeliveryRow.status, func.count())
-                .where(NewswireDeliveryRow.destination == destination, NewswireDeliveryRow.channel_id == str(channel_id))
+                .where(
+                    NewswireDeliveryRow.destination == destination, NewswireDeliveryRow.channel_id == str(channel_id)
+                )
                 .group_by(NewswireDeliveryRow.status)
             )
             counts = {str(status): int(count) for status, count in result.all()}
@@ -4372,7 +5093,11 @@ class Repository:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(OperationalIncidentRecord).order_by(OperationalIncidentRecord.updated_at_ms.desc()).limit(max(1, limit))
+            stmt = (
+                select(OperationalIncidentRecord)
+                .order_by(OperationalIncidentRecord.updated_at_ms.desc())
+                .limit(max(1, limit))
+            )
             if source_type:
                 stmt = stmt.where(OperationalIncidentRecord.source_type == str(source_type))
             if state:
@@ -4467,7 +5192,9 @@ class Repository:
                     OperationalNotificationRow.status.in_(["pending", "failed"]),
                     OperationalNotificationRow.next_attempt_at_ms <= int(now_ms),
                 )
-                .order_by(OperationalNotificationRow.scheduled_at_ms.asc(), OperationalNotificationRow.notification_id.asc())
+                .order_by(
+                    OperationalNotificationRow.scheduled_at_ms.asc(), OperationalNotificationRow.notification_id.asc()
+                )
                 .limit(max(1, int(limit)))
                 .with_for_update(skip_locked=True)
             )
@@ -4537,27 +5264,35 @@ class Repository:
             )
             counts = {str(status): int(count) for status, count in result.all()}
             oldest = (
-                await session.execute(
-                    select(OperationalNotificationRow)
-                    .where(
-                        OperationalNotificationRow.destination == str(destination),
-                        OperationalNotificationRow.status.in_(["pending", "failed", "sending"]),
+                (
+                    await session.execute(
+                        select(OperationalNotificationRow)
+                        .where(
+                            OperationalNotificationRow.destination == str(destination),
+                            OperationalNotificationRow.status.in_(["pending", "failed", "sending"]),
+                        )
+                        .order_by(OperationalNotificationRow.scheduled_at_ms.asc())
+                        .limit(1)
                     )
-                    .order_by(OperationalNotificationRow.scheduled_at_ms.asc())
-                    .limit(1)
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             latest = (
-                await session.execute(
-                    select(OperationalNotificationRow)
-                    .where(
-                        OperationalNotificationRow.destination == str(destination),
-                        OperationalNotificationRow.status == "sent",
+                (
+                    await session.execute(
+                        select(OperationalNotificationRow)
+                        .where(
+                            OperationalNotificationRow.destination == str(destination),
+                            OperationalNotificationRow.status == "sent",
+                        )
+                        .order_by(OperationalNotificationRow.sent_at_ms.desc())
+                        .limit(1)
                     )
-                    .order_by(OperationalNotificationRow.sent_at_ms.desc())
-                    .limit(1)
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             return {
                 "enabled": True,
                 "counts": counts,
@@ -4607,9 +5342,7 @@ class Repository:
                     item.risk_adjusted_utility = float(
                         proposal.get("risk_adjusted_utility") or item.risk_adjusted_utility
                     )
-                    item.feature_coverage_pct = float(
-                        proposal.get("feature_coverage_pct") or item.feature_coverage_pct
-                    )
+                    item.feature_coverage_pct = float(proposal.get("feature_coverage_pct") or item.feature_coverage_pct)
                     item.allocated_notional_usd = float(
                         proposal.get("allocated_notional_usd") or item.allocated_notional_usd
                     )
@@ -4637,12 +5370,16 @@ class Repository:
             return None
         async with self.sessionmaker() as session:
             item = (
-                await session.execute(
-                    select(EngineOperatorProposalRow).where(
-                        EngineOperatorProposalRow.candidate_id == str(candidate_id)
+                (
+                    await session.execute(
+                        select(EngineOperatorProposalRow).where(
+                            EngineOperatorProposalRow.candidate_id == str(candidate_id)
+                        )
                     )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             return _engine_operator_proposal_to_dict(item) if item is not None else None
 
     async def list_engine_operator_proposals(
@@ -4663,9 +5400,7 @@ class Repository:
                 stmt = stmt.where(EngineOperatorProposalRow.asset == str(asset).upper())
             if since_ms is not None:
                 stmt = stmt.where(EngineOperatorProposalRow.created_at_ms >= int(since_ms))
-            stmt = stmt.order_by(EngineOperatorProposalRow.created_at_ms.desc()).limit(
-                max(1, min(10_000, int(limit)))
-            )
+            stmt = stmt.order_by(EngineOperatorProposalRow.created_at_ms.desc()).limit(max(1, min(10_000, int(limit))))
             rows = (await session.execute(stmt)).scalars().all()
             return [_engine_operator_proposal_to_dict(item) for item in rows]
 
@@ -4720,18 +5455,20 @@ class Repository:
             return {"enabled": False, "counts": {}}
         async with self.sessionmaker() as session:
             result = await session.execute(
-                select(EngineOperatorProposalRow.status, func.count()).group_by(
-                    EngineOperatorProposalRow.status
-                )
+                select(EngineOperatorProposalRow.status, func.count()).group_by(EngineOperatorProposalRow.status)
             )
             counts = {str(status): int(count) for status, count in result.all()}
             latest = (
-                await session.execute(
-                    select(EngineOperatorProposalRow)
-                    .order_by(EngineOperatorProposalRow.created_at_ms.desc())
-                    .limit(1)
+                (
+                    await session.execute(
+                        select(EngineOperatorProposalRow)
+                        .order_by(EngineOperatorProposalRow.created_at_ms.desc())
+                        .limit(1)
+                    )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             return {
                 "enabled": True,
                 "counts": counts,
@@ -4776,7 +5513,11 @@ class Repository:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(NewswireRiskStateRecord).order_by(NewswireRiskStateRecord.updated_at_ms.desc()).limit(max(1, limit))
+            stmt = (
+                select(NewswireRiskStateRecord)
+                .order_by(NewswireRiskStateRecord.updated_at_ms.desc())
+                .limit(max(1, limit))
+            )
             if scope:
                 stmt = stmt.where(NewswireRiskStateRecord.scope == str(scope).upper())
             result = await session.execute(stmt)
@@ -4793,11 +5534,17 @@ class Repository:
             "transition_id",
         )
 
-    async def list_newswire_risk_transitions(self, *, scope: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_newswire_risk_transitions(
+        self, *, scope: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(NewswireRiskTransitionRecord).order_by(NewswireRiskTransitionRecord.created_at_ms.desc()).limit(max(1, limit))
+            stmt = (
+                select(NewswireRiskTransitionRecord)
+                .order_by(NewswireRiskTransitionRecord.created_at_ms.desc())
+                .limit(max(1, limit))
+            )
             if scope:
                 stmt = stmt.where(NewswireRiskTransitionRecord.scope == str(scope).upper())
             result = await session.execute(stmt)
@@ -4818,7 +5565,9 @@ class Repository:
             log.warning("newswire_decision_record_failed", decision_id=decision_id, error=type(exc).__name__)
             return None
 
-    async def list_newswire_decisions(self, *, event_id: str | None = None, policy_version: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_newswire_decisions(
+        self, *, event_id: str | None = None, policy_version: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
@@ -4886,7 +5635,9 @@ class Repository:
             log.warning("newswire_reward_record_failed", reward_id=reward_id, error=type(exc).__name__)
             return None
 
-    async def list_newswire_rewards(self, *, event_id: str | None = None, policy_version: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_newswire_rewards(
+        self, *, event_id: str | None = None, policy_version: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
@@ -4910,10 +5661,14 @@ class Repository:
                 "policy_version",
             )
         except Exception as exc:  # pragma: no cover
-            log.warning("newswire_policy_version_upsert_failed", policy_version=policy_version, error=type(exc).__name__)
+            log.warning(
+                "newswire_policy_version_upsert_failed", policy_version=policy_version, error=type(exc).__name__
+            )
             return None
 
-    async def list_newswire_policy_versions(self, *, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_newswire_policy_versions(
+        self, *, status: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
@@ -4927,7 +5682,11 @@ class Repository:
         if self.sessionmaker is None:
             return False
         async with self.sessionmaker() as session:
-            await session.execute(update(NewswirePolicyVersionRow).where(NewswirePolicyVersionRow.status == "promoted").values(status="retired"))
+            await session.execute(
+                update(NewswirePolicyVersionRow)
+                .where(NewswirePolicyVersionRow.status == "promoted")
+                .values(status="retired")
+            )
             result = await session.execute(
                 update(NewswirePolicyVersionRow)
                 .where(NewswirePolicyVersionRow.policy_version == str(policy_version))
@@ -4949,11 +5708,17 @@ class Repository:
             "event_id",
         )
 
-    async def list_world_events(self, limit: int = 100, source_type: str | None = None, symbol: str | None = None) -> list[dict[str, Any]]:
+    async def list_world_events(
+        self, limit: int = 100, source_type: str | None = None, symbol: str | None = None
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(WorldEventRecord).order_by(WorldEventRecord.computed_ts_ms.desc()).limit(max(limit, limit * 3 if symbol else limit))
+            stmt = (
+                select(WorldEventRecord)
+                .order_by(WorldEventRecord.computed_ts_ms.desc())
+                .limit(max(limit, limit * 3 if symbol else limit))
+            )
             if source_type:
                 stmt = stmt.where(WorldEventRecord.source_type == source_type)
             result = await session.execute(stmt)
@@ -4979,11 +5744,17 @@ class Repository:
             "belief_id",
         )
 
-    async def list_market_beliefs(self, limit: int = 100, symbol: str | None = None, kind: str | None = None, status: str | None = "active") -> list[dict[str, Any]]:
+    async def list_market_beliefs(
+        self, limit: int = 100, symbol: str | None = None, kind: str | None = None, status: str | None = "active"
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(MarketBeliefRecord).order_by(MarketBeliefRecord.updated_at_ms.desc()).limit(max(limit, limit * 3 if symbol else limit))
+            stmt = (
+                select(MarketBeliefRecord)
+                .order_by(MarketBeliefRecord.updated_at_ms.desc())
+                .limit(max(limit, limit * 3 if symbol else limit))
+            )
             if kind:
                 stmt = stmt.where(MarketBeliefRecord.kind == kind)
             if status:
@@ -5013,7 +5784,11 @@ class Repository:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            result = await session.execute(select(NarrativeClusterRecord).order_by(NarrativeClusterRecord.updated_at_ms.desc()).limit(max(limit, limit * 3 if symbol else limit)))
+            result = await session.execute(
+                select(NarrativeClusterRecord)
+                .order_by(NarrativeClusterRecord.updated_at_ms.desc())
+                .limit(max(limit, limit * 3 if symbol else limit))
+            )
             items = [_narrative_cluster_to_dict(item) for item in result.scalars().all()]
             if symbol:
                 wanted = symbol.upper()
@@ -5035,11 +5810,17 @@ class Repository:
             "signal_id",
         )
 
-    async def list_prediction_market_signals(self, limit: int = 100, venue: str | None = None, symbol: str | None = None) -> list[dict[str, Any]]:
+    async def list_prediction_market_signals(
+        self, limit: int = 100, venue: str | None = None, symbol: str | None = None
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(PredictionMarketSignalRecord).order_by(PredictionMarketSignalRecord.as_of_ms.desc()).limit(max(limit, limit * 3 if symbol else limit))
+            stmt = (
+                select(PredictionMarketSignalRecord)
+                .order_by(PredictionMarketSignalRecord.as_of_ms.desc())
+                .limit(max(limit, limit * 3 if symbol else limit))
+            )
             if venue:
                 stmt = stmt.where(PredictionMarketSignalRecord.venue == venue)
             result = await session.execute(stmt)
@@ -5049,7 +5830,9 @@ class Repository:
                 items = [item for item in items if wanted in item.get("symbols", [])]
             return items[:limit]
 
-    async def create_or_get_prediction_market_paper_account(self, *, discord_guild_id: str, discord_user_id: str, initial_cash_usd: float) -> dict[str, Any]:
+    async def create_or_get_prediction_market_paper_account(
+        self, *, discord_guild_id: str, discord_user_id: str, initial_cash_usd: float
+    ) -> dict[str, Any]:
         if self.sessionmaker is None:
             raise RuntimeError("repository disabled")
         async with self.sessionmaker() as session:
@@ -5126,11 +5909,17 @@ class Repository:
                 _apply_prediction_market_draft(item, draft)
             await session.commit()
 
-    async def list_prediction_market_bet_drafts(self, *, account_id: str | None = None, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_prediction_market_bet_drafts(
+        self, *, account_id: str | None = None, status: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(PredictionMarketBetDraftRecord).order_by(PredictionMarketBetDraftRecord.created_at_ms.desc()).limit(limit)
+            stmt = (
+                select(PredictionMarketBetDraftRecord)
+                .order_by(PredictionMarketBetDraftRecord.created_at_ms.desc())
+                .limit(limit)
+            )
             if account_id:
                 stmt = stmt.where(PredictionMarketBetDraftRecord.account_id == account_id)
             if status:
@@ -5179,7 +5968,11 @@ class Repository:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(PredictionMarketPositionRecord).order_by(PredictionMarketPositionRecord.opened_at_ms.desc()).limit(limit)
+            stmt = (
+                select(PredictionMarketPositionRecord)
+                .order_by(PredictionMarketPositionRecord.opened_at_ms.desc())
+                .limit(limit)
+            )
             if account_id:
                 stmt = stmt.where(PredictionMarketPositionRecord.account_id == account_id)
             if discord_guild_id:
@@ -5223,11 +6016,17 @@ class Repository:
             item.metadata_json = redact_secrets(dict(settlement.get("metadata") or {}))
             await session.commit()
 
-    async def list_prediction_market_settlements(self, *, venue: str | None = None, market_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_prediction_market_settlements(
+        self, *, venue: str | None = None, market_id: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(PredictionMarketSettlementRecord).order_by(PredictionMarketSettlementRecord.created_at_ms.desc()).limit(limit)
+            stmt = (
+                select(PredictionMarketSettlementRecord)
+                .order_by(PredictionMarketSettlementRecord.created_at_ms.desc())
+                .limit(limit)
+            )
             if venue:
                 stmt = stmt.where(PredictionMarketSettlementRecord.venue == str(venue).lower())
             if market_id:
@@ -5240,11 +6039,15 @@ class Repository:
             return []
         async with self.sessionmaker() as session:
             account_result = await session.execute(
-                select(PredictionMarketPaperAccountRecord).where(PredictionMarketPaperAccountRecord.discord_guild_id == str(discord_guild_id))
+                select(PredictionMarketPaperAccountRecord).where(
+                    PredictionMarketPaperAccountRecord.discord_guild_id == str(discord_guild_id)
+                )
             )
             accounts = [_prediction_market_account_to_dict(item) for item in account_result.scalars().all()]
             position_result = await session.execute(
-                select(PredictionMarketPositionRecord).where(PredictionMarketPositionRecord.discord_guild_id == str(discord_guild_id))
+                select(PredictionMarketPositionRecord).where(
+                    PredictionMarketPositionRecord.discord_guild_id == str(discord_guild_id)
+                )
             )
             positions = [_prediction_market_position_to_dict(item) for item in position_result.scalars().all()]
         by_account = {account["account_id"]: {**account, "positions": []} for account in accounts}
@@ -5308,11 +6111,20 @@ class Repository:
             "memory_id",
         )
 
-    async def list_world_memory_atoms(self, limit: int = 100, symbol: str | None = None, memory_type: str | None = None) -> list[dict[str, Any]]:
+    async def list_world_memory_atoms(
+        self, limit: int = 100, symbol: str | None = None, memory_type: str | None = None
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(WorldMemoryAtomRecord).order_by(WorldMemoryAtomRecord.last_reinforced_at_ms.desc().nullslast(), WorldMemoryAtomRecord.created_at_ms.desc()).limit(max(limit, limit * 3 if symbol else limit))
+            stmt = (
+                select(WorldMemoryAtomRecord)
+                .order_by(
+                    WorldMemoryAtomRecord.last_reinforced_at_ms.desc().nullslast(),
+                    WorldMemoryAtomRecord.created_at_ms.desc(),
+                )
+                .limit(max(limit, limit * 3 if symbol else limit))
+            )
             if memory_type:
                 stmt = stmt.where(WorldMemoryAtomRecord.memory_type == memory_type)
             result = await session.execute(stmt)
@@ -5335,7 +6147,9 @@ class Repository:
         if self.sessionmaker is None:
             return None
         async with self.sessionmaker() as session:
-            result = await session.execute(select(WorldModelSnapshotRecord).order_by(WorldModelSnapshotRecord.as_of_ms.desc()).limit(1))
+            result = await session.execute(
+                select(WorldModelSnapshotRecord).order_by(WorldModelSnapshotRecord.as_of_ms.desc()).limit(1)
+            )
             item = result.scalar_one_or_none()
             return _world_model_snapshot_to_dict(item) if item is not None else None
 
@@ -5358,7 +6172,11 @@ class Repository:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(WorldModelSnapshotRecord).order_by(WorldModelSnapshotRecord.as_of_ms.desc()).limit(max(limit, limit * 3 if symbol or topic else limit))
+            stmt = (
+                select(WorldModelSnapshotRecord)
+                .order_by(WorldModelSnapshotRecord.as_of_ms.desc())
+                .limit(max(limit, limit * 3 if symbol or topic else limit))
+            )
             if start_ms is not None:
                 stmt = stmt.where(WorldModelSnapshotRecord.as_of_ms >= start_ms)
             if end_ms is not None:
@@ -5367,35 +6185,53 @@ class Repository:
             items = [_world_model_snapshot_to_dict(item) for item in result.scalars().all()]
             if symbol:
                 wanted = symbol.upper()
-                items = [item for item in items if wanted in item.get("symbols", []) or any(wanted in belief.get("symbols", []) for belief in item.get("top_beliefs", []))]
+                items = [
+                    item
+                    for item in items
+                    if wanted in item.get("symbols", [])
+                    or any(wanted in belief.get("symbols", []) for belief in item.get("top_beliefs", []))
+                ]
             if topic:
                 wanted_topic = topic.lower()
                 items = [item for item in items if wanted_topic in item.get("topics", [])]
             return items[:limit]
 
-    async def nearest_world_model_snapshot(self, as_of_ms: int, *, symbol: str | None = None, topic: str | None = None) -> dict[str, Any] | None:
+    async def nearest_world_model_snapshot(
+        self, as_of_ms: int, *, symbol: str | None = None, topic: str | None = None
+    ) -> dict[str, Any] | None:
         items = await self.list_world_model_snapshots(limit=50, symbol=symbol, topic=topic, end_ms=as_of_ms)
         return items[0] if items else None
 
     async def upsert_world_model_v2_evidence(self, item: dict[str, Any]) -> None:
         await self._merge_world_model_v2(
             WorldModelV2EvidenceRecord(
-                evidence_id=str(item["evidence_id"]), source_type=str(item["source_type"]),
-                provider=str(item["provider"]), available_at_ms=int(item["available_at_ms"]),
-                admission_status=str(item["admission_status"]), payload_json=item,
+                evidence_id=str(item["evidence_id"]),
+                source_type=str(item["source_type"]),
+                provider=str(item["provider"]),
+                available_at_ms=int(item["available_at_ms"]),
+                admission_status=str(item["admission_status"]),
+                payload_json=item,
             )
         )
 
-    async def list_world_model_v2_evidence(self, *, limit: int = 100, admission_status: str | None = None) -> list[dict[str, Any]]:
+    async def list_world_model_v2_evidence(
+        self, *, limit: int = 100, admission_status: str | None = None
+    ) -> list[dict[str, Any]]:
         filters = [WorldModelV2EvidenceRecord.admission_status == admission_status] if admission_status else []
-        return await self._list_world_model_v2(WorldModelV2EvidenceRecord, WorldModelV2EvidenceRecord.available_at_ms, limit, filters)
+        return await self._list_world_model_v2(
+            WorldModelV2EvidenceRecord, WorldModelV2EvidenceRecord.available_at_ms, limit, filters
+        )
 
     async def upsert_world_model_v2_macro_observation(self, item: dict[str, Any]) -> None:
         await self._merge_world_model_v2(
             WorldModelV2MacroObservationRecord(
-                observation_id=str(item["observation_id"]), series_id=str(item["series_id"]),
-                factor_id=str(item["factor_id"]), period=str(item["period"]), vintage=str(item["vintage"]),
-                available_at_ms=int(item["available_at_ms"]), payload_json=item,
+                observation_id=str(item["observation_id"]),
+                series_id=str(item["series_id"]),
+                factor_id=str(item["factor_id"]),
+                period=str(item["period"]),
+                vintage=str(item["vintage"]),
+                available_at_ms=int(item["available_at_ms"]),
+                payload_json=item,
             )
         )
 
@@ -5404,65 +6240,111 @@ class Repository:
             return
         async with self.sessionmaker() as session:
             for item in items:
-                await session.merge(WorldModelV2MacroObservationRecord(
-                    observation_id=str(item["observation_id"]), series_id=str(item["series_id"]),
-                    factor_id=str(item["factor_id"]), period=str(item["period"]), vintage=str(item["vintage"]),
-                    available_at_ms=int(item["available_at_ms"]), payload_json=item,
-                ))
+                await session.merge(
+                    WorldModelV2MacroObservationRecord(
+                        observation_id=str(item["observation_id"]),
+                        series_id=str(item["series_id"]),
+                        factor_id=str(item["factor_id"]),
+                        period=str(item["period"]),
+                        vintage=str(item["vintage"]),
+                        available_at_ms=int(item["available_at_ms"]),
+                        payload_json=item,
+                    )
+                )
             await session.commit()
 
-    async def list_world_model_v2_macro_observations(self, *, limit: int = 1000, as_of_ms: int | None = None, series_id: str | None = None) -> list[dict[str, Any]]:
+    async def list_world_model_v2_macro_observations(
+        self, *, limit: int = 1000, as_of_ms: int | None = None, series_id: str | None = None
+    ) -> list[dict[str, Any]]:
         filters: list[Any] = []
         if as_of_ms is not None:
             filters.append(WorldModelV2MacroObservationRecord.available_at_ms <= as_of_ms)
         if series_id:
             filters.append(WorldModelV2MacroObservationRecord.series_id == series_id)
-        return await self._list_world_model_v2(WorldModelV2MacroObservationRecord, WorldModelV2MacroObservationRecord.available_at_ms, limit, filters)
+        return await self._list_world_model_v2(
+            WorldModelV2MacroObservationRecord, WorldModelV2MacroObservationRecord.available_at_ms, limit, filters
+        )
 
     async def upsert_world_model_v2_macro_state(self, item: dict[str, Any]) -> None:
-        await self._merge_world_model_v2(WorldModelV2MacroStateRecord(factor_id=str(item["factor_id"]), as_of_ms=int(item["as_of_ms"]), payload_json=item))
+        await self._merge_world_model_v2(
+            WorldModelV2MacroStateRecord(
+                factor_id=str(item["factor_id"]), as_of_ms=int(item["as_of_ms"]), payload_json=item
+            )
+        )
 
     async def list_world_model_v2_macro_states(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        return await self._list_world_model_v2(WorldModelV2MacroStateRecord, WorldModelV2MacroStateRecord.as_of_ms, limit)
+        return await self._list_world_model_v2(
+            WorldModelV2MacroStateRecord, WorldModelV2MacroStateRecord.as_of_ms, limit
+        )
 
     async def upsert_world_model_v2_prediction_market(self, item: dict[str, Any]) -> None:
         await self._merge_world_model_v2(
             WorldModelV2PredictionMarketRecord(
-                market_key=str(item["market_key"]), venue=str(item["venue"]), market_id=str(item["market_id"]),
-                admission_status=str(item["admission_status"]), payload_json=item,
+                market_key=str(item["market_key"]),
+                venue=str(item["venue"]),
+                market_id=str(item["market_id"]),
+                admission_status=str(item["admission_status"]),
+                payload_json=item,
             )
         )
 
-    async def list_world_model_v2_prediction_markets(self, *, limit: int = 100, admission_status: str | None = "admitted", venue: str | None = None) -> list[dict[str, Any]]:
+    async def list_world_model_v2_prediction_markets(
+        self, *, limit: int = 100, admission_status: str | None = "admitted", venue: str | None = None
+    ) -> list[dict[str, Any]]:
         filters: list[Any] = []
         if admission_status:
             filters.append(WorldModelV2PredictionMarketRecord.admission_status == admission_status)
         if venue:
             filters.append(WorldModelV2PredictionMarketRecord.venue == venue)
-        return await self._list_world_model_v2(WorldModelV2PredictionMarketRecord, WorldModelV2PredictionMarketRecord.created_at, limit, filters)
+        return await self._list_world_model_v2(
+            WorldModelV2PredictionMarketRecord, WorldModelV2PredictionMarketRecord.created_at, limit, filters
+        )
 
-    async def upsert_world_model_v2_prediction_quote(self, item: dict[str, Any], *, write_history: bool = False) -> None:
+    async def upsert_world_model_v2_prediction_quote(
+        self, item: dict[str, Any], *, write_history: bool = False
+    ) -> None:
         quote = WorldModelV2PredictionQuoteRecord(
-            quote_key=str(item["quote_key"]), market_key=str(item["market_key"]), outcome_id=str(item["outcome_id"]),
-            observed_at_ms=int(item["observed_at_ms"]), payload_json=item,
+            quote_key=str(item["quote_key"]),
+            market_key=str(item["market_key"]),
+            outcome_id=str(item["outcome_id"]),
+            observed_at_ms=int(item["observed_at_ms"]),
+            payload_json=item,
         )
         if self.sessionmaker is None:
             return
         async with self.sessionmaker() as session:
             await session.merge(quote)
             if write_history:
-                history_id = f'{item["quote_key"]}:{int(item["observed_at_ms"])}'
-                await session.merge(WorldModelV2PredictionQuoteHistoryRecord(history_id=history_id, quote_key=str(item["quote_key"]), observed_at_ms=int(item["observed_at_ms"]), payload_json=item))
+                history_id = f"{item['quote_key']}:{int(item['observed_at_ms'])}"
+                await session.merge(
+                    WorldModelV2PredictionQuoteHistoryRecord(
+                        history_id=history_id,
+                        quote_key=str(item["quote_key"]),
+                        observed_at_ms=int(item["observed_at_ms"]),
+                        payload_json=item,
+                    )
+                )
             await session.commit()
 
-    async def list_world_model_v2_prediction_quotes(self, *, limit: int = 200, market_key: str | None = None) -> list[dict[str, Any]]:
+    async def list_world_model_v2_prediction_quotes(
+        self, *, limit: int = 200, market_key: str | None = None
+    ) -> list[dict[str, Any]]:
         filters = [WorldModelV2PredictionQuoteRecord.market_key == market_key] if market_key else []
-        return await self._list_world_model_v2(WorldModelV2PredictionQuoteRecord, WorldModelV2PredictionQuoteRecord.observed_at_ms, limit, filters)
-
-    async def list_world_model_v2_prediction_quote_history(self, *, quote_key: str, since_ms: int, limit: int = 1000) -> list[dict[str, Any]]:
         return await self._list_world_model_v2(
-            WorldModelV2PredictionQuoteHistoryRecord, WorldModelV2PredictionQuoteHistoryRecord.observed_at_ms, limit,
-            [WorldModelV2PredictionQuoteHistoryRecord.quote_key == quote_key, WorldModelV2PredictionQuoteHistoryRecord.observed_at_ms >= since_ms],
+            WorldModelV2PredictionQuoteRecord, WorldModelV2PredictionQuoteRecord.observed_at_ms, limit, filters
+        )
+
+    async def list_world_model_v2_prediction_quote_history(
+        self, *, quote_key: str, since_ms: int, limit: int = 1000
+    ) -> list[dict[str, Any]]:
+        return await self._list_world_model_v2(
+            WorldModelV2PredictionQuoteHistoryRecord,
+            WorldModelV2PredictionQuoteHistoryRecord.observed_at_ms,
+            limit,
+            [
+                WorldModelV2PredictionQuoteHistoryRecord.quote_key == quote_key,
+                WorldModelV2PredictionQuoteHistoryRecord.observed_at_ms >= since_ms,
+            ],
         )
 
     async def compact_world_model_v2(self, *, now_ms: int) -> dict[str, int]:
@@ -5472,38 +6354,86 @@ class Repository:
         quote_cutoff = int(now_ms) - 30 * 86_400_000
         snapshot_cutoff = int(now_ms) - 180 * 86_400_000
         async with self.sessionmaker() as session:
-            result = await session.execute(select(WorldModelV2PredictionQuoteHistoryRecord).where(WorldModelV2PredictionQuoteHistoryRecord.observed_at_ms < quote_cutoff))
+            result = await session.execute(
+                select(WorldModelV2PredictionQuoteHistoryRecord).where(
+                    WorldModelV2PredictionQuoteHistoryRecord.observed_at_ms < quote_cutoff
+                )
+            )
             rows = list(result.scalars().all())
             grouped: dict[tuple[str, int], list[WorldModelV2PredictionQuoteHistoryRecord]] = {}
             for row in rows:
                 bucket = row.observed_at_ms // 3_600_000 * 3_600_000
                 grouped.setdefault((row.quote_key, bucket), []).append(row)
             for (quote_key, bucket), bucket_rows in grouped.items():
-                probabilities = [float(row.payload_json["probability"]) for row in bucket_rows if row.payload_json.get("probability") is not None]
+                probabilities = [
+                    float(row.payload_json["probability"])
+                    for row in bucket_rows
+                    if row.payload_json.get("probability") is not None
+                ]
                 if not probabilities:
                     continue
-                await session.merge(WorldModelV2PredictionQuoteRollupRecord(
-                    rollup_id=f"{quote_key}:{bucket}", quote_key=quote_key, bucket_at_ms=bucket,
-                    payload_json={"quote_key": quote_key, "bucket_at_ms": bucket, "open": probabilities[0], "high": max(probabilities), "low": min(probabilities), "close": probabilities[-1], "mean": statistics.fmean(probabilities), "sample_count": len(probabilities)},
-                ))
+                await session.merge(
+                    WorldModelV2PredictionQuoteRollupRecord(
+                        rollup_id=f"{quote_key}:{bucket}",
+                        quote_key=quote_key,
+                        bucket_at_ms=bucket,
+                        payload_json={
+                            "quote_key": quote_key,
+                            "bucket_at_ms": bucket,
+                            "open": probabilities[0],
+                            "high": max(probabilities),
+                            "low": min(probabilities),
+                            "close": probabilities[-1],
+                            "mean": statistics.fmean(probabilities),
+                            "sample_count": len(probabilities),
+                        },
+                    )
+                )
             if rows:
-                await session.execute(delete(WorldModelV2PredictionQuoteHistoryRecord).where(WorldModelV2PredictionQuoteHistoryRecord.observed_at_ms < quote_cutoff))
-            deleted = await session.execute(delete(WorldModelV2SnapshotRecord).where(WorldModelV2SnapshotRecord.as_of_ms < snapshot_cutoff))
+                await session.execute(
+                    delete(WorldModelV2PredictionQuoteHistoryRecord).where(
+                        WorldModelV2PredictionQuoteHistoryRecord.observed_at_ms < quote_cutoff
+                    )
+                )
+            deleted = await session.execute(
+                delete(WorldModelV2SnapshotRecord).where(WorldModelV2SnapshotRecord.as_of_ms < snapshot_cutoff)
+            )
             await session.commit()
             return {"quote_history_compacted": len(rows), "snapshots_deleted": int(deleted.rowcount or 0)}
 
     async def upsert_world_model_v2_hypothesis(self, item: dict[str, Any]) -> None:
-        await self._merge_world_model_v2(WorldModelV2HypothesisRecord(hypothesis_id=str(item["hypothesis_id"]), market_key=str(item["market_key"]), as_of_ms=int(item["as_of_ms"]), payload_json=item))
+        await self._merge_world_model_v2(
+            WorldModelV2HypothesisRecord(
+                hypothesis_id=str(item["hypothesis_id"]),
+                market_key=str(item["market_key"]),
+                as_of_ms=int(item["as_of_ms"]),
+                payload_json=item,
+            )
+        )
 
     async def list_world_model_v2_hypotheses(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        return await self._list_world_model_v2(WorldModelV2HypothesisRecord, WorldModelV2HypothesisRecord.as_of_ms, limit)
+        return await self._list_world_model_v2(
+            WorldModelV2HypothesisRecord, WorldModelV2HypothesisRecord.as_of_ms, limit
+        )
 
     async def upsert_world_model_v2_asset_impact(self, item: dict[str, Any]) -> None:
-        await self._merge_world_model_v2(WorldModelV2AssetImpactRecord(impact_id=str(item["impact_id"]), instrument_id=str(item["instrument_id"]), factor_id=str(item["factor_id"]), as_of_ms=int(item["as_of_ms"]), payload_json=item))
+        await self._merge_world_model_v2(
+            WorldModelV2AssetImpactRecord(
+                impact_id=str(item["impact_id"]),
+                instrument_id=str(item["instrument_id"]),
+                factor_id=str(item["factor_id"]),
+                as_of_ms=int(item["as_of_ms"]),
+                payload_json=item,
+            )
+        )
 
-    async def list_world_model_v2_asset_impacts(self, *, limit: int = 200, instrument_id: str | None = None) -> list[dict[str, Any]]:
+    async def list_world_model_v2_asset_impacts(
+        self, *, limit: int = 200, instrument_id: str | None = None
+    ) -> list[dict[str, Any]]:
         filters = [WorldModelV2AssetImpactRecord.instrument_id == instrument_id.upper()] if instrument_id else []
-        return await self._list_world_model_v2(WorldModelV2AssetImpactRecord, WorldModelV2AssetImpactRecord.as_of_ms, limit, filters)
+        return await self._list_world_model_v2(
+            WorldModelV2AssetImpactRecord, WorldModelV2AssetImpactRecord.as_of_ms, limit, filters
+        )
 
     async def replace_world_model_v2_current_state(
         self,
@@ -5568,11 +6498,17 @@ class Repository:
             await session.commit()
 
     async def upsert_world_model_v2_snapshot(self, item: dict[str, Any]) -> None:
-        await self._merge_world_model_v2(WorldModelV2SnapshotRecord(snapshot_id=str(item["snapshot_id"]), as_of_ms=int(item["as_of_ms"]), payload_json=item))
+        await self._merge_world_model_v2(
+            WorldModelV2SnapshotRecord(
+                snapshot_id=str(item["snapshot_id"]), as_of_ms=int(item["as_of_ms"]), payload_json=item
+            )
+        )
 
     async def latest_world_model_v2_snapshot(self, *, as_of_ms: int | None = None) -> dict[str, Any] | None:
         filters = [WorldModelV2SnapshotRecord.as_of_ms <= as_of_ms] if as_of_ms is not None else []
-        items = await self._list_world_model_v2(WorldModelV2SnapshotRecord, WorldModelV2SnapshotRecord.as_of_ms, 1, filters)
+        items = await self._list_world_model_v2(
+            WorldModelV2SnapshotRecord, WorldModelV2SnapshotRecord.as_of_ms, 1, filters
+        )
         return items[0] if items else None
 
     async def get_world_model_v2_snapshot(self, snapshot_id: str) -> dict[str, Any] | None:
@@ -5582,24 +6518,40 @@ class Repository:
             item = await session.get(WorldModelV2SnapshotRecord, str(snapshot_id))
             return dict(item.payload_json or {}) if item is not None else None
 
-    async def list_world_model_v2_snapshots(self, *, limit: int = 100, start_ms: int | None = None, end_ms: int | None = None) -> list[dict[str, Any]]:
+    async def list_world_model_v2_snapshots(
+        self, *, limit: int = 100, start_ms: int | None = None, end_ms: int | None = None
+    ) -> list[dict[str, Any]]:
         filters: list[Any] = []
         if start_ms is not None:
             filters.append(WorldModelV2SnapshotRecord.as_of_ms >= start_ms)
         if end_ms is not None:
             filters.append(WorldModelV2SnapshotRecord.as_of_ms <= end_ms)
-        return await self._list_world_model_v2(WorldModelV2SnapshotRecord, WorldModelV2SnapshotRecord.as_of_ms, limit, filters)
+        return await self._list_world_model_v2(
+            WorldModelV2SnapshotRecord, WorldModelV2SnapshotRecord.as_of_ms, limit, filters
+        )
 
     async def upsert_world_model_v2_supervision(self, item: dict[str, Any]) -> None:
-        await self._merge_world_model_v2(WorldModelV2SupervisionRecord(supervision_id=str(item["supervision_id"]), target_type=str(item["target_type"]), target_id=str(item["target_id"]), created_at_ms=int(item["created_at_ms"]), payload_json=item))
+        await self._merge_world_model_v2(
+            WorldModelV2SupervisionRecord(
+                supervision_id=str(item["supervision_id"]),
+                target_type=str(item["target_type"]),
+                target_id=str(item["target_id"]),
+                created_at_ms=int(item["created_at_ms"]),
+                payload_json=item,
+            )
+        )
 
-    async def list_world_model_v2_supervision(self, *, limit: int = 100, target_type: str | None = None, target_id: str | None = None) -> list[dict[str, Any]]:
+    async def list_world_model_v2_supervision(
+        self, *, limit: int = 100, target_type: str | None = None, target_id: str | None = None
+    ) -> list[dict[str, Any]]:
         filters: list[Any] = []
         if target_type:
             filters.append(WorldModelV2SupervisionRecord.target_type == target_type)
         if target_id:
             filters.append(WorldModelV2SupervisionRecord.target_id == target_id)
-        return await self._list_world_model_v2(WorldModelV2SupervisionRecord, WorldModelV2SupervisionRecord.created_at_ms, limit, filters)
+        return await self._list_world_model_v2(
+            WorldModelV2SupervisionRecord, WorldModelV2SupervisionRecord.created_at_ms, limit, filters
+        )
 
     async def _merge_world_model_v2(self, item: Any) -> None:
         if self.sessionmaker is None:
@@ -5608,7 +6560,9 @@ class Repository:
             await session.merge(item)
             await session.commit()
 
-    async def _list_world_model_v2(self, model: Any, order_column: Any, limit: int, filters: list[Any] | None = None) -> list[dict[str, Any]]:
+    async def _list_world_model_v2(
+        self, model: Any, order_column: Any, limit: int, filters: list[Any] | None = None
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
@@ -5647,7 +6601,11 @@ class Repository:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(WorldModelAnnotationRecord).order_by(WorldModelAnnotationRecord.created_at_ms.desc()).limit(limit)
+            stmt = (
+                select(WorldModelAnnotationRecord)
+                .order_by(WorldModelAnnotationRecord.created_at_ms.desc())
+                .limit(limit)
+            )
             if target_type:
                 stmt = stmt.where(WorldModelAnnotationRecord.target_type == target_type)
             if target_id:
@@ -5718,7 +6676,11 @@ class Repository:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(PredictionMarketCalibrationRecord).order_by(PredictionMarketCalibrationRecord.created_at_ms.desc()).limit(limit)
+            stmt = (
+                select(PredictionMarketCalibrationRecord)
+                .order_by(PredictionMarketCalibrationRecord.created_at_ms.desc())
+                .limit(limit)
+            )
             if signal_id:
                 stmt = stmt.where(PredictionMarketCalibrationRecord.signal_id == signal_id)
             if venue:
@@ -5743,15 +6705,30 @@ class Repository:
             async with self.sessionmaker() as session:
                 item = await session.get(AlphaEventEvaluationRecord, str(evaluation["id"]))
                 if item is None:
-                    result = await session.execute(select(AlphaEventEvaluationRecord).where(AlphaEventEvaluationRecord.event_id == str(evaluation["event_id"]), AlphaEventEvaluationRecord.symbol == str(evaluation.get("symbol") or "").upper()))
+                    result = await session.execute(
+                        select(AlphaEventEvaluationRecord).where(
+                            AlphaEventEvaluationRecord.event_id == str(evaluation["event_id"]),
+                            AlphaEventEvaluationRecord.symbol == str(evaluation.get("symbol") or "").upper(),
+                        )
+                    )
                     item = result.scalar_one_or_none()
                 if item is None:
-                    item = AlphaEventEvaluationRecord(id=str(evaluation["id"]), event_id=str(evaluation["event_id"]), symbol=str(evaluation.get("symbol") or "").upper(), received_at_ms=int(evaluation.get("received_at_ms") or 0))
+                    item = AlphaEventEvaluationRecord(
+                        id=str(evaluation["id"]),
+                        event_id=str(evaluation["event_id"]),
+                        symbol=str(evaluation.get("symbol") or "").upper(),
+                        received_at_ms=int(evaluation.get("received_at_ms") or 0),
+                    )
                     session.add(item)
                 _apply_alpha_event_evaluation(item, evaluation)
                 await session.commit()
         except Exception as exc:  # pragma: no cover
-            log.warning("alpha_event_evaluation_upsert_failed", event_id=evaluation.get("event_id"), symbol=evaluation.get("symbol"), error=type(exc).__name__)
+            log.warning(
+                "alpha_event_evaluation_upsert_failed",
+                event_id=evaluation.get("event_id"),
+                symbol=evaluation.get("symbol"),
+                error=type(exc).__name__,
+            )
 
     async def upsert_alpha_event_evaluation_mark(self, mark: dict[str, Any]) -> None:
         if self.sessionmaker is None:
@@ -5760,15 +6737,34 @@ class Repository:
             async with self.sessionmaker() as session:
                 item = await session.get(AlphaEventEvaluationMarkRecord, str(mark["id"]))
                 if item is None:
-                    result = await session.execute(select(AlphaEventEvaluationMarkRecord).where(AlphaEventEvaluationMarkRecord.event_id == str(mark["event_id"]), AlphaEventEvaluationMarkRecord.symbol == str(mark.get("symbol") or "").upper(), AlphaEventEvaluationMarkRecord.horizon == str(mark.get("horizon") or "")))
+                    result = await session.execute(
+                        select(AlphaEventEvaluationMarkRecord).where(
+                            AlphaEventEvaluationMarkRecord.event_id == str(mark["event_id"]),
+                            AlphaEventEvaluationMarkRecord.symbol == str(mark.get("symbol") or "").upper(),
+                            AlphaEventEvaluationMarkRecord.horizon == str(mark.get("horizon") or ""),
+                        )
+                    )
                     item = result.scalar_one_or_none()
                 if item is None:
-                    item = AlphaEventEvaluationMarkRecord(id=str(mark["id"]), evaluation_id=str(mark["evaluation_id"]), event_id=str(mark["event_id"]), symbol=str(mark.get("symbol") or "").upper(), horizon=str(mark.get("horizon") or ""), due_at_ms=int(mark.get("due_at_ms") or 0), status=str(mark.get("status") or "pending"))
+                    item = AlphaEventEvaluationMarkRecord(
+                        id=str(mark["id"]),
+                        evaluation_id=str(mark["evaluation_id"]),
+                        event_id=str(mark["event_id"]),
+                        symbol=str(mark.get("symbol") or "").upper(),
+                        horizon=str(mark.get("horizon") or ""),
+                        due_at_ms=int(mark.get("due_at_ms") or 0),
+                        status=str(mark.get("status") or "pending"),
+                    )
                     session.add(item)
                 _apply_alpha_event_evaluation_mark(item, mark)
                 await session.commit()
         except Exception as exc:  # pragma: no cover
-            log.warning("alpha_event_evaluation_mark_upsert_failed", event_id=mark.get("event_id"), horizon=mark.get("horizon"), error=type(exc).__name__)
+            log.warning(
+                "alpha_event_evaluation_mark_upsert_failed",
+                event_id=mark.get("event_id"),
+                horizon=mark.get("horizon"),
+                error=type(exc).__name__,
+            )
 
     async def upsert_alpha_event_evaluation_marks(self, marks: list[dict[str, Any]]) -> None:
         for mark in marks:
@@ -5783,21 +6779,33 @@ class Repository:
                 return None
             return await self._alpha_event_evaluation_to_dict(session, item)
 
-    async def get_alpha_event_evaluation_by_event_id(self, event_id: str, symbol: str | None = None) -> list[dict[str, Any]]:
+    async def get_alpha_event_evaluation_by_event_id(
+        self, event_id: str, symbol: str | None = None
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(AlphaEventEvaluationRecord).where(AlphaEventEvaluationRecord.event_id == event_id).order_by(AlphaEventEvaluationRecord.symbol.asc())
+            stmt = (
+                select(AlphaEventEvaluationRecord)
+                .where(AlphaEventEvaluationRecord.event_id == event_id)
+                .order_by(AlphaEventEvaluationRecord.symbol.asc())
+            )
             if symbol:
                 stmt = stmt.where(AlphaEventEvaluationRecord.symbol == symbol.upper())
             result = await session.execute(stmt)
             return [await self._alpha_event_evaluation_to_dict(session, item) for item in result.scalars().all()]
 
-    async def list_alpha_event_evaluations(self, status: str | None = None, symbol: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_alpha_event_evaluations(
+        self, status: str | None = None, symbol: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(AlphaEventEvaluationRecord).order_by(AlphaEventEvaluationRecord.received_at_ms.desc()).limit(limit)
+            stmt = (
+                select(AlphaEventEvaluationRecord)
+                .order_by(AlphaEventEvaluationRecord.received_at_ms.desc())
+                .limit(limit)
+            )
             if status:
                 stmt = stmt.where(AlphaEventEvaluationRecord.status == status)
             if symbol:
@@ -5805,11 +6813,18 @@ class Repository:
             result = await session.execute(stmt)
             return [await self._alpha_event_evaluation_to_dict(session, item) for item in result.scalars().all()]
 
-    async def list_open_alpha_event_evaluations(self, symbol: str | None = None, limit: int = 1000) -> list[dict[str, Any]]:
+    async def list_open_alpha_event_evaluations(
+        self, symbol: str | None = None, limit: int = 1000
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(AlphaEventEvaluationRecord).where(AlphaEventEvaluationRecord.status.in_(["open", "partial"])).order_by(AlphaEventEvaluationRecord.received_at_ms.desc()).limit(limit)
+            stmt = (
+                select(AlphaEventEvaluationRecord)
+                .where(AlphaEventEvaluationRecord.status.in_(["open", "partial"]))
+                .order_by(AlphaEventEvaluationRecord.received_at_ms.desc())
+                .limit(limit)
+            )
             if symbol:
                 stmt = stmt.where(AlphaEventEvaluationRecord.symbol == symbol.upper())
             result = await session.execute(stmt)
@@ -5819,19 +6834,42 @@ class Repository:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            result = await session.execute(select(AlphaEventEvaluationMarkRecord).where(AlphaEventEvaluationMarkRecord.status == "pending", AlphaEventEvaluationMarkRecord.due_at_ms <= now_ms).order_by(AlphaEventEvaluationMarkRecord.due_at_ms.asc()).limit(limit))
+            result = await session.execute(
+                select(AlphaEventEvaluationMarkRecord)
+                .where(
+                    AlphaEventEvaluationMarkRecord.status == "pending",
+                    AlphaEventEvaluationMarkRecord.due_at_ms <= now_ms,
+                )
+                .order_by(AlphaEventEvaluationMarkRecord.due_at_ms.asc())
+                .limit(limit)
+            )
             return [_alpha_event_evaluation_mark_to_dict(item) for item in result.scalars().all()]
 
     async def record_memory_observation(self, observation: dict[str, Any]) -> str | None:
         if self.sessionmaker is None:
             return None
         async with self.sessionmaker() as session:
-            item = MemoryObservationRecord(id=str(observation["id"]), source_type=str(observation.get("source_type") or "event_evaluation"), source_id=str(observation.get("source_id") or ""), role=observation.get("role"), symbol=str(observation["symbol"]).upper() if observation.get("symbol") else None, signal_type=observation.get("signal_type"), market_regime=observation.get("market_regime"), observation=str(observation.get("observation") or ""), evidence_json=redact_secrets(list(observation.get("evidence") or [])), severity=str(observation.get("severity") or "info"), created_at_ms=int(observation.get("created_at_ms") or 0), metadata_json=redact_secrets(dict(observation.get("metadata") or {})))
+            item = MemoryObservationRecord(
+                id=str(observation["id"]),
+                source_type=str(observation.get("source_type") or "event_evaluation"),
+                source_id=str(observation.get("source_id") or ""),
+                role=observation.get("role"),
+                symbol=str(observation["symbol"]).upper() if observation.get("symbol") else None,
+                signal_type=observation.get("signal_type"),
+                market_regime=observation.get("market_regime"),
+                observation=str(observation.get("observation") or ""),
+                evidence_json=redact_secrets(list(observation.get("evidence") or [])),
+                severity=str(observation.get("severity") or "info"),
+                created_at_ms=int(observation.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(observation.get("metadata") or {})),
+            )
             session.add(item)
             await session.commit()
             return item.id
 
-    async def list_memory_observations(self, source_type: str | None = None, role: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_memory_observations(
+        self, source_type: str | None = None, role: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
@@ -5849,12 +6887,26 @@ class Repository:
         async with self.sessionmaker() as session:
             item = await session.get(CandidateLessonRecord, str(lesson["id"]))
             if item is None:
-                item = CandidateLessonRecord(id=str(lesson["id"]), lesson_type=str(lesson.get("lesson_type") or "role_behavior"), role=lesson.get("role"), scope_json={}, claim=str(lesson.get("claim") or ""), sample_size=int(lesson.get("sample_size") or 0), confidence=float(lesson.get("confidence") or 0), expected_future_behavior_change=str(lesson.get("expected_future_behavior_change") or ""), status=str(lesson.get("status") or "candidate"), created_at_ms=int(lesson.get("created_at_ms") or 0), expires_at_ms=int(lesson.get("expires_at_ms") or 0))
+                item = CandidateLessonRecord(
+                    id=str(lesson["id"]),
+                    lesson_type=str(lesson.get("lesson_type") or "role_behavior"),
+                    role=lesson.get("role"),
+                    scope_json={},
+                    claim=str(lesson.get("claim") or ""),
+                    sample_size=int(lesson.get("sample_size") or 0),
+                    confidence=float(lesson.get("confidence") or 0),
+                    expected_future_behavior_change=str(lesson.get("expected_future_behavior_change") or ""),
+                    status=str(lesson.get("status") or "candidate"),
+                    created_at_ms=int(lesson.get("created_at_ms") or 0),
+                    expires_at_ms=int(lesson.get("expires_at_ms") or 0),
+                )
                 session.add(item)
             _apply_candidate_lesson(item, lesson)
             await session.commit()
 
-    async def list_candidate_lessons(self, status: str | None = None, role: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_candidate_lessons(
+        self, status: str | None = None, role: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
@@ -5888,18 +6940,33 @@ class Repository:
     async def upsert_role_lesson(self, lesson: dict[str, Any]) -> None:
         await self._upsert_role_lesson_record(RoleLessonRecord, lesson)
 
-    async def _upsert_role_lesson_record(self, model: type[ShadowRoleLessonRecord] | type[RoleLessonRecord], lesson: dict[str, Any]) -> None:
+    async def _upsert_role_lesson_record(
+        self, model: type[ShadowRoleLessonRecord] | type[RoleLessonRecord], lesson: dict[str, Any]
+    ) -> None:
         if self.sessionmaker is None:
             return
         async with self.sessionmaker() as session:
             item = cast(ShadowRoleLessonRecord | RoleLessonRecord | None, await session.get(model, str(lesson["id"])))
             if item is None:
-                item = model(id=str(lesson["id"]), role=str(lesson.get("role") or "analyst"), lesson_type=str(lesson.get("lesson_type") or "role_behavior"), claim=str(lesson.get("claim") or ""), instruction=str(lesson.get("instruction") or ""), confidence=float(lesson.get("confidence") or 0), sample_size=int(lesson.get("sample_size") or 0), validation_status=str(lesson.get("validation_status") or "shadow"), created_at_ms=int(lesson.get("created_at_ms") or 0), expires_at_ms=int(lesson.get("expires_at_ms") or 0))
+                item = model(
+                    id=str(lesson["id"]),
+                    role=str(lesson.get("role") or "analyst"),
+                    lesson_type=str(lesson.get("lesson_type") or "role_behavior"),
+                    claim=str(lesson.get("claim") or ""),
+                    instruction=str(lesson.get("instruction") or ""),
+                    confidence=float(lesson.get("confidence") or 0),
+                    sample_size=int(lesson.get("sample_size") or 0),
+                    validation_status=str(lesson.get("validation_status") or "shadow"),
+                    created_at_ms=int(lesson.get("created_at_ms") or 0),
+                    expires_at_ms=int(lesson.get("expires_at_ms") or 0),
+                )
                 session.add(item)
             _apply_role_lesson(item, lesson)
             await session.commit()
 
-    async def list_role_lessons(self, role: str | None = None, status: str | None = "active", include_shadow: bool = False, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_role_lessons(
+        self, role: str | None = None, status: str | None = "active", include_shadow: bool = False, limit: int = 100
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
@@ -5910,7 +6977,10 @@ class Repository:
             if status:
                 stmt = stmt.where(model.validation_status == status)
             result = await session.execute(stmt)
-            return [_role_lesson_to_dict(cast(ShadowRoleLessonRecord | RoleLessonRecord, item)) for item in result.scalars().all()]
+            return [
+                _role_lesson_to_dict(cast(ShadowRoleLessonRecord | RoleLessonRecord, item))
+                for item in result.scalars().all()
+            ]
 
     async def get_role_lesson(self, lesson_id: str, include_shadow: bool = False) -> dict[str, Any] | None:
         if self.sessionmaker is None:
@@ -5939,16 +7009,31 @@ class Repository:
         async with self.sessionmaker() as session:
             item = await session.get(OperatorOutputLessonRecord, str(lesson["id"]))
             if item is None:
-                item = OperatorOutputLessonRecord(id=str(lesson["id"]), issue_or_pattern=str(lesson.get("issue_or_pattern") or ""), preferred_behavior=str(lesson.get("preferred_behavior") or ""), confidence=float(lesson.get("confidence") or 0), sample_size=int(lesson.get("sample_size") or 0), validation_status=str(lesson.get("validation_status") or "active"), created_at_ms=int(lesson.get("created_at_ms") or 0), expires_at_ms=int(lesson.get("expires_at_ms") or 0))
+                item = OperatorOutputLessonRecord(
+                    id=str(lesson["id"]),
+                    issue_or_pattern=str(lesson.get("issue_or_pattern") or ""),
+                    preferred_behavior=str(lesson.get("preferred_behavior") or ""),
+                    confidence=float(lesson.get("confidence") or 0),
+                    sample_size=int(lesson.get("sample_size") or 0),
+                    validation_status=str(lesson.get("validation_status") or "active"),
+                    created_at_ms=int(lesson.get("created_at_ms") or 0),
+                    expires_at_ms=int(lesson.get("expires_at_ms") or 0),
+                )
                 session.add(item)
             _apply_operator_lesson(item, lesson)
             await session.commit()
 
-    async def list_operator_output_lessons(self, status: str | None = "active", limit: int = 100) -> list[dict[str, Any]]:
+    async def list_operator_output_lessons(
+        self, status: str | None = "active", limit: int = 100
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(OperatorOutputLessonRecord).order_by(OperatorOutputLessonRecord.created_at_ms.desc()).limit(limit)
+            stmt = (
+                select(OperatorOutputLessonRecord)
+                .order_by(OperatorOutputLessonRecord.created_at_ms.desc())
+                .limit(limit)
+            )
             if status:
                 stmt = stmt.where(OperatorOutputLessonRecord.validation_status == status)
             result = await session.execute(stmt)
@@ -5958,12 +7043,24 @@ class Repository:
         if self.sessionmaker is None:
             return None
         async with self.sessionmaker() as session:
-            item = OperatorFeedbackRecord(id=str(feedback["id"]), source=str(feedback.get("source") or "api"), actor_id=feedback.get("actor_id"), target_type=str(feedback.get("target_type") or "bot"), target_id=str(feedback.get("target_id") or ""), rating=str(feedback.get("rating") or "unclear"), note=str(feedback.get("note") or ""), created_at_ms=int(feedback.get("created_at_ms") or 0), metadata_json=redact_secrets(dict(feedback.get("metadata") or {})))
+            item = OperatorFeedbackRecord(
+                id=str(feedback["id"]),
+                source=str(feedback.get("source") or "api"),
+                actor_id=feedback.get("actor_id"),
+                target_type=str(feedback.get("target_type") or "bot"),
+                target_id=str(feedback.get("target_id") or ""),
+                rating=str(feedback.get("rating") or "unclear"),
+                note=str(feedback.get("note") or ""),
+                created_at_ms=int(feedback.get("created_at_ms") or 0),
+                metadata_json=redact_secrets(dict(feedback.get("metadata") or {})),
+            )
             session.add(item)
             await session.commit()
             return item.id
 
-    async def list_operator_feedback(self, target_type: str | None = None, target_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_operator_feedback(
+        self, target_type: str | None = None, target_id: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
@@ -6022,8 +7119,12 @@ class Repository:
             item.affected_venues_json = [str(item) for item in packet.get("affected_venues") or []]
             item.expected_effect = str(packet.get("expected_effect") or "")
             item.known_risks_json = [str(item) for item in packet.get("known_risks") or []]
-            item.replay_results_json = redact_secrets(packet.get("replay_results")) if packet.get("replay_results") is not None else None
-            item.shadow_results_json = redact_secrets(packet.get("shadow_results")) if packet.get("shadow_results") is not None else None
+            item.replay_results_json = (
+                redact_secrets(packet.get("replay_results")) if packet.get("replay_results") is not None else None
+            )
+            item.shadow_results_json = (
+                redact_secrets(packet.get("shadow_results")) if packet.get("shadow_results") is not None else None
+            )
             item.reviewer_findings_json = redact_secrets(list(packet.get("reviewer_findings") or []))
             item.approval_requirements_json = [str(item) for item in packet.get("approval_requirements") or []]
             await session.commit()
@@ -6107,7 +7208,12 @@ class Repository:
 
     async def list_engine_replay_comparisons(self, limit: int = 100) -> list[dict[str, Any]]:
         items = await self.list_replay_results(limit=limit)
-        return [item for item in items if str(item.get("proposal_id") or "").startswith("engine:") or (item.get("metadata") or {}).get("artifact_type") == "engine_shadow_comparison"]
+        return [
+            item
+            for item in items
+            if str(item.get("proposal_id") or "").startswith("engine:")
+            or (item.get("metadata") or {}).get("artifact_type") == "engine_shadow_comparison"
+        ]
 
     async def latest_engine_replay_comparison(self) -> dict[str, Any] | None:
         items = await self.list_engine_replay_comparisons(limit=1)
@@ -6166,7 +7272,9 @@ class Repository:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(CandidateConfigDiffRecord).order_by(CandidateConfigDiffRecord.created_at_ms.desc()).limit(limit)
+            stmt = (
+                select(CandidateConfigDiffRecord).order_by(CandidateConfigDiffRecord.created_at_ms.desc()).limit(limit)
+            )
             if status:
                 stmt = stmt.where(CandidateConfigDiffRecord.status == status)
             result = await session.execute(stmt)
@@ -6197,7 +7305,22 @@ class Repository:
         async with self.sessionmaker() as session:
             item = await session.get(TuningProposalRecord, str(proposal["id"]))
             if item is None:
-                item = TuningProposalRecord(id=str(proposal["id"]), proposal_type=str(proposal.get("proposal_type") or "threshold_change"), status=str(proposal.get("status") or "draft"), title=str(proposal.get("title") or ""), summary=str(proposal.get("summary") or ""), expected_impact=str(proposal.get("expected_impact") or ""), risk_assessment=str(proposal.get("risk_assessment") or ""), blast_radius=str(proposal.get("blast_radius") or "low"), rollback_plan=str(proposal.get("rollback_plan") or ""), confidence=float(proposal.get("confidence") or 0), sample_size=int(proposal.get("sample_size") or 0), created_at_ms=int(proposal.get("created_at_ms") or 0), expires_at_ms=int(proposal.get("expires_at_ms") or 0), evaluation_window=str(proposal.get("evaluation_window") or "7d"))
+                item = TuningProposalRecord(
+                    id=str(proposal["id"]),
+                    proposal_type=str(proposal.get("proposal_type") or "threshold_change"),
+                    status=str(proposal.get("status") or "draft"),
+                    title=str(proposal.get("title") or ""),
+                    summary=str(proposal.get("summary") or ""),
+                    expected_impact=str(proposal.get("expected_impact") or ""),
+                    risk_assessment=str(proposal.get("risk_assessment") or ""),
+                    blast_radius=str(proposal.get("blast_radius") or "low"),
+                    rollback_plan=str(proposal.get("rollback_plan") or ""),
+                    confidence=float(proposal.get("confidence") or 0),
+                    sample_size=int(proposal.get("sample_size") or 0),
+                    created_at_ms=int(proposal.get("created_at_ms") or 0),
+                    expires_at_ms=int(proposal.get("expires_at_ms") or 0),
+                    evaluation_window=str(proposal.get("evaluation_window") or "7d"),
+                )
                 session.add(item)
             _apply_tuning_proposal(item, proposal)
             await session.commit()
@@ -6234,7 +7357,18 @@ class Repository:
         async with self.sessionmaker() as session:
             item = await session.get(TokenCapitalSnapshotRecord, str(snapshot["id"]))
             if item is None:
-                item = TokenCapitalSnapshotRecord(id=str(snapshot["id"]), timestamp_ms=int(snapshot.get("timestamp_ms") or 0), window=str(snapshot.get("window") or "daily"), total_score=float(snapshot.get("total_score") or 0), risk_adjusted_performance_score=float(snapshot.get("risk_adjusted_performance_score") or 0), signal_quality_score=float(snapshot.get("signal_quality_score") or 0), memory_compounding_score=float(snapshot.get("memory_compounding_score") or 0), risk_discipline_score=float(snapshot.get("risk_discipline_score") or 0), operator_communication_score=float(snapshot.get("operator_communication_score") or 0), reliability_score=float(snapshot.get("reliability_score") or 0))
+                item = TokenCapitalSnapshotRecord(
+                    id=str(snapshot["id"]),
+                    timestamp_ms=int(snapshot.get("timestamp_ms") or 0),
+                    window=str(snapshot.get("window") or "daily"),
+                    total_score=float(snapshot.get("total_score") or 0),
+                    risk_adjusted_performance_score=float(snapshot.get("risk_adjusted_performance_score") or 0),
+                    signal_quality_score=float(snapshot.get("signal_quality_score") or 0),
+                    memory_compounding_score=float(snapshot.get("memory_compounding_score") or 0),
+                    risk_discipline_score=float(snapshot.get("risk_discipline_score") or 0),
+                    operator_communication_score=float(snapshot.get("operator_communication_score") or 0),
+                    reliability_score=float(snapshot.get("reliability_score") or 0),
+                )
                 session.add(item)
             item.hard_gate_penalties_json = redact_secrets(list(snapshot.get("hard_gate_penalties") or []))
             item.component_details_json = redact_secrets(dict(snapshot.get("component_details") or {}))
@@ -6246,7 +7380,9 @@ class Repository:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            stmt = select(TokenCapitalSnapshotRecord).order_by(TokenCapitalSnapshotRecord.timestamp_ms.desc()).limit(limit)
+            stmt = (
+                select(TokenCapitalSnapshotRecord).order_by(TokenCapitalSnapshotRecord.timestamp_ms.desc()).limit(limit)
+            )
             if window:
                 stmt = stmt.where(TokenCapitalSnapshotRecord.window == window)
             result = await session.execute(stmt)
@@ -6264,7 +7400,13 @@ class Repository:
             result = await session.execute(stmt)
             item = cast(DailyReportRecord | WeeklyReportRecord | None, result.scalar_one_or_none())
             if item is None:
-                common = dict(id=str(report["id"]), period_start_ms=int(report.get("period_start_ms") or 0), period_end_ms=int(report.get("period_end_ms") or 0), generated_at_ms=int(report.get("generated_at_ms") or 0), summary=str(report.get("summary") or ""))
+                common = dict(
+                    id=str(report["id"]),
+                    period_start_ms=int(report.get("period_start_ms") or 0),
+                    period_end_ms=int(report.get("period_end_ms") or 0),
+                    generated_at_ms=int(report.get("generated_at_ms") or 0),
+                    summary=str(report.get("summary") or ""),
+                )
                 item = model(**common, **{key_field: key_value})
                 session.add(item)
             item.period_start_ms = int(report.get("period_start_ms") or item.period_start_ms)
@@ -6285,7 +7427,10 @@ class Repository:
         model = WeeklyReportRecord if report_type == "weekly" else DailyReportRecord
         async with self.sessionmaker() as session:
             result = await session.execute(select(model).order_by(model.generated_at_ms.desc()).limit(limit))
-            return [_autonomy_report_to_dict(cast(DailyReportRecord | WeeklyReportRecord, item), report_type) for item in result.scalars().all()]
+            return [
+                _autonomy_report_to_dict(cast(DailyReportRecord | WeeklyReportRecord, item), report_type)
+                for item in result.scalars().all()
+            ]
 
     async def get_autonomy_report(self, report_type: str, key: str) -> dict[str, Any] | None:
         if self.sessionmaker is None:
@@ -6297,14 +7442,24 @@ class Repository:
             item = cast(DailyReportRecord | WeeklyReportRecord | None, result.scalar_one_or_none())
             return _autonomy_report_to_dict(item, report_type) if item is not None else None
 
-    async def create_or_get_paper_portfolio(self, name: str, initial_equity_usd: float, mode: str = "observation") -> dict[str, Any]:
+    async def create_or_get_paper_portfolio(
+        self, name: str, initial_equity_usd: float, mode: str = "observation"
+    ) -> dict[str, Any]:
         if self.sessionmaker is None:
             raise RuntimeError("repository disabled")
         async with self.sessionmaker() as session:
             result = await session.execute(select(PaperPortfolioRecord).where(PaperPortfolioRecord.name == name))
             item = result.scalar_one_or_none()
             if item is None:
-                item = PaperPortfolioRecord(name=name, status="active", initial_equity_usd=initial_equity_usd, cash_usd=initial_equity_usd, realized_pnl_usd=0.0, metadata_json={"mode": mode}, updated_at=datetime.now(UTC))
+                item = PaperPortfolioRecord(
+                    name=name,
+                    status="active",
+                    initial_equity_usd=initial_equity_usd,
+                    cash_usd=initial_equity_usd,
+                    realized_pnl_usd=0.0,
+                    metadata_json={"mode": mode},
+                    updated_at=datetime.now(UTC),
+                )
                 session.add(item)
                 await session.flush()
             await session.commit()
@@ -6316,7 +7471,17 @@ class Repository:
         async with self.sessionmaker() as session:
             item = await session.get(PaperOrderRecord, str(order["id"]))
             if item is None:
-                item = PaperOrderRecord(id=str(order["id"]), portfolio_id=str(order["portfolio_id"]), symbol=str(order.get("symbol") or "").upper(), side=str(order.get("side") or "long"), order_type=str(order.get("order_type") or "market"), status=str(order.get("status") or "new"), quantity=float(order.get("quantity") or 0), fee_bps=float(order.get("fee_bps") or 0), slippage_bps=float(order.get("slippage_bps") or 0))
+                item = PaperOrderRecord(
+                    id=str(order["id"]),
+                    portfolio_id=str(order["portfolio_id"]),
+                    symbol=str(order.get("symbol") or "").upper(),
+                    side=str(order.get("side") or "long"),
+                    order_type=str(order.get("order_type") or "market"),
+                    status=str(order.get("status") or "new"),
+                    quantity=float(order.get("quantity") or 0),
+                    fee_bps=float(order.get("fee_bps") or 0),
+                    slippage_bps=float(order.get("slippage_bps") or 0),
+                )
                 session.add(item)
             item.status = str(order.get("status") or item.status)
             item.requested_px = order.get("requested_px")
@@ -6346,7 +7511,20 @@ class Repository:
             existing = await session.get(PaperFillRecord, str(fill["id"]))
             if existing is None:
                 fee_usd = float(fill.get("fee_usd") or 0)
-                session.add(PaperFillRecord(id=str(fill["id"]), order_id=str(fill["order_id"]), portfolio_id=str(fill["portfolio_id"]), symbol=str(fill.get("symbol") or "").upper(), side=str(fill.get("side") or "long"), quantity=float(fill.get("quantity") or 0), price=float(fill.get("price") or 0), fee_usd=fee_usd, slippage_usd=float(fill.get("slippage_usd") or 0), metadata_json=redact_secrets(dict(fill.get("metadata") or {}))))
+                session.add(
+                    PaperFillRecord(
+                        id=str(fill["id"]),
+                        order_id=str(fill["order_id"]),
+                        portfolio_id=str(fill["portfolio_id"]),
+                        symbol=str(fill.get("symbol") or "").upper(),
+                        side=str(fill.get("side") or "long"),
+                        quantity=float(fill.get("quantity") or 0),
+                        price=float(fill.get("price") or 0),
+                        fee_usd=fee_usd,
+                        slippage_usd=float(fill.get("slippage_usd") or 0),
+                        metadata_json=redact_secrets(dict(fill.get("metadata") or {})),
+                    )
+                )
                 portfolio = await session.get(PaperPortfolioRecord, str(fill["portfolio_id"]))
                 if portfolio is not None:
                     portfolio.cash_usd -= fee_usd
@@ -6359,7 +7537,17 @@ class Repository:
         async with self.sessionmaker() as session:
             item = await session.get(PaperPositionRecord, str(position["id"]))
             if item is None:
-                item = PaperPositionRecord(id=str(position["id"]), portfolio_id=str(position["portfolio_id"]), symbol=str(position.get("symbol") or "").upper(), side=str(position.get("side") or "long"), status=str(position.get("status") or "open"), quantity=float(position.get("quantity") or 0), avg_entry_px=float(position.get("avg_entry_px") or 0), stop_px=float(position.get("stop_px") or 0), opened_at=_datetime_from_ms(int(position.get("opened_at_ms") or 0)))
+                item = PaperPositionRecord(
+                    id=str(position["id"]),
+                    portfolio_id=str(position["portfolio_id"]),
+                    symbol=str(position.get("symbol") or "").upper(),
+                    side=str(position.get("side") or "long"),
+                    status=str(position.get("status") or "open"),
+                    quantity=float(position.get("quantity") or 0),
+                    avg_entry_px=float(position.get("avg_entry_px") or 0),
+                    stop_px=float(position.get("stop_px") or 0),
+                    opened_at=_datetime_from_ms(int(position.get("opened_at_ms") or 0)),
+                )
                 session.add(item)
             item.status = str(position.get("status") or item.status)
             item.mark_px = position.get("mark_px")
@@ -6370,7 +7558,9 @@ class Repository:
             item.metadata_json = redact_secrets(dict(position.get("metadata") or {}))
             await session.commit()
 
-    async def close_paper_position(self, position_id: str, close_px: float, realized_pnl_usd: float, reason: str, timestamp_ms: int) -> None:
+    async def close_paper_position(
+        self, position_id: str, close_px: float, realized_pnl_usd: float, reason: str, timestamp_ms: int
+    ) -> None:
         if self.sessionmaker is None:
             return
         async with self.sessionmaker() as session:
@@ -6403,14 +7593,18 @@ class Repository:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            result = await session.execute(select(PaperOrderRecord).order_by(PaperOrderRecord.created_at.desc()).limit(limit))
+            result = await session.execute(
+                select(PaperOrderRecord).order_by(PaperOrderRecord.created_at.desc()).limit(limit)
+            )
             return [_paper_order_to_dict(item) for item in result.scalars().all()]
 
     async def list_paper_fills(self, limit: int = 100) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            result = await session.execute(select(PaperFillRecord).order_by(PaperFillRecord.created_at.desc()).limit(limit))
+            result = await session.execute(
+                select(PaperFillRecord).order_by(PaperFillRecord.created_at.desc()).limit(limit)
+            )
             return [_paper_fill_to_dict(item) for item in result.scalars().all()]
 
     async def record_portfolio_snapshot(self, snapshot: dict[str, Any]) -> None:
@@ -6419,7 +7613,23 @@ class Repository:
         async with self.sessionmaker() as session:
             existing = await session.get(PortfolioSnapshotRecord, str(snapshot["id"]))
             if existing is None:
-                session.add(PortfolioSnapshotRecord(id=str(snapshot["id"]), portfolio_id=str(snapshot["portfolio_id"]), timestamp_ms=int(snapshot.get("timestamp_ms") or 0), cash_usd=float(snapshot.get("cash_usd") or 0), equity_usd=float(snapshot.get("equity_usd") or 0), gross_exposure_usd=float(snapshot.get("gross_exposure_usd") or 0), net_exposure_usd=float(snapshot.get("net_exposure_usd") or 0), realized_pnl_usd=float(snapshot.get("realized_pnl_usd") or 0), unrealized_pnl_usd=float(snapshot.get("unrealized_pnl_usd") or 0), total_pnl_usd=float(snapshot.get("total_pnl_usd") or 0), drawdown_pct=float(snapshot.get("drawdown_pct") or 0), sharpe=snapshot.get("sharpe"), metrics_json=redact_secrets(dict(snapshot.get("metrics") or {}))))
+                session.add(
+                    PortfolioSnapshotRecord(
+                        id=str(snapshot["id"]),
+                        portfolio_id=str(snapshot["portfolio_id"]),
+                        timestamp_ms=int(snapshot.get("timestamp_ms") or 0),
+                        cash_usd=float(snapshot.get("cash_usd") or 0),
+                        equity_usd=float(snapshot.get("equity_usd") or 0),
+                        gross_exposure_usd=float(snapshot.get("gross_exposure_usd") or 0),
+                        net_exposure_usd=float(snapshot.get("net_exposure_usd") or 0),
+                        realized_pnl_usd=float(snapshot.get("realized_pnl_usd") or 0),
+                        unrealized_pnl_usd=float(snapshot.get("unrealized_pnl_usd") or 0),
+                        total_pnl_usd=float(snapshot.get("total_pnl_usd") or 0),
+                        drawdown_pct=float(snapshot.get("drawdown_pct") or 0),
+                        sharpe=snapshot.get("sharpe"),
+                        metrics_json=redact_secrets(dict(snapshot.get("metrics") or {})),
+                    )
+                )
                 await session.commit()
 
     async def get_latest_portfolio_snapshot(self, portfolio_id: str | None = None) -> dict[str, Any] | None:
@@ -6445,11 +7655,15 @@ class Repository:
 
     # --- TradFi / equity paper portfolio --------------------------------------
 
-    async def create_or_get_equity_paper_portfolio(self, name: str, initial_equity_usd: float, mode: str = "equity_paper") -> dict[str, Any]:
+    async def create_or_get_equity_paper_portfolio(
+        self, name: str, initial_equity_usd: float, mode: str = "equity_paper"
+    ) -> dict[str, Any]:
         if self.sessionmaker is None:
             raise RuntimeError("repository disabled")
         async with self.sessionmaker() as session:
-            result = await session.execute(select(EquityPaperPortfolioRecord).where(EquityPaperPortfolioRecord.name == name))
+            result = await session.execute(
+                select(EquityPaperPortfolioRecord).where(EquityPaperPortfolioRecord.name == name)
+            )
             item = result.scalar_one_or_none()
             if item is None:
                 item = EquityPaperPortfolioRecord(
@@ -6607,14 +7821,18 @@ class Repository:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            result = await session.execute(select(EquityPaperOrderRecord).order_by(EquityPaperOrderRecord.created_at.desc()).limit(limit))
+            result = await session.execute(
+                select(EquityPaperOrderRecord).order_by(EquityPaperOrderRecord.created_at.desc()).limit(limit)
+            )
             return [_equity_paper_order_to_dict(item) for item in result.scalars().all()]
 
     async def list_equity_paper_fills(self, limit: int = 100) -> list[dict[str, Any]]:
         if self.sessionmaker is None:
             return []
         async with self.sessionmaker() as session:
-            result = await session.execute(select(EquityPaperFillRecord).order_by(EquityPaperFillRecord.created_at.desc()).limit(limit))
+            result = await session.execute(
+                select(EquityPaperFillRecord).order_by(EquityPaperFillRecord.created_at.desc()).limit(limit)
+            )
             return [_equity_paper_fill_to_dict(item) for item in result.scalars().all()]
 
     async def record_equity_options_flow_event(self, event: dict[str, Any]) -> None:
@@ -6641,8 +7859,15 @@ class Repository:
                 await session.commit()
 
     async def _tracker_to_dict(self, session: AsyncSession, tracker: PositionTracker) -> dict[str, Any]:
-        levels_result = await session.execute(select(TrackedLevel).where(TrackedLevel.tracker_id == tracker.id).order_by(TrackedLevel.created_at.asc()))
-        events_result = await session.execute(select(TrackingEvent).where(TrackingEvent.tracker_id == tracker.id).order_by(TrackingEvent.created_at.desc()).limit(20))
+        levels_result = await session.execute(
+            select(TrackedLevel).where(TrackedLevel.tracker_id == tracker.id).order_by(TrackedLevel.created_at.asc())
+        )
+        events_result = await session.execute(
+            select(TrackingEvent)
+            .where(TrackingEvent.tracker_id == tracker.id)
+            .order_by(TrackingEvent.created_at.desc())
+            .limit(20)
+        )
         return {
             "id": tracker.id,
             "proposal_id": tracker.proposal_id,
@@ -6672,8 +7897,14 @@ class Repository:
             "updated_at": tracker.updated_at.isoformat() if tracker.updated_at else None,
         }
 
-    async def _alpha_event_evaluation_to_dict(self, session: AsyncSession, item: AlphaEventEvaluationRecord) -> dict[str, Any]:
-        result = await session.execute(select(AlphaEventEvaluationMarkRecord).where(AlphaEventEvaluationMarkRecord.evaluation_id == item.id).order_by(AlphaEventEvaluationMarkRecord.due_at_ms.asc()))
+    async def _alpha_event_evaluation_to_dict(
+        self, session: AsyncSession, item: AlphaEventEvaluationRecord
+    ) -> dict[str, Any]:
+        result = await session.execute(
+            select(AlphaEventEvaluationMarkRecord)
+            .where(AlphaEventEvaluationMarkRecord.evaluation_id == item.id)
+            .order_by(AlphaEventEvaluationMarkRecord.due_at_ms.asc())
+        )
         data = _alpha_event_evaluation_to_dict(item)
         data["marks"] = [_alpha_event_evaluation_mark_to_dict(mark) for mark in result.scalars().all()]
         return data
@@ -6782,7 +8013,9 @@ def _apply_role_lesson(item: ShadowRoleLessonRecord | RoleLessonRecord, data: di
     item.activated_at_ms = data.get("activated_at_ms")
     item.expires_at_ms = int(data.get("expires_at_ms") or item.expires_at_ms)
     item.last_revalidated_at_ms = data.get("last_revalidated_at_ms")
-    item.memory_status = str(data.get("memory_status") or data.get("metadata", {}).get("memory_status") or item.memory_status)
+    item.memory_status = str(
+        data.get("memory_status") or data.get("metadata", {}).get("memory_status") or item.memory_status
+    )
     item.allowed_contexts_json = list(data.get("allowed_contexts") or [])
     item.forbidden_contexts_json = list(data.get("forbidden_contexts") or [])
     item.promotion_history_json = redact_secrets(list(data.get("promotion_history") or []))
@@ -7158,11 +8391,15 @@ def _default_worker_command_idempotency_key(target_role: str, command_type: str,
         if value is None or value == "":
             return None
         values[field] = value
-    digest = hashlib.sha256(json.dumps(values, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()[:24]
+    digest = hashlib.sha256(
+        json.dumps(values, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()[:24]
     return f"{target_role}:{command_type}:{digest}"
 
 
-def _append_command_history(metadata: dict[str, Any], event: str, *, at_ms: int, actor: str | None = None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+def _append_command_history(
+    metadata: dict[str, Any], event: str, *, at_ms: int, actor: str | None = None, extra: dict[str, Any] | None = None
+) -> dict[str, Any]:
     clean = dict(metadata)
     history = list(clean.get("history") or [])
     item: dict[str, Any] = {"event": event, "at_ms": int(at_ms)}
@@ -8075,7 +9312,9 @@ def _paper_portfolio_to_dict(item: PaperPortfolioRecord) -> dict[str, Any]:
         "realized_pnl_usd": item.realized_pnl_usd,
         "metadata": item.metadata_json,
         "created_at_ms": _ms_from_datetime(item.created_at) or int(datetime.now(UTC).timestamp() * 1000),
-        "updated_at_ms": _ms_from_datetime(item.updated_at) or _ms_from_datetime(item.created_at) or int(datetime.now(UTC).timestamp() * 1000),
+        "updated_at_ms": _ms_from_datetime(item.updated_at)
+        or _ms_from_datetime(item.created_at)
+        or int(datetime.now(UTC).timestamp() * 1000),
     }
 
 

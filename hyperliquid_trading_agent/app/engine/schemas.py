@@ -49,6 +49,15 @@ PositionThesisState = Literal[
     "under_review",
 ]
 ModelVersionStatus = Literal["candidate", "shadow", "approved", "deprecated"]
+StrategyPromotionState = Literal["frozen", "research_only", "paper_approved", "retired"]
+AllocationScope = Literal["research", "paper_eligible", "defensive", "unknown"]
+ExecutionCostQuality = Literal[
+    "measured",
+    "configured_ceiling",
+    "top_of_book_only",
+    "stale",
+    "unavailable",
+]
 ReplayMode = Literal["signal", "decision", "execution"]
 ReplayStatus = Literal["passed", "advisory_pass", "failed", "insufficient_data", "audit_only"]
 KillSwitchScope = Literal["strategy", "asset", "venue", "account", "global", "human_emergency", "deadman"]
@@ -259,6 +268,34 @@ class StrategySpec(BaseModel):
         return sorted({item.strip() for item in value if item and item.strip()})
 
 
+class StrategyVersionPolicy(BaseModel):
+    """Runtime eligibility for one exact strategy implementation version.
+
+    Missing versions are deliberately treated as ``research_only`` by the policy
+    service.  A strategy id alone is never sufficient promotion authority.
+    """
+
+    strategy_version_key: str
+    strategy_id: str
+    strategy_version: str
+    state: StrategyPromotionState
+    reason_codes: list[str] = Field(default_factory=list)
+    effective_from_ms: int
+    effective_until_ms: int | None = None
+    created_at_ms: int
+    updated_at_ms: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_key_and_window(self) -> Self:
+        expected = f"{self.strategy_id}@{self.strategy_version}"
+        if self.strategy_version_key != expected:
+            raise ValueError("strategy_version_key must be '<strategy_id>@<strategy_version>'")
+        if self.effective_until_ms is not None and self.effective_until_ms <= self.effective_from_ms:
+            raise ValueError("effective_until_ms must be after effective_from_ms")
+        return self
+
+
 class RegimeVector(BaseModel):
     """Probabilistic regime snapshot replacing the legacy single risk-regime label."""
 
@@ -391,6 +428,43 @@ class CandidateBookSnapshot(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ExecutionCostQuote(BaseModel):
+    """Point-in-time, size-specific simulated execution cost evidence."""
+
+    quote_id: str
+    candidate_id: str
+    venue_id: str
+    instrument_id: str
+    side: OrderSide
+    requested_size: float = Field(gt=0)
+    requested_notional_usd: float = Field(gt=0)
+    reference_price: float = Field(gt=0)
+    simulated_fill_size: float = Field(default=0.0, ge=0.0)
+    simulated_avg_fill_px: float | None = Field(default=None, gt=0)
+    fee_bps: float = Field(default=0.0, ge=0.0)
+    spread_cost_bps: float = Field(default=0.0, ge=0.0)
+    slippage_bps: float = Field(default=0.0, ge=0.0)
+    market_impact_bps: float = Field(default=0.0, ge=0.0)
+    latency_slippage_bps: float = Field(default=0.0, ge=0.0)
+    total_execution_cost_bps: float = Field(default=0.0, ge=0.0)
+    cost_quality: ExecutionCostQuality
+    book_snapshot_id: str | None = None
+    fee_schedule_id: str | None = None
+    simulation_model_version: str = "depth_walk_v1"
+    book_as_of_ms: int | None = None
+    created_at_ms: int
+    reason_codes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_fill(self) -> Self:
+        if self.simulated_fill_size > self.requested_size:
+            raise ValueError("simulated_fill_size cannot exceed requested_size")
+        if self.simulated_fill_size > 0 and self.simulated_avg_fill_px is None:
+            raise ValueError("simulated fills require simulated_avg_fill_px")
+        return self
+
+
 class EVEstimate(BaseModel):
     estimate_id: str
     candidate_id: str
@@ -407,10 +481,12 @@ class EVEstimate(BaseModel):
     expected_market_impact_bps: float = Field(ge=0.0)
     expected_funding_cost_bps: float
     tail_loss_bps: float = Field(ge=0.0)
+    gross_ev_bps: float = 0.0
     net_ev_bps: float
     risk_adjusted_utility: float
     uncertainty: float = Field(ge=0.0, le=1.0)
     calibration_bucket: str
+    execution_cost_quote_id: str | None = None
     created_at_ms: int
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -427,6 +503,7 @@ class AllocationDecision(BaseModel):
     candidate_id: str
     candidate_book_id: str | None = None
     status: AllocationDecisionStatus
+    allocation_scope: AllocationScope = "unknown"
     allocated_size: float = Field(default=0.0, ge=0.0)
     allocated_notional_usd: float = Field(default=0.0, ge=0.0)
     risk_usd: float = Field(default=0.0, ge=0.0)
@@ -439,7 +516,9 @@ class AllocationDecision(BaseModel):
 
     @model_validator(mode="after")
     def _validate_skip_size(self) -> Self:
-        if self.status in {"skip", "risk_rejected"} and (self.allocated_size or self.allocated_notional_usd or self.risk_usd):
+        if self.status in {"skip", "risk_rejected"} and (
+            self.allocated_size or self.allocated_notional_usd or self.risk_usd
+        ):
             raise ValueError("skipped/risk-rejected allocations cannot carry size or risk")
         return self
 
@@ -514,6 +593,10 @@ class CandidateOutcomeAttribution(BaseModel):
     slippage_bps: float = 0.0
     funding_bps: float = 0.0
     net_return_bps: float = 0.0
+    execution_adjusted_return_bps: float | None = None
+    execution_cost_quote_id: str | None = None
+    execution_report_id: str | None = None
+    execution_cost_quality: ExecutionCostQuality = "unavailable"
     realized_r: float = 0.0
     mfe_bps: float = 0.0
     mae_bps: float = 0.0
@@ -835,6 +918,15 @@ class ExecutionReport(BaseModel):
     fees_usd: float = Field(default=0.0, ge=0.0)
     slippage_bps: float = Field(default=0.0, ge=0.0)
     market_impact_bps: float | None = Field(default=None, ge=0.0)
+    execution_cost_quote_id: str | None = None
+    fee_bps: float = Field(default=0.0, ge=0.0)
+    spread_cost_bps: float = Field(default=0.0, ge=0.0)
+    latency_slippage_bps: float = Field(default=0.0, ge=0.0)
+    total_execution_cost_bps: float = Field(default=0.0, ge=0.0)
+    book_snapshot_id: str | None = None
+    fee_schedule_id: str | None = None
+    simulation_model_version: str | None = None
+    cost_quality: ExecutionCostQuality = "unavailable"
     adapter: Literal["paper", "shadow"]
     assumptions: dict[str, Any] = Field(default_factory=dict)
     created_at_ms: int

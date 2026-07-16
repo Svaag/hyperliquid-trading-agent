@@ -1,10 +1,28 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from typing import Any
 
 from hyperliquid_trading_agent.app.engine.event_ledger import now_ms
-from hyperliquid_trading_agent.app.engine.schemas import AllocationDecision, AlphaCandidate, EVEstimate, RegimeVector
+from hyperliquid_trading_agent.app.engine.schemas import (
+    AllocationDecision,
+    AllocationScope,
+    AlphaCandidate,
+    EVEstimate,
+    RegimeVector,
+)
+
+
+@dataclass(frozen=True)
+class SizingProposal:
+    allocated_size: float
+    allocated_notional_usd: float
+    risk_usd: float
+    max_size_multiplier: float
+    constraints: dict[str, Any]
+    reason_codes: list[str]
+    metadata: dict[str, Any]
 
 
 class PortfolioAllocator:
@@ -25,42 +43,27 @@ class PortfolioAllocator:
         self.news_risk_overlay_mode = str(news_risk_overlay_mode)
         self.repository = repository
 
-    async def allocate(
+    def propose_size(
         self,
         candidate: AlphaCandidate,
-        ev: EVEstimate,
         *,
         regime: RegimeVector | None = None,
         portfolio_state: dict[str, Any] | None = None,
-        candidate_book_id: str | None = None,
-    ) -> AllocationDecision:
+    ) -> SizingProposal:
+        """Compute risk size before EV so execution cost can be quoted at that size."""
+
         portfolio_state = portfolio_state or {}
         equity = float(portfolio_state.get("equity_usd") or portfolio_state.get("initial_equity_usd") or 100_000)
-        reason_codes: list[str] = []
-        status = "allocate"
-        if candidate.side == "flat":
-            reason_codes.append("defensive_flat_no_trade")
-            status = "skip"
-        if ev.net_ev_bps < self.min_net_ev_bps:
-            reason_codes.append("net_ev_below_minimum")
-            status = "skip"
-        if ev.risk_adjusted_utility < self.min_risk_adjusted_utility:
-            reason_codes.append("risk_adjusted_utility_below_minimum")
-            status = "skip"
-        if regime is not None and not _strategy_allowed(candidate.strategy_id, regime):
-            reason_codes.append("regime_disallows_strategy")
-            status = "skip"
         stop_loss_bps = max(abs(candidate.proposed_entry - candidate.stop) / candidate.proposed_entry * 10_000, 1.0)
         risk_budget = equity * self.risk_pct_per_trade / 100.0
         risk_sized_notional = risk_budget / (stop_loss_bps / 10_000.0)
         single_name_cap = equity * self.max_single_name_exposure_pct / 100.0
         allocated_notional = min(risk_sized_notional, single_name_cap)
         max_size_multiplier = 1.0
+        reason_codes: list[str] = []
         news_mode = regime.news_risk_mode if regime is not None else "neutral"
         observed_news_mode = (
-            str(regime.metadata.get("observed_news_risk_mode") or news_mode)
-            if regime is not None
-            else "neutral"
+            str(regime.metadata.get("observed_news_risk_mode") or news_mode) if regime is not None else "neutral"
         )
         shadow_adjustment: dict[str, Any] = {
             "mode": observed_news_mode,
@@ -72,7 +75,8 @@ class PortfolioAllocator:
             shadow_adjustment["would_block"] = True
             if self.news_risk_overlay_mode == "active":
                 reason_codes.append("news_shock_blocks_new_risk")
-                status = "skip"
+                allocated_notional = 0.0
+                risk_budget = 0.0
         elif observed_news_mode == "risk_off" and candidate.side == "long":
             shadow_adjustment["would_size_multiplier"] = 0.5
             if self.news_risk_overlay_mode == "active":
@@ -80,16 +84,8 @@ class PortfolioAllocator:
                 allocated_notional *= 0.5
                 risk_budget *= 0.5
                 reason_codes.append("news_risk_off_long_size_reduction")
-        if status == "skip":
-            allocated_notional = 0.0
-            risk_budget = 0.0
         size = allocated_notional / candidate.proposed_entry if candidate.proposed_entry > 0 else 0.0
-        digest = hashlib.sha1(f"{candidate.candidate_id}:{ev.estimate_id}:{candidate_book_id}".encode()).hexdigest()[:24]
-        allocation = AllocationDecision(
-            allocation_id="alloc_" + digest,
-            candidate_id=candidate.candidate_id,
-            candidate_book_id=candidate_book_id,
-            status=status,  # type: ignore[arg-type]
+        return SizingProposal(
             allocated_size=size,
             allocated_notional_usd=allocated_notional,
             risk_usd=risk_budget,
@@ -105,8 +101,60 @@ class PortfolioAllocator:
                 "news_risk_overlay_mode": self.news_risk_overlay_mode,
             },
             reason_codes=reason_codes,
-            created_at_ms=now_ms(),
             metadata={"news_risk_overlay": shadow_adjustment},
+        )
+
+    async def allocate(
+        self,
+        candidate: AlphaCandidate,
+        ev: EVEstimate,
+        *,
+        regime: RegimeVector | None = None,
+        portfolio_state: dict[str, Any] | None = None,
+        candidate_book_id: str | None = None,
+        sizing: SizingProposal | None = None,
+        allocation_scope: AllocationScope = "unknown",
+    ) -> AllocationDecision:
+        sizing = sizing or self.propose_size(candidate, regime=regime, portfolio_state=portfolio_state)
+        reason_codes = list(sizing.reason_codes)
+        status = "allocate"
+        if candidate.side == "flat":
+            reason_codes.append("defensive_flat_no_trade")
+            status = "skip"
+        if ev.net_ev_bps < self.min_net_ev_bps:
+            reason_codes.append("net_ev_below_minimum")
+            status = "skip"
+        if ev.risk_adjusted_utility < self.min_risk_adjusted_utility:
+            reason_codes.append("risk_adjusted_utility_below_minimum")
+            status = "skip"
+        if regime is not None and not _strategy_allowed(candidate.strategy_id, regime):
+            reason_codes.append("regime_disallows_strategy")
+            status = "skip"
+        if "news_shock_blocks_new_risk" in reason_codes:
+            status = "skip"
+        allocated_notional = sizing.allocated_notional_usd
+        risk_budget = sizing.risk_usd
+        if status == "skip":
+            allocated_notional = 0.0
+            risk_budget = 0.0
+        size = allocated_notional / candidate.proposed_entry if candidate.proposed_entry > 0 else 0.0
+        digest = hashlib.sha1(f"{candidate.candidate_id}:{ev.estimate_id}:{candidate_book_id}".encode()).hexdigest()[
+            :24
+        ]
+        allocation = AllocationDecision(
+            allocation_id="alloc_" + digest,
+            candidate_id=candidate.candidate_id,
+            candidate_book_id=candidate_book_id,
+            status=status,  # type: ignore[arg-type]
+            allocation_scope=allocation_scope,
+            allocated_size=size,
+            allocated_notional_usd=allocated_notional,
+            risk_usd=risk_budget,
+            max_size_multiplier=sizing.max_size_multiplier,
+            constraints=sizing.constraints,
+            reason_codes=reason_codes,
+            created_at_ms=now_ms(),
+            metadata=sizing.metadata,
         )
         return allocation
 

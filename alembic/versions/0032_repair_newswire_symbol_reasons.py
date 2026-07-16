@@ -6,9 +6,6 @@ Revises: 0031_operational_incidents
 
 from __future__ import annotations
 
-from copy import deepcopy
-from typing import Any
-
 import sqlalchemy as sa
 
 from alembic import op
@@ -23,10 +20,21 @@ _REPAIRED_REASON = "legacy_redaction_repaired"
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
-    _repair_story_rows(bind)
-    _repair_revision_rows(bind)
-    _repair_event_rows(bind)
+    """Repair affected JSON documents with offline-renderable set-based SQL."""
+
+    _repair_assessment_column(
+        table_name="newswire_stories",
+        id_column="story_id",
+        assessment_column="assessment_json",
+        metadata_column="metadata_json",
+    )
+    _repair_story_revisions()
+    _repair_assessment_column(
+        table_name="newswire_events",
+        id_column="event_id",
+        assessment_column="assessment_json",
+        metadata_column="metadata_json",
+    )
 
 
 def downgrade() -> None:
@@ -35,113 +43,135 @@ def downgrade() -> None:
     pass
 
 
-def _repair_story_rows(bind: Any) -> None:
-    table = sa.table(
-        "newswire_stories",
-        sa.column("story_id", sa.String()),
-        sa.column("assessment_json", sa.JSON()),
-        sa.column("metadata_json", sa.JSON()),
-    )
-    rows = list(
-        bind.execute(
-            sa.select(table.c.story_id, table.c.assessment_json, table.c.metadata_json)
-        ).mappings()
-    )
-    for row in rows:
-        assessment, changed = _repair_assessment(row["assessment_json"])
-        if not changed:
-            continue
-        bind.execute(
-            table.update()
-            .where(table.c.story_id == row["story_id"])
-            .values(
-                assessment_json=assessment,
-                metadata_json=_add_quality_flag(row["metadata_json"]),
+def _repair_assessment_column(
+    *,
+    table_name: str,
+    id_column: str,
+    assessment_column: str,
+    metadata_column: str,
+) -> None:
+    assessment = f"source.{assessment_column}::jsonb"
+    metadata = f"source.{metadata_column}::jsonb"
+    op.execute(
+        sa.text(
+            f"""
+            WITH repaired AS (
+                SELECT
+                    source.{id_column} AS row_id,
+                    {_repaired_assessment_sql(assessment)} AS assessment_json,
+                    {_quality_metadata_sql(metadata)} AS metadata_json
+                FROM {table_name} AS source
+                WHERE {_contains_redacted_reason_sql(assessment)}
             )
+            UPDATE {table_name} AS target SET
+                {assessment_column}=repaired.assessment_json::json,
+                {metadata_column}=repaired.metadata_json::json
+            FROM repaired
+            WHERE target.{id_column}=repaired.row_id
+            """
         )
-
-
-def _repair_revision_rows(bind: Any) -> None:
-    table = sa.table(
-        "newswire_story_revisions",
-        sa.column("revision_id", sa.String()),
-        sa.column("story_json", sa.JSON()),
     )
-    rows = list(bind.execute(sa.select(table.c.revision_id, table.c.story_json)).mappings())
-    for row in rows:
-        story = deepcopy(row["story_json"])
-        if not isinstance(story, dict):
-            continue
-        assessment, changed = _repair_assessment(story.get("assessment"))
-        if not changed:
-            continue
-        story["assessment"] = assessment
-        story["metadata"] = _add_quality_flag(story.get("metadata"))
-        bind.execute(
-            table.update()
-            .where(table.c.revision_id == row["revision_id"])
-            .values(story_json=story)
-        )
 
 
-def _repair_event_rows(bind: Any) -> None:
-    table = sa.table(
-        "newswire_events",
-        sa.column("event_id", sa.String()),
-        sa.column("assessment_json", sa.JSON()),
-        sa.column("metadata_json", sa.JSON()),
+def _repair_story_revisions() -> None:
+    story = "source.story_json::jsonb"
+    assessment = f"({story} -> 'assessment')"
+    metadata = f"({story} -> 'metadata')"
+    repaired_story = (
+        "jsonb_set("
+        f"jsonb_set({story}, '{{assessment}}', {_repaired_assessment_sql(assessment)}, false), "
+        f"'{{metadata}}', {_quality_metadata_sql(metadata)}, true)"
     )
-    rows = list(
-        bind.execute(
-            sa.select(table.c.event_id, table.c.assessment_json, table.c.metadata_json)
-        ).mappings()
-    )
-    for row in rows:
-        assessment, changed = _repair_assessment(row["assessment_json"])
-        if not changed:
-            continue
-        bind.execute(
-            table.update()
-            .where(table.c.event_id == row["event_id"])
-            .values(
-                assessment_json=assessment,
-                metadata_json=_add_quality_flag(row["metadata_json"]),
+    op.execute(
+        sa.text(
+            f"""
+            WITH repaired AS (
+                SELECT
+                    source.revision_id,
+                    {repaired_story} AS story_json
+                FROM newswire_story_revisions AS source
+                WHERE jsonb_typeof({story})='object'
+                  AND {_contains_redacted_reason_sql(assessment)}
             )
+            UPDATE newswire_story_revisions AS target SET
+                story_json=repaired.story_json::json
+            FROM repaired
+            WHERE target.revision_id=repaired.revision_id
+            """
         )
+    )
 
 
-def _repair_assessment(value: Any) -> tuple[Any, bool]:
-    if not isinstance(value, dict):
-        return value, False
-    assessment = deepcopy(value)
-    reasons = assessment.get("symbol_match_reasons")
-    if not isinstance(reasons, dict):
-        return assessment, False
-    changed = False
-    repaired_reasons: dict[str, Any] = {}
-    for symbol, symbol_reasons in reasons.items():
-        if symbol_reasons == "[REDACTED]":
-            repaired_reasons[str(symbol)] = [_REPAIRED_REASON]
-            changed = True
-            continue
-        if isinstance(symbol_reasons, list) and "[REDACTED]" in symbol_reasons:
-            repaired_reasons[str(symbol)] = [
-                _REPAIRED_REASON if item == "[REDACTED]" else item
-                for item in symbol_reasons
-            ]
-            changed = True
-            continue
-        repaired_reasons[str(symbol)] = symbol_reasons
-    if changed:
-        assessment["symbol_match_reasons"] = repaired_reasons
-    return assessment, changed
+def _contains_redacted_reason_sql(assessment: str) -> str:
+    return f"""
+        jsonb_typeof({assessment})='object'
+        AND jsonb_typeof({assessment} -> 'symbol_match_reasons')='object'
+        AND EXISTS (
+            SELECT 1
+            FROM jsonb_each(
+                CASE
+                    WHEN jsonb_typeof({assessment})='object'
+                         AND jsonb_typeof({assessment} -> 'symbol_match_reasons')='object'
+                        THEN {assessment} -> 'symbol_match_reasons'
+                    ELSE '{{}}'::jsonb
+                END
+            ) AS reason(symbol, value)
+            WHERE reason.value='"[REDACTED]"'::jsonb
+               OR (
+                    jsonb_typeof(reason.value)='array'
+                    AND reason.value @> '["[REDACTED]"]'::jsonb
+               )
+        )
+    """
 
 
-def _add_quality_flag(value: Any) -> dict[str, Any]:
-    metadata = deepcopy(value) if isinstance(value, dict) else {}
-    flags = metadata.get("data_quality_flags")
-    clean_flags = list(flags) if isinstance(flags, list) else []
-    if _QUALITY_FLAG not in clean_flags:
-        clean_flags.append(_QUALITY_FLAG)
-    metadata["data_quality_flags"] = clean_flags
-    return metadata
+def _repaired_assessment_sql(assessment: str) -> str:
+    return f"""
+        jsonb_set(
+            {assessment},
+            '{{symbol_match_reasons}}',
+            (
+                SELECT jsonb_object_agg(
+                    reason.symbol,
+                    CASE
+                        WHEN reason.value='"[REDACTED]"'::jsonb
+                            THEN jsonb_build_array('{_REPAIRED_REASON}'::text)
+                        WHEN jsonb_typeof(reason.value)='array'
+                             AND reason.value @> '["[REDACTED]"]'::jsonb
+                            THEN (
+                                SELECT jsonb_agg(
+                                    CASE
+                                        WHEN item.value='"[REDACTED]"'::jsonb
+                                            THEN to_jsonb('{_REPAIRED_REASON}'::text)
+                                        ELSE item.value
+                                    END
+                                    ORDER BY item.ordinality
+                                )
+                                FROM jsonb_array_elements(reason.value)
+                                    WITH ORDINALITY AS item(value, ordinality)
+                            )
+                        ELSE reason.value
+                    END
+                )
+                FROM jsonb_each({assessment} -> 'symbol_match_reasons') AS reason(symbol, value)
+            ),
+            false
+        )
+    """
+
+
+def _quality_metadata_sql(metadata: str) -> str:
+    clean_metadata = f"CASE WHEN jsonb_typeof({metadata})='object' THEN {metadata} ELSE '{{}}'::jsonb END"
+    flags = f"({clean_metadata} -> 'data_quality_flags')"
+    repaired_flags = f"""
+        CASE
+            WHEN jsonb_typeof({flags})='array' THEN
+                CASE
+                    WHEN {flags} @> jsonb_build_array('{_QUALITY_FLAG}'::text)
+                        THEN {flags}
+                    ELSE {flags} || jsonb_build_array('{_QUALITY_FLAG}'::text)
+                END
+            ELSE jsonb_build_array('{_QUALITY_FLAG}'::text)
+        END
+    """
+    return f"jsonb_set({clean_metadata}, '{{data_quality_flags}}', {repaired_flags}, true)"

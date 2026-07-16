@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import random
 import statistics
 import time
 from collections import Counter, defaultdict
 from typing import Any
+
+from hyperliquid_trading_agent.app.engine.time_block_stats import non_overlapping_block_statistics
 
 OUTCOME_WINDOW_MS = {
     "5m": 5 * 60_000,
@@ -183,7 +184,9 @@ async def load_signal_quality_rows(
         metadata = _dict(row.get("metadata"))
         flags = {str(item) for item in row.get("quality_flags") or []}
         mark_source = str(metadata.get("mark_source") or "unknown")
-        bad_mark = bool({"latest_mark_fallback", "late_mark", "future_mark"} & flags) or mark_source != "feature_store_mid"
+        bad_mark = (
+            bool({"latest_mark_fallback", "late_mark", "future_mark"} & flags) or mark_source != "feature_store_mid"
+        )
         if bad_mark:
             fallback_or_late += 1
             exclusion_counts["non_strict_mark"] += 1
@@ -223,12 +226,15 @@ async def load_signal_quality_rows(
                 "market_impact_bps": impact,
                 "funding_bps": _f(row.get("funding_bps")),
                 "combined_execution_cost_bps": combined_slippage,
+                "total_execution_cost_bps": _f(metadata.get("total_execution_cost_bps")),
+                "cost_quality": str(row.get("execution_cost_quality") or "unavailable"),
             },
         }
         usable.append(normalized)
     total_unique = len(latest)
     context = {
-        "dataset_id": "signal_quality_" + hashlib.sha256(
+        "dataset_id": "signal_quality_"
+        + hashlib.sha256(
             json.dumps(
                 {
                     "start_ms": start_ms,
@@ -238,7 +244,12 @@ async def load_signal_quality_rows(
                 separators=(",", ":"),
             ).encode()
         ).hexdigest()[:24],
-        "window": {"basis": "outcome_window_end", "start_ms": start_ms, "end_ms": end_ms, "hours": max(1, int(window_hours))},
+        "window": {
+            "basis": "outcome_window_end",
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "hours": max(1, int(window_hours)),
+        },
         "grain": "candidate_id_x_outcome_window",
         "data_quality": {
             "sample_limit": bounded_max_rows,
@@ -280,18 +291,55 @@ def _group_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     costs: list[float] = []
     for row in rows:
         item = _dict(row.get("costs"))
-        component_total = sum(
-            [_f(item.get(name)) for name in ("fees_bps", "spread_bps", "slippage_bps", "market_impact_bps", "funding_bps")],
-            0.0,
-        )
+        total_execution = _f(item.get("total_execution_cost_bps"))
+        combined_execution = _f(item.get("combined_execution_cost_bps"))
+        if total_execution > 0:
+            component_total = total_execution + _f(item.get("funding_bps"))
+        elif combined_execution > 0:
+            component_total = _f(item.get("fees_bps")) + combined_execution + _f(item.get("funding_bps"))
+        else:
+            component_total = sum(
+                [
+                    _f(item.get(name))
+                    for name in ("fees_bps", "spread_bps", "slippage_bps", "market_impact_bps", "funding_bps")
+                ],
+                0.0,
+            )
         costs.append(component_total)
     horizon = str(rows[0].get("outcome_window") or "unknown") if rows else "unknown"
-    blocks = _time_blocks(rows, OUTCOME_WINDOW_MS.get(horizon, 60_000))
-    ci = _bootstrap_mean_ci(blocks, seed_material=f"{horizon}:{len(rows)}") if len(blocks) >= 8 and len({str(row.get('candidate_id') or '') for row in rows}) >= 50 else None
+    block_stats = non_overlapping_block_statistics(
+        rows,
+        value_field="net_return_bps",
+        horizon=horizon,
+        bootstrap_iterations=10_000,
+        min_descriptive_blocks=8,
+        min_promotion_blocks=30,
+        seed_key=f"signal_quality:{horizon}",
+    )
+    ci = (
+        [round(float(block_stats["ci_95_lower"]), 4), round(float(block_stats["ci_95_upper"]), 4)]
+        if block_stats["ci_95_lower"] is not None and block_stats["ci_95_upper"] is not None
+        else None
+    )
+    measured_rows = [
+        row
+        for row in rows
+        if row.get("execution_adjusted_return_bps") is not None
+        and str(row.get("execution_cost_quality") or "unavailable") == "measured"
+    ]
+    execution_stats = non_overlapping_block_statistics(
+        measured_rows,
+        value_field="execution_adjusted_return_bps",
+        horizon=horizon,
+        bootstrap_iterations=10_000,
+        min_descriptive_blocks=8,
+        min_promotion_blocks=30,
+        seed_key=f"signal_quality_execution:{horizon}",
+    )
     return {
         "n": len(rows),
         "unique_candidate_count": len({str(row.get("candidate_id") or "") for row in rows}),
-        "non_overlapping_block_count": len(blocks),
+        "non_overlapping_block_count": block_stats["effective_block_count"],
         "gross_hit_rate_pct": round(_pct(sum(value > 0 for value in gross), len(gross)), 4),
         "modeled_net_hit_rate_pct": round(_pct(sum(value > 0 for value in net), len(net)), 4),
         "mean_gross_return_bps": round(_avg(gross), 4),
@@ -308,25 +356,15 @@ def _group_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "payoff_ratio": round(_avg(winners) / abs(_avg(losers)), 4) if winners and losers and _avg(losers) else None,
         "profit_factor": round(sum(winners) / abs(sum(losers)), 4) if losers and sum(losers) else None,
         "mean_modeled_net_return_ci95_bps": ci,
-        "confidence": "inferential" if ci is not None else "descriptive",
+        "time_block_confidence": {key: value for key, value in block_stats.items() if key != "blocks"},
+        "execution_adjusted_mean_bps": execution_stats["mean"],
+        "execution_adjusted_ci95_bps": [execution_stats["ci_95_lower"], execution_stats["ci_95_upper"]],
+        "execution_adjusted_effective_block_count": execution_stats["effective_block_count"],
+        "execution_adjusted_performance_used": bool(measured_rows),
+        "confidence": "inferential" if block_stats["descriptive_ci"] else "descriptive",
+        "promotion_eligible": block_stats["promotion_eligible"],
+        "promotion_reason_codes": block_stats["promotion_reason_codes"],
     }
-
-
-def _time_blocks(rows: list[dict[str, Any]], duration_ms: int) -> list[float]:
-    grouped: dict[int, list[float]] = defaultdict(list)
-    for row in rows:
-        bucket = int(row.get("window_end_ms") or 0) // max(1, duration_ms)
-        grouped[bucket].append(_f(row.get("net_return_bps")))
-    return [_avg(grouped[key]) for key in sorted(grouped)]
-
-
-def _bootstrap_mean_ci(blocks: list[float], *, seed_material: str, samples: int = 1000) -> list[float]:
-    seed = int(hashlib.sha256(seed_material.encode()).hexdigest()[:16], 16)
-    rng = random.Random(seed)
-    means = []
-    for _ in range(samples):
-        means.append(_avg([blocks[rng.randrange(len(blocks))] for _ in blocks]))
-    return [round(_quantile(means, 0.025), 4), round(_quantile(means, 0.975), 4)]
 
 
 async def build_signal_quality_report(
@@ -395,15 +433,20 @@ async def build_signal_quality_report(
             {"outcome_window": window, **_group_metrics(values)}
             for window, values in sorted(by_window.items(), key=lambda item: OUTCOME_WINDOW_MS.get(item[0], 0))
         ],
-        "groups": sorted(group_rows, key=lambda item: (-int(item["n"]), item["strategy_id"], item["symbol"], item["outcome_window"])),
+        "groups": sorted(
+            group_rows, key=lambda item: (-int(item["n"]), item["strategy_id"], item["symbol"], item["outcome_window"])
+        ),
         "legacy_mixed_latest_endpoint": {
             "status": "deprecated",
             "reason": "mixed_horizons_and_non_homogeneous_candidate_cohorts",
             "readiness_eligible": False,
         },
         "semantics": {
-            "net_return": "modeled gross mark return minus scorer-estimated costs; not execution PnL",
+            "net_return": "legacy modeled gross mark return minus scorer-estimated costs; not execution PnL",
+            "execution_adjusted_return": "reported only when a depth-walk fill and venue fee schedule have measured cost quality",
             "horizons_are_never_pooled_for_promotion": True,
             "strict_mark_source": "feature_store_mid",
+            "independence_unit": "purged non-overlapping time block after per-instrument collapse",
+            "promotion_gate": "at least 30 effective blocks and lower 95% confidence bound above zero",
         },
     }

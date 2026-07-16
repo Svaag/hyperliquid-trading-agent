@@ -6,8 +6,6 @@ Revises: 0029_engine_strategy_evaluations
 
 from __future__ import annotations
 
-import hashlib
-
 import sqlalchemy as sa
 
 from alembic import op
@@ -120,8 +118,14 @@ def upgrade() -> None:
         sa.Column("metadata_json", sa.JSON(), nullable=False, server_default=_json_default("{}")),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
     )
-    op.create_index("ix_venue_market_snapshots_instrument_time", "venue_market_snapshots", ["instrument_id", "received_ts_ms"])
-    op.create_index("ix_venue_market_snapshots_underlying_venue_time", "venue_market_snapshots", ["underlying_id", "venue_id", "received_ts_ms"])
+    op.create_index(
+        "ix_venue_market_snapshots_instrument_time", "venue_market_snapshots", ["instrument_id", "received_ts_ms"]
+    )
+    op.create_index(
+        "ix_venue_market_snapshots_underlying_venue_time",
+        "venue_market_snapshots",
+        ["underlying_id", "venue_id", "received_ts_ms"],
+    )
 
     op.create_table(
         "cross_venue_feature_snapshots",
@@ -142,8 +146,16 @@ def upgrade() -> None:
         sa.Column("metadata_json", sa.JSON(), nullable=False, server_default=_json_default("{}")),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
     )
-    op.create_index("ix_cross_venue_feature_snapshots_underlying_time", "cross_venue_feature_snapshots", ["underlying_id", "as_of_ms"])
-    op.create_index("ix_cross_venue_feature_snapshots_pair_time", "cross_venue_feature_snapshots", ["reference_instrument_id", "comparison_instrument_id", "as_of_ms"])
+    op.create_index(
+        "ix_cross_venue_feature_snapshots_underlying_time",
+        "cross_venue_feature_snapshots",
+        ["underlying_id", "as_of_ms"],
+    )
+    op.create_index(
+        "ix_cross_venue_feature_snapshots_pair_time",
+        "cross_venue_feature_snapshots",
+        ["reference_instrument_id", "comparison_instrument_id", "as_of_ms"],
+    )
 
     for table in ("feature_values", "engine_strategy_evaluations", "alpha_candidates", "order_intents"):
         op.add_column(table, sa.Column("instrument_id", sa.String(length=64)))
@@ -164,9 +176,12 @@ def upgrade() -> None:
 
 
 def _backfill_legacy_instrument_identity() -> None:
-    """Give pre-registry evidence an explicit, provider-specific identity."""
+    """Give pre-registry evidence an explicit, provider-specific identity.
 
-    bind = op.get_bind()
+    Keep the backfill entirely in SQL so Alembic can render it in offline
+    mode.  The SHA-256 expression is identical to the former Python loop.
+    """
+
     identity_tables = (
         "feature_values",
         "engine_strategy_evaluations",
@@ -175,117 +190,109 @@ def _backfill_legacy_instrument_identity() -> None:
         "candidate_outcome_attributions",
         "order_intents",
     )
-    assets: set[str] = set()
-    for table_name in identity_tables:
-        rows = bind.execute(sa.text(f"SELECT DISTINCT asset FROM {table_name} WHERE asset IS NOT NULL"))
-        assets.update(str(row[0]).strip().upper() for row in rows if row[0])
-
-    registry = sa.table(
-        "instrument_registry",
-        sa.column("instrument_id", sa.String),
-        sa.column("underlying_id", sa.String),
-        sa.column("venue_id", sa.String),
-        sa.column("provider_symbol", sa.String),
-        sa.column("display_symbol", sa.String),
-        sa.column("instrument_type", sa.String),
-        sa.column("quote_currency", sa.String),
-        sa.column("session_timezone", sa.String),
-        sa.column("tradability_status", sa.String),
-        sa.column("capabilities_json", sa.JSON),
-        sa.column("mapping_version", sa.Integer),
-        sa.column("first_observed_at_ms", sa.BigInteger),
-        sa.column("last_observed_at_ms", sa.BigInteger),
-        sa.column("metadata_json", sa.JSON),
+    asset_union = "\nUNION\n".join(
+        f"SELECT UPPER(BTRIM(asset)) AS asset FROM {table_name} WHERE asset IS NOT NULL AND BTRIM(asset) <> ''"
+        for table_name in identity_tables
     )
-    identities: list[dict[str, str]] = []
-    for asset in sorted(assets):
-        provider_symbol = asset
-        venue_id = "hyperliquid:main"
-        if asset.startswith("XYZ:"):
-            provider_symbol = "xyz:" + asset.split(":", 1)[1]
-            venue_id = "hyperliquid:xyz"
-        display = provider_symbol.split(":", 1)[-1].upper()
-        underlying_id = f"CRYPTO:{display}"
-        key = f"{venue_id}|{provider_symbol}"
-        instrument_id = "ins_" + hashlib.sha256(key.encode()).hexdigest()[:32]
-        bind.execute(
-            registry.insert().values(
-                instrument_id=instrument_id,
-                underlying_id=underlying_id,
-                venue_id=venue_id,
-                provider_symbol=provider_symbol,
-                display_symbol=display,
-                instrument_type="crypto_perp",
-                quote_currency="USDC",
-                session_timezone="UTC",
-                tradability_status="active",
-                capabilities_json={"legacy_backfill": True},
-                mapping_version=1,
-                first_observed_at_ms=0,
-                last_observed_at_ms=0,
-                metadata_json={"migration": revision},
-            )
-        )
-        identities.append(
-            {
-                "asset": asset,
-                "instrument_id": instrument_id,
-                "underlying_id": underlying_id,
-                "venue_id": venue_id,
-                "provider_symbol": provider_symbol,
-            }
-        )
-
-    # Backfill each evidence table in one set-based pass. The previous per-asset
-    # UPDATE loop forced a full scan of large evidence tables for every symbol.
-    if identities:
-        bind.execute(
-            sa.text(
-                "CREATE TEMPORARY TABLE legacy_instrument_identity_map ("
-                "asset VARCHAR(128) PRIMARY KEY, instrument_id VARCHAR(64) NOT NULL, "
-                "underlying_id VARCHAR(128) NOT NULL, venue_id VARCHAR(96) NOT NULL, "
-                "provider_symbol VARCHAR(128) NOT NULL)"
-            )
-        )
-        bind.execute(
-            sa.text(
-                "INSERT INTO legacy_instrument_identity_map "
-                "(asset, instrument_id, underlying_id, venue_id, provider_symbol) "
-                "VALUES (:asset, :instrument_id, :underlying_id, :venue_id, :provider_symbol)"
-            ),
-            identities,
-        )
-        for table_name in (
-            "feature_values",
-            "engine_strategy_evaluations",
-            "alpha_candidates",
-            "order_intents",
-        ):
-            bind.execute(
-                sa.text(
-                    f"UPDATE {table_name} SET "
-                    "instrument_id=identity.instrument_id, underlying_id=identity.underlying_id, "
-                    "venue_id=identity.venue_id, provider_symbol=identity.provider_symbol "
-                    "FROM legacy_instrument_identity_map AS identity "
-                    f"WHERE UPPER({table_name}.asset)=identity.asset"
-                )
-            )
-        for table_name in ("candidate_evidence_links", "candidate_outcome_attributions"):
-            bind.execute(
-                sa.text(
-                    f"UPDATE {table_name} SET "
-                    "instrument_id=identity.instrument_id, underlying_id=identity.underlying_id, "
-                    "venue_id=identity.venue_id "
-                    "FROM legacy_instrument_identity_map AS identity "
-                    f"WHERE UPPER({table_name}.asset)=identity.asset"
-                )
-            )
-        bind.execute(sa.text("DROP TABLE legacy_instrument_identity_map"))
-    bind.execute(
+    op.execute(
         sa.text(
-            "UPDATE alpha_candidates SET evidence_epoch_id='pre_0030' "
-            "WHERE evidence_epoch_id IS NULL OR evidence_epoch_id=''"
+            f"""
+            CREATE TEMPORARY TABLE legacy_instrument_identity_map ON COMMIT DROP AS
+            WITH legacy_assets AS (
+                {asset_union}
+            ), normalized AS (
+                SELECT
+                    asset,
+                    CASE
+                        WHEN asset LIKE 'XYZ:%' THEN 'hyperliquid:xyz'
+                        ELSE 'hyperliquid:main'
+                    END AS venue_id,
+                    CASE
+                        WHEN asset LIKE 'XYZ:%'
+                            THEN 'xyz:' || SUBSTRING(asset FROM POSITION(':' IN asset) + 1)
+                        ELSE asset
+                    END AS provider_symbol
+                FROM legacy_assets
+            ), identities AS (
+                SELECT
+                    asset,
+                    venue_id,
+                    provider_symbol,
+                    CASE
+                        WHEN POSITION(':' IN provider_symbol) > 0
+                            THEN UPPER(SUBSTRING(provider_symbol FROM POSITION(':' IN provider_symbol) + 1))
+                        ELSE UPPER(provider_symbol)
+                    END AS display_symbol
+                FROM normalized
+            )
+            SELECT
+                asset,
+                'ins_' || SUBSTRING(
+                    ENCODE(SHA256(CONVERT_TO(venue_id || '|' || provider_symbol, 'UTF8')), 'hex')
+                    FROM 1 FOR 32
+                ) AS instrument_id,
+                'CRYPTO:' || display_symbol AS underlying_id,
+                venue_id,
+                provider_symbol,
+                display_symbol
+            FROM identities
+            """
         )
+    )
+    op.execute(
+        sa.text(
+            f"""
+            INSERT INTO instrument_registry (
+                instrument_id, underlying_id, venue_id, provider_symbol, display_symbol,
+                instrument_type, quote_currency, session_timezone, tradability_status,
+                capabilities_json, mapping_version, first_observed_at_ms, last_observed_at_ms,
+                metadata_json
+            )
+            SELECT
+                instrument_id, underlying_id, venue_id, provider_symbol, display_symbol,
+                'crypto_perp', 'USDC', 'UTC', 'active',
+                CAST('{{"legacy_backfill": true}}' AS JSON), 1, 0, 0,
+                CAST('{{"migration": "{revision}"}}' AS JSON)
+            FROM legacy_instrument_identity_map
+            """
+        )
+    )
+    for table_name in (
+        "feature_values",
+        "engine_strategy_evaluations",
+        "alpha_candidates",
+        "order_intents",
+    ):
+        op.execute(
+            sa.text(
+                f"""
+                UPDATE {table_name} AS target SET
+                    instrument_id=identity.instrument_id,
+                    underlying_id=identity.underlying_id,
+                    venue_id=identity.venue_id,
+                    provider_symbol=identity.provider_symbol
+                FROM legacy_instrument_identity_map AS identity
+                WHERE UPPER(BTRIM(target.asset))=identity.asset
+                """
+            )
+        )
+    for table_name in ("candidate_evidence_links", "candidate_outcome_attributions"):
+        op.execute(
+            sa.text(
+                f"""
+                UPDATE {table_name} AS target SET
+                    instrument_id=identity.instrument_id,
+                    underlying_id=identity.underlying_id,
+                    venue_id=identity.venue_id
+                FROM legacy_instrument_identity_map AS identity
+                WHERE UPPER(BTRIM(target.asset))=identity.asset
+                """
+            )
+        )
+    op.execute("DROP TABLE legacy_instrument_identity_map")
+    op.execute(
+        "UPDATE alpha_candidates SET evidence_epoch_id='pre_0030' "
+        "WHERE evidence_epoch_id IS NULL OR evidence_epoch_id=''"
     )
 
 

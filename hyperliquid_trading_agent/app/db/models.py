@@ -1007,7 +1007,9 @@ class NewswireStoryRevisionRow(TimestampMixin, Base):
 class NewswireDeliveryRow(TimestampMixin, Base):
     __tablename__ = "newswire_deliveries"
     __table_args__ = (
-        UniqueConstraint("destination", "channel_id", "story_id", "story_revision", name="uq_newswire_delivery_story_revision"),
+        UniqueConstraint(
+            "destination", "channel_id", "story_id", "story_revision", name="uq_newswire_delivery_story_revision"
+        ),
         Index("ix_newswire_deliveries_due", "destination", "status", "next_attempt_at_ms"),
         Index("ix_newswire_deliveries_story", "story_id", "story_revision"),
     )
@@ -1262,9 +1264,7 @@ class NewswireRewardRow(TimestampMixin, Base):
 
 class NewswireSourceReputationRow(TimestampMixin, Base):
     __tablename__ = "newswire_source_reputation"
-    __table_args__ = (
-        Index("ix_newswire_source_reputation_source", "source_id", "event_type"),
-    )
+    __table_args__ = (Index("ix_newswire_source_reputation_source", "source_id", "event_type"),)
 
     reputation_id: Mapped[str] = mapped_column(String(96), primary_key=True)
     source_id: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -1492,6 +1492,25 @@ class StrategySpecRecord(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class StrategyVersionPolicyRecord(TimestampMixin, Base):
+    __tablename__ = "strategy_version_policies"
+    __table_args__ = (
+        Index("ix_strategy_version_policies_strategy", "strategy_id", "strategy_version"),
+        Index("ix_strategy_version_policies_state", "state"),
+    )
+
+    strategy_version_key: Mapped[str] = mapped_column(String(192), primary_key=True)
+    strategy_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason_codes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    effective_from_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    effective_until_ms: Mapped[int | None] = mapped_column(BigInteger)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class EngineStrategyEvaluationRecord(TimestampMixin, Base):
     """Append-only per-run strategy activation evidence.
 
@@ -1553,7 +1572,9 @@ class StrategyRegimePerformanceRecord(TimestampMixin, Base):
         Index("ix_strategy_regime_performance_strategy", "strategy_id"),
         Index("ix_strategy_regime_performance_regime", "regime_label"),
         Index("ix_strategy_regime_performance_window", "window_end_ms"),
-        Index("ix_strategy_regime_performance_group", "strategy_id", "regime_label", "asset", "venue", "outcome_window"),
+        Index(
+            "ix_strategy_regime_performance_group", "strategy_id", "regime_label", "asset", "venue", "outcome_window"
+        ),
     )
 
     performance_id: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -1658,10 +1679,12 @@ class EVEstimateRecord(TimestampMixin, Base):
     expected_market_impact_bps: Mapped[float] = mapped_column(Float, nullable=False)
     expected_funding_cost_bps: Mapped[float] = mapped_column(Float, nullable=False)
     tail_loss_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    gross_ev_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     net_ev_bps: Mapped[float] = mapped_column(Float, nullable=False)
     risk_adjusted_utility: Mapped[float] = mapped_column(Float, nullable=False)
     uncertainty: Mapped[float] = mapped_column(Float, nullable=False)
     calibration_bucket: Mapped[str] = mapped_column(String(128), nullable=False)
+    execution_cost_quote_id: Mapped[str | None] = mapped_column(String(128))
     created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
@@ -1677,6 +1700,7 @@ class AllocationDecisionRecord(TimestampMixin, Base):
     candidate_id: Mapped[str] = mapped_column(String(96), nullable=False)
     candidate_book_id: Mapped[str | None] = mapped_column(String(96))
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    allocation_scope: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
     allocated_size: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     allocated_notional_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     risk_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
@@ -1780,6 +1804,10 @@ class CandidateOutcomeAttributionRecord(TimestampMixin, Base):
     slippage_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     funding_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     net_return_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    execution_adjusted_return_bps: Mapped[float | None] = mapped_column(Float)
+    execution_cost_quote_id: Mapped[str | None] = mapped_column(String(128))
+    execution_report_id: Mapped[str | None] = mapped_column(String(128))
+    execution_cost_quality: Mapped[str] = mapped_column(String(32), nullable=False, default="unavailable")
     realized_r: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     mfe_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     mae_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
@@ -2028,6 +2056,40 @@ class OrderIntentRecord(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class ExecutionCostQuoteRecord(TimestampMixin, Base):
+    __tablename__ = "execution_cost_quotes"
+    __table_args__ = (
+        Index("ix_execution_cost_quotes_candidate", "candidate_id"),
+        Index("ix_execution_cost_quotes_venue_created", "venue_id", "created_at_ms"),
+        Index("ix_execution_cost_quotes_quality", "cost_quality"),
+    )
+
+    quote_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    venue_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    instrument_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    requested_size: Mapped[float] = mapped_column(Float, nullable=False)
+    requested_notional_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    reference_price: Mapped[float] = mapped_column(Float, nullable=False)
+    simulated_fill_size: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    simulated_avg_fill_px: Mapped[float | None] = mapped_column(Float)
+    fee_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    spread_cost_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    slippage_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    market_impact_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    latency_slippage_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    total_execution_cost_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    cost_quality: Mapped[str] = mapped_column(String(32), nullable=False)
+    book_snapshot_id: Mapped[str | None] = mapped_column(String(128))
+    fee_schedule_id: Mapped[str | None] = mapped_column(String(128))
+    simulation_model_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    book_as_of_ms: Mapped[int | None] = mapped_column(BigInteger)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reason_codes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class ExecutionReportRecord(TimestampMixin, Base):
     __tablename__ = "execution_reports"
     __table_args__ = (
@@ -2046,6 +2108,15 @@ class ExecutionReportRecord(TimestampMixin, Base):
     fees_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     slippage_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     market_impact_bps: Mapped[float | None] = mapped_column(Float)
+    execution_cost_quote_id: Mapped[str | None] = mapped_column(String(128))
+    fee_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    spread_cost_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    latency_slippage_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    total_execution_cost_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    book_snapshot_id: Mapped[str | None] = mapped_column(String(128))
+    fee_schedule_id: Mapped[str | None] = mapped_column(String(128))
+    simulation_model_version: Mapped[str | None] = mapped_column(String(64))
+    cost_quality: Mapped[str] = mapped_column(String(32), nullable=False, default="unavailable")
     adapter: Mapped[str] = mapped_column(String(32), nullable=False)
     assumptions_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -2194,7 +2265,12 @@ class CrossVenueFeatureSnapshotRecord(TimestampMixin, Base):
     __tablename__ = "cross_venue_feature_snapshots"
     __table_args__ = (
         Index("ix_cross_venue_feature_snapshots_underlying_time", "underlying_id", "as_of_ms"),
-        Index("ix_cross_venue_feature_snapshots_pair_time", "reference_instrument_id", "comparison_instrument_id", "as_of_ms"),
+        Index(
+            "ix_cross_venue_feature_snapshots_pair_time",
+            "reference_instrument_id",
+            "comparison_instrument_id",
+            "as_of_ms",
+        ),
     )
 
     snapshot_id: Mapped[str] = mapped_column(String(128), primary_key=True)

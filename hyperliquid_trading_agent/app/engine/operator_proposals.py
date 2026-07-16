@@ -16,6 +16,11 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _metadata(value: dict[str, Any]) -> dict[str, Any]:
+    metadata = value.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
 @dataclass
 class ProposalEvaluation:
     candidate_id: str
@@ -88,7 +93,7 @@ class EngineOperatorProposalService:
             for blocker in [*evaluation.hard_blockers, *evaluation.soft_blockers]:
                 blocker_counts[blocker] = blocker_counts.get(blocker, 0) + 1
             if self._digest_eligible(evaluation):
-                self._near_misses[evaluation.candidate_id] = (now, evaluation)
+                self._near_misses[self._digest_semantic_key(evaluation)] = (now, evaluation)
 
         created: list[dict[str, Any]] = []
         eligible = sorted((item for item in evaluations if item.eligible), key=lambda item: item.rank, reverse=True)
@@ -209,6 +214,13 @@ class EngineOperatorProposalService:
         activation_scope = str(source.get("activation_scope") or "paper_shadow")
         if activation_scope == "shadow_only":
             evaluation.soft_blockers.append("shadow_only_strategy")
+        promotion_state = str(
+            source.get("promotion_state") or _metadata(candidate).get("promotion_state") or "research_only"
+        )
+        if promotion_state == "frozen":
+            evaluation.soft_blockers.append("strategy_version_frozen")
+        elif promotion_state != "paper_approved":
+            evaluation.soft_blockers.append("strategy_version_research_only")
         if not bool(source.get("paper_eligible", False)):
             evaluation.soft_blockers.append("not_paper_eligible")
         if not bool(candidate.get("counts_for_breadth", False)):
@@ -234,9 +246,10 @@ class EngineOperatorProposalService:
             evaluation.hard_blockers.append("candidate_expired")
 
         allocation_status = str(allocation.get("status") or "missing")
-        allocation_positive = float(allocation.get("allocated_size") or 0) > 0 and float(
-            allocation.get("allocated_notional_usd") or 0
-        ) > 0
+        allocation_positive = (
+            float(allocation.get("allocated_size") or 0) > 0
+            and float(allocation.get("allocated_notional_usd") or 0) > 0
+        )
         if allocation_status not in {"allocate", "reduce"} or not allocation_positive:
             reasons = [str(reason) for reason in allocation.get("reason_codes") or []]
             if any("risk" in reason for reason in reasons) or allocation_status == "risk_rejected":
@@ -373,6 +386,8 @@ class EngineOperatorProposalService:
             "strategy_throttle",
             "concentration_limit",
             "council_allocation_block",
+            "strategy_version_frozen",
+            "strategy_version_research_only",
         }
         required = [str(item) for item in evaluation.council.get("required_evidence") or []]
         replay_blocked = any("replay" in item for item in required)
@@ -380,18 +395,23 @@ class EngineOperatorProposalService:
 
     @staticmethod
     def _display_soft_blockers(blockers: list[str]) -> list[str]:
-        """Collapse research-governance details for the operator-facing digest.
+        """Expose exact blocker codes; digest text is an audit surface."""
 
-        The raw blocker codes remain on ``ProposalEvaluation`` for diagnostics and
-        auditability. To an operator, however, ``shadow_only_strategy`` and
-        ``not_paper_eligible`` describe the same actionable state: research only.
-        """
+        return sorted(set(blockers))
 
-        research_codes = {"shadow_only_strategy", "not_paper_eligible"}
-        display = [item for item in blockers if item not in research_codes]
-        if research_codes.intersection(blockers):
-            display.insert(0, "research_only")
-        return display
+    @staticmethod
+    def _digest_semantic_key(evaluation: ProposalEvaluation) -> str:
+        candidate = evaluation.candidate
+        return "|".join(
+            (
+                str(candidate.get("strategy_id") or "unknown"),
+                str(candidate.get("strategy_version") or "unknown"),
+                str(candidate.get("asset") or "UNKNOWN").upper(),
+                str(candidate.get("side") or "flat"),
+                str(candidate.get("horizon") or "unknown"),
+                ",".join(sorted(evaluation.soft_blockers)),
+            )
+        )
 
     async def _maybe_enqueue_shadow_digest(self, *, now_ms: int) -> None:
         if not self.settings.engine_operator_shadow_digest_enabled:
@@ -405,9 +425,7 @@ class EngineOperatorProposalService:
             return
         cutoff = now_ms - interval_ms
         self._near_misses = {
-            candidate_id: item
-            for candidate_id, item in self._near_misses.items()
-            if item[0] >= cutoff
+            semantic_key: item for semantic_key, item in self._near_misses.items() if item[0] >= cutoff
         }
         ranked = sorted((item[1] for item in self._near_misses.values()), key=lambda item: item.rank, reverse=True)[:5]
         self._last_digest_bucket = bucket

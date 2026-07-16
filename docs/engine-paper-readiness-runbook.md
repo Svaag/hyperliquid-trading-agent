@@ -4,7 +4,7 @@
 
 Live execution remains forbidden. Do not enable private keys, signed exchange adapters, live order routes, `HYPERLIQUID_EXCHANGE_ENABLED`, `ALPACA_TRADING_ENABLED`, or `ENGINE_LIVE_ENABLED`.
 
-Repository defaults and `.env.example` are shadow-only. Paper mode is an explicit operator promotion step after `/engine/readiness` passes. Use `docs/engine-shadow-observation-promotion-package.md` to collect the required clean-window evidence.
+Repository defaults and `.env.example` are shadow-only. Migration `0034` freezes every exact strategy version present at upgrade time, and unseen versions default to `research_only`. There is no runtime promotion endpoint. Paper mode requires both a passing `/engine/readiness` artifact and a separately reviewed exact-version policy change; environment flags alone grant no strategy paper authority. Use `docs/engine-shadow-observation-promotion-package.md` to collect the required clean-window evidence.
 
 ## Shadow-only baseline
 
@@ -20,7 +20,7 @@ ENGINE_WAVE2_ENABLED=true
 ENGINE_CROSS_VENUE_DEXES=lighter,xyz,alpaca:paper
 ```
 
-This baseline evaluates Wave 1 and every Wave 2A/2B/2C strategy as one first-class portfolio. Their candidates share the same EV, allocation, RiskGateway, Council, replay, digest, and paper-readiness paths. Paper/live execution remains disabled until the promotion gate passes.
+This baseline evaluates Wave 1 and every Wave 2A/2B/2C strategy as one research portfolio. Their candidates share the same evidence path, but current exact versions remain frozen and allocations are reported under the research scope.
 
 ## Required checks before paper mode
 
@@ -40,7 +40,11 @@ Paper mode may be promoted only when all are true:
 - RiskGateway coverage is 100% and Council review coverage is at least 95% for allocated candidates.
 - Strategy-regime evidence coverage is at least 95% with minimum score/sample thresholds.
 - Strategy breadth checks use **paper-eligible** active strategies/families across the unified Wave 1/Wave 2 portfolio; intentionally shadow-only sources do not satisfy paper promotion.
-- Average simulated slippage is at most 8 bps.
+- Every strategy is identified by exact `strategy_id@version` and has an externally reviewed `paper_approved` policy; missing policies fail closed.
+- The approved scorer artifact is trained on strict native-horizon outcomes with expanding walk-forward validation; strategy-supplied edge contributes zero.
+- Each strategy/horizon has at least 30 effective non-overlapping time blocks, with positive 95% lower bounds for realized R and measured execution-adjusted return.
+- Execution evidence uses fresh multi-level venue books and verified account/market fee tiers. Configured ceilings, top-of-book-only, stale, and unavailable quotes are not promotion evidence.
+- Average measured simulated slippage is at most 8 bps.
 - Latest engine replay comparison is `passed` or `advisory_pass` for a >=24h, >=50-candidate window.
 - Discord engine validation digest is operational.
 - Unified `/dashboard` and `/engine/dashboard` are accessible.
@@ -51,14 +55,15 @@ Paper mode may be promoted only when all are true:
 2. Open `/engine/readiness` and save the JSON artifact.
 3. Open `/engine/validation-report` and save the JSON artifact.
 4. Run or inspect a 24h replay comparison via `/engine/replay-comparisons/latest`.
-5. Inspect `/engine/strategy-catalog`, `/engine/strategy-regime-performance`, `/engine/council-reviews`, and `/engine/diversity-events`.
-6. Optionally run `/engine/bandit-recommendations/run`; confirm all recommendations are report-only with `auto_apply_allowed=false`.
-7. Confirm the latest Discord digest has no critical alerts.
-8. Confirm no live execution configuration is present.
+5. Inspect `/engine/strategy-catalog`, `/engine/strategy-version-policies`, `/engine/execution-cost-quotes`, `/engine/strategy-regime-performance`, `/engine/council-reviews`, and `/engine/diversity-events`.
+6. Inspect `/engine/signal-quality` and `/engine/strategy-research`; confirm raw candidate counts are not being treated as independent sample counts.
+7. Optionally run `/engine/bandit-recommendations/run`; confirm all recommendations are report-only with `auto_apply_allowed=false`.
+8. Confirm the latest Discord digest has no critical alerts and displays the actual hard-block codes.
+9. Confirm no live execution configuration is present.
 
 ## Promotion to paper/shadow
 
-Only after the checklist above passes, update env:
+The current frozen versions must not be promoted. For a separately developed version, only after the checklist above passes and an audited governance change records that exact version as `paper_approved`, update env:
 
 ```env
 ENGINE_SHADOW_ENABLED=true

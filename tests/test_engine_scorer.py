@@ -35,10 +35,16 @@ def _candidate(edge_bps: float) -> AlphaCandidate:
 
 
 def _regime() -> RegimeVector:
-    return RegimeVector(regime_snapshot_id="reg_test", primary_asset="BTC", created_at_ms=1_000, as_of_ms=1_000, regime_stability_score=0.7)
+    return RegimeVector(
+        regime_snapshot_id="reg_test",
+        primary_asset="BTC",
+        created_at_ms=1_000,
+        as_of_ms=1_000,
+        regime_stability_score=0.7,
+    )
 
 
-def test_deterministic_scorer_adds_capped_strategy_edge_prior_with_audit_metadata():
+def test_fallback_scorer_ignores_strategy_edge_prior_and_keeps_it_for_audit():
     scorer = DeterministicEVScorer()
 
     no_edge = scorer.score(_candidate(0.0), _regime())
@@ -48,6 +54,16 @@ def test_deterministic_scorer_adds_capped_strategy_edge_prior_with_audit_metadat
     assert round(high_edge.net_ev_bps - high_edge.metadata["base_net_ev_bps"], 6) == STRATEGY_EDGE_PRIOR_CAP_BPS
     assert high_edge.metadata["strategy_edge_prior_bps"] == STRATEGY_EDGE_PRIOR_CAP_BPS
     assert high_edge.metadata["strategy_edge_prior_source"] == "candidate.expected_edge_bps"
+    assert high_edge.metadata["strategy_supplied_edge_contribution_bps"] == 0.0
+    assert high_edge.net_ev_bps == no_edge.net_ev_bps == negative_edge.net_ev_bps
     assert high_edge.metadata["risk_gateway_required"] is True
     assert negative_edge.metadata["strategy_edge_prior_bps"] == 0.0
     assert no_edge.net_ev_bps == no_edge.metadata["base_net_ev_bps"]
+    assert no_edge.expected_slippage_bps == 25.0
+    assert (
+        no_edge.expected_fee_bps
+        + no_edge.expected_spread_cost_bps
+        + no_edge.expected_slippage_bps
+        + no_edge.expected_market_impact_bps
+        == -no_edge.net_ev_bps
+    )

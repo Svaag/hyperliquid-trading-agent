@@ -13,6 +13,10 @@ class PositionManager:
         self.positions: dict[str, PositionThesis] = {}
 
     async def open_from_execution(self, candidate: AlphaCandidate, report: ExecutionReport) -> PositionThesis | None:
+        # Shadow reports contain hypothetical depth-walk fills for measurement;
+        # they must never create portfolio state.
+        if report.execution_mode == "shadow":
+            return None
         if report.status not in {"filled", "partial", "accepted"}:
             return None
         side = "long" if candidate.side == "long" else "short" if candidate.side == "short" else None
@@ -44,7 +48,9 @@ class PositionManager:
         await self._persist(thesis)
         return thesis
 
-    async def mark_degraded(self, position_id: str, reason: str, *, score_delta: float = -0.15) -> PositionThesis | None:
+    async def mark_degraded(
+        self, position_id: str, reason: str, *, score_delta: float = -0.15
+    ) -> PositionThesis | None:
         thesis = self.positions.get(position_id)
         if thesis is None:
             return None
@@ -52,7 +58,9 @@ class PositionManager:
             update={
                 "current_thesis_score": max(0.0, thesis.current_thesis_score + score_delta),
                 "degradation_reasons": [*thesis.degradation_reasons, reason],
-                "position_state": "de_risking" if thesis.current_thesis_score + score_delta < 0.35 else thesis.position_state,
+                "position_state": "de_risking"
+                if thesis.current_thesis_score + score_delta < 0.35
+                else thesis.position_state,
                 "updated_at_ms": now_ms(),
             }
         )

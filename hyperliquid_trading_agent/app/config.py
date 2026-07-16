@@ -346,7 +346,17 @@ class Settings(BaseSettings):
     engine_max_approved_candidates_per_loop: int = 5
     engine_model_artifact_dir: str = "/var/lib/hyperliquid-trading-agent/models"
     engine_approved_scorer_model_id: str = ""
-    engine_scorer_fallback_mode: Literal["deterministic"] = "deterministic"
+    engine_scorer_fallback_mode: Literal["no_edge", "deterministic"] = "no_edge"
+    engine_empirical_shrinkage_strength: float = 20.0
+    engine_execution_book_max_age_ms: int = 15_000
+    engine_execution_fee_cache_ttl_ms: int = 300_000
+    engine_execution_latency_slippage_bps: float = 0.0
+    engine_execution_fee_account_address: str = ""
+    engine_execution_hyperliquid_taker_fee_bps: float = -1.0
+    engine_execution_lighter_taker_fee_bps: float = -1.0
+    engine_promotion_min_effective_blocks: int = 30
+    engine_promotion_bootstrap_iterations: int = 10_000
+    engine_readiness_max_strict_outcome_rows: int = 100_000
     engine_alpha_catalog_mode: EngineAlphaCatalogMode = "integrated"
     engine_cross_venue_dexes: str = "lighter,xyz,alpaca:paper"
     engine_wave1c_enabled: bool = True
@@ -721,7 +731,9 @@ class Settings(BaseSettings):
     @classmethod
     def engine_live_must_remain_disabled(cls, value: bool) -> bool:
         if value:
-            raise ValueError("ENGINE_LIVE_ENABLED must remain false until a separate live-execution project is approved")
+            raise ValueError(
+                "ENGINE_LIVE_ENABLED must remain false until a separate live-execution project is approved"
+            )
         return value
 
     @field_validator("engine_alpha_catalog_mode", mode="before")
@@ -813,7 +825,9 @@ class Settings(BaseSettings):
                 "SERVICE_ROLE=trader must not own news providers or Discord sessions",
             )
         elif role == ServiceRole.DISCORD_PUBLISHER:
-            self._require_enabled({"DISCORD_PUBLISHER_ENABLED": self.discord_publisher_enabled}, "SERVICE_ROLE=discord_publisher")
+            self._require_enabled(
+                {"DISCORD_PUBLISHER_ENABLED": self.discord_publisher_enabled}, "SERVICE_ROLE=discord_publisher"
+            )
             missing = []
             if not self.discord_bot_token:
                 missing.append("DISCORD_BOT_TOKEN")
@@ -851,7 +865,10 @@ class Settings(BaseSettings):
             )
         elif role == ServiceRole.LIQUIDATIONS:
             self._require_enabled({"LIQUIDATIONS_ENABLED": self.liquidations_enabled}, "SERVICE_ROLE=liquidations")
-            self._reject_enabled({"ENGINE_ENABLED": self.engine_enabled, "AUTONOMY_ENABLED": self.autonomy_enabled}, "SERVICE_ROLE=liquidations must not trade")
+            self._reject_enabled(
+                {"ENGINE_ENABLED": self.engine_enabled, "AUTONOMY_ENABLED": self.autonomy_enabled},
+                "SERVICE_ROLE=liquidations must not trade",
+            )
         return self
 
     def _reject_enabled(self, flags: dict[str, bool], context: str) -> None:
@@ -874,7 +891,9 @@ class Settings(BaseSettings):
             if self.alpaca_paper_base_url.rstrip("/") != "https://paper-api.alpaca.markets":
                 raise ValueError("ALPACA_PAPER_BASE_URL must use https://paper-api.alpaca.markets")
             if not self.alpaca_paper_api_key or not self.alpaca_paper_api_secret:
-                raise ValueError("ALPACA_PAPER_TRADING_ENABLED requires separate ALPACA_PAPER_API_KEY and ALPACA_PAPER_API_SECRET")
+                raise ValueError(
+                    "ALPACA_PAPER_TRADING_ENABLED requires separate ALPACA_PAPER_API_KEY and ALPACA_PAPER_API_SECRET"
+                )
         if self.lighter_enabled and not self.lighter_read_only:
             raise ValueError("LIGHTER_READ_ONLY must remain true; signing and exchange mutations are out of scope")
         return self
@@ -885,7 +904,11 @@ class Settings(BaseSettings):
 
     @property
     def hyperliquid_ws_url(self) -> str:
-        return self.hyperliquid_testnet_ws_url if self.hyperliquid_network == "testnet" else self.hyperliquid_mainnet_ws_url
+        return (
+            self.hyperliquid_testnet_ws_url
+            if self.hyperliquid_network == "testnet"
+            else self.hyperliquid_mainnet_ws_url
+        )
 
     @property
     def model_chain(self) -> list[str]:
@@ -978,9 +1001,13 @@ class Settings(BaseSettings):
                 warnings.append("HIP4_PROACTIVE_LOOP_ENABLED is true but HIP4_MODE does not allow scanning")
         if self.hip4_proactive_paper_execution_enabled:
             if not self.hip4_paper_execution_enabled:
-                warnings.append("HIP4_PROACTIVE_PAPER_EXECUTION_ENABLED is true but HIP4_PAPER_EXECUTION_ENABLED is false")
+                warnings.append(
+                    "HIP4_PROACTIVE_PAPER_EXECUTION_ENABLED is true but HIP4_PAPER_EXECUTION_ENABLED is false"
+                )
             if not self.hip4_mode_allows_paper:
-                warnings.append("HIP4_PROACTIVE_PAPER_EXECUTION_ENABLED is true but HIP4_MODE does not allow paper execution")
+                warnings.append(
+                    "HIP4_PROACTIVE_PAPER_EXECUTION_ENABLED is true but HIP4_MODE does not allow paper execution"
+                )
         return warnings
 
     @property
@@ -1080,7 +1107,11 @@ class Settings(BaseSettings):
     @property
     def newswire_symbols_universe(self) -> list[str]:
         """Symbols the normalizer scans for in free-text (core + cashtags + short queries)."""
-        universe = set(self.autonomy_core_symbols) | set(self.newswire_cashtag_list) | set(self.newswire_explicit_watch_symbols)
+        universe = (
+            set(self.autonomy_core_symbols)
+            | set(self.newswire_cashtag_list)
+            | set(self.newswire_explicit_watch_symbols)
+        )
         for term in self.newswire_query_terms:
             token = term.strip().upper()
             if token.isalpha() and 2 <= len(token) <= 6:
@@ -1112,7 +1143,9 @@ class Settings(BaseSettings):
             if "alpha_vantage" in provider_names and self.alpha_vantage_enabled and not self.alpha_vantage_api_key:
                 warnings.append("ALPHA_VANTAGE_ENABLED requires ALPHA_VANTAGE_API_KEY")
             if "alpaca" in provider_names and not alpaca_configured and not alpha_configured:
-                warnings.append("TRADFI_ENABLED requires ALPACA_API_KEY and ALPACA_API_SECRET or a configured Alpha Vantage provider")
+                warnings.append(
+                    "TRADFI_ENABLED requires ALPACA_API_KEY and ALPACA_API_SECRET or a configured Alpha Vantage provider"
+                )
             if "alpha_vantage" in provider_names and not self.alpha_vantage_enabled and not alpaca_configured:
                 warnings.append("TRADFI_PROVIDER_ORDER includes alpha_vantage but ALPHA_VANTAGE_ENABLED is false")
             if not provider_names:
@@ -1131,7 +1164,11 @@ class Settings(BaseSettings):
 
     def newswire_config_warnings(self) -> list[str]:
         warnings: list[str] = []
-        discord_requested = self.newswire_enabled and self.newswire_discord_enabled and (self.discord_bot_token or self.newswire_news_channel_configured)
+        discord_requested = (
+            self.newswire_enabled
+            and self.newswire_discord_enabled
+            and (self.discord_bot_token or self.newswire_news_channel_configured)
+        )
         if discord_requested and not self.newswire_news_channel_configured:
             warnings.append("NEWSWIRE_NEWS_CHANNEL_ID is required to post the news feed to #news")
         if discord_requested and not self.discord_bot_token:
@@ -1165,7 +1202,9 @@ class Settings(BaseSettings):
         if self.newswire_engine_offset_stale_seconds <= 0:
             warnings.append("NEWSWIRE_ENGINE_OFFSET_STALE_SECONDS must be positive")
         if self.engine_news_alpha_mode == "paper" and not self.engine_paper_enabled:
-            warnings.append("ENGINE_NEWS_ALPHA_MODE=paper requires ENGINE_PAPER_ENABLED=true; Newswire intents will remain shadow")
+            warnings.append(
+                "ENGINE_NEWS_ALPHA_MODE=paper requires ENGINE_PAPER_ENABLED=true; Newswire intents will remain shadow"
+            )
         for name, value in {
             "ENGINE_NEWS_RISK_ON_THRESHOLD": self.engine_news_risk_on_threshold,
             "ENGINE_NEWS_RISK_OFF_THRESHOLD": self.engine_news_risk_off_threshold,
@@ -1182,11 +1221,17 @@ class Settings(BaseSettings):
         if not self.autonomy_core_symbols:
             warnings.append("AUTONOMY_CORE_UNIVERSE is empty")
         if self.autonomy_event_evaluation_enabled:
-            invalid_event_horizons = [item for item in self.autonomy_event_eval_horizon_list if item not in AUTONOMY_ALLOWED_EVAL_HORIZONS or item == "expiry"]
+            invalid_event_horizons = [
+                item
+                for item in self.autonomy_event_eval_horizon_list
+                if item not in AUTONOMY_ALLOWED_EVAL_HORIZONS or item == "expiry"
+            ]
             if not self.autonomy_event_eval_horizon_list:
                 warnings.append("AUTONOMY_EVENT_EVAL_HORIZONS is empty")
             if invalid_event_horizons:
-                warnings.append(f"AUTONOMY_EVENT_EVAL_HORIZONS contains unsupported horizons: {','.join(invalid_event_horizons)}")
+                warnings.append(
+                    f"AUTONOMY_EVENT_EVAL_HORIZONS contains unsupported horizons: {','.join(invalid_event_horizons)}"
+                )
             if self.autonomy_event_eval_max_open_events <= 0:
                 warnings.append("AUTONOMY_EVENT_EVAL_MAX_OPEN_EVENTS must be positive")
             if self.autonomy_event_eval_symbols_per_event <= 0:
@@ -1221,7 +1266,9 @@ class Settings(BaseSettings):
                 warnings.append("AUTONOMY_STRATEGY_LESSON_MIN_CONFIDENCE must be between 0 and 1")
             invalid_memory_roles = [role for role in self.autonomy_memory_prompt_role_list if role not in ROLE_ORDER]
             if invalid_memory_roles:
-                warnings.append(f"AUTONOMY_MEMORY_PROMPT_ROLES contains unsupported roles: {','.join(invalid_memory_roles)}")
+                warnings.append(
+                    f"AUTONOMY_MEMORY_PROMPT_ROLES contains unsupported roles: {','.join(invalid_memory_roles)}"
+                )
         return warnings
 
     def role_model_chain(self, role: str) -> list[str]:
@@ -1245,7 +1292,10 @@ class Settings(BaseSettings):
 
     @property
     def debate_role_primary_models(self) -> dict[str, str | None]:
-        return {role: (self.role_model_chain(role)[0] if self.role_model_chain(role) else None) for role in self.debate_role_names}
+        return {
+            role: (self.role_model_chain(role)[0] if self.role_model_chain(role) else None)
+            for role in self.debate_role_names
+        }
 
     def debate_model_contract(self) -> dict[str, object]:
         primary = self.debate_role_primary_models

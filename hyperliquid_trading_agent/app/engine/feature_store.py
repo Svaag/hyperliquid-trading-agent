@@ -17,6 +17,8 @@ ROLLUP_SOURCE_FEATURES = (
     "mid",
     "open_interest",
     "top_depth_usd",
+    "bid_depth_usd",
+    "ask_depth_usd",
     "spread_bps",
     "perp_basis_bps",
     "funding_hourly",
@@ -75,7 +77,9 @@ class FeatureStore:
             by_name[feature.feature_name] = feature
         self._recent.setdefault(asset, deque(maxlen=self._recent_buffer_size)).append(feature)
         if feature.scalar_value is not None:
-            self._append_point(asset, feature.feature_name, feature.computed_ts_ms, float(feature.scalar_value), feature.feature_id)
+            self._append_point(
+                asset, feature.feature_name, feature.computed_ts_ms, float(feature.scalar_value), feature.feature_id
+            )
         if self.repository is not None and getattr(self.repository, "enabled", False):
             record = getattr(self.repository, "record_feature_value", None)
             if callable(record):
@@ -84,7 +88,9 @@ class FeatureStore:
 
     async def record_shadow(self, feature: FeatureValue) -> FeatureValue:
         """Persist a feature without exposing it through active in-memory snapshots."""
-        feature = feature.model_copy(update={"metadata": {**feature.metadata, "shadow_only": True, "execution_authority": "none"}})
+        feature = feature.model_copy(
+            update={"metadata": {**feature.metadata, "shadow_only": True, "execution_authority": "none"}}
+        )
         if self.repository is not None:
             record = getattr(self.repository, "record_feature_value", None)
             if callable(record):
@@ -120,7 +126,9 @@ class FeatureStore:
         return [(ts, value) for ts, value, _ in points[:idx]]
 
     def _rollups_for(self, asset: str, *, as_of_ms: int | None = None) -> list[FeatureValue]:
-        tails = [points[-1][_POINT_TS] for name in ROLLUP_SOURCE_FEATURES if (points := self._series.get((asset, name)))]
+        tails = [
+            points[-1][_POINT_TS] for name in ROLLUP_SOURCE_FEATURES if (points := self._series.get((asset, name)))
+        ]
         cutoff = as_of_ms or (max(tails) if tails else now_ms())
         series = {name: self._series_slice(asset, name, as_of_ms=cutoff) for name in ROLLUP_SOURCE_FEATURES}
         rollups = _compute_rollups(asset=asset, series=series, cutoff_ms=cutoff)
@@ -168,7 +176,10 @@ class FeatureStore:
         if self.repository is not None and getattr(self.repository, "enabled", False):
             list_values = getattr(self.repository, "list_feature_values", None)
             if callable(list_values):
-                return [FeatureValue(**item) for item in await list_values(asset=asset, feature_name=feature_name, limit=limit)]
+                return [
+                    FeatureValue(**item)
+                    for item in await list_values(asset=asset, feature_name=feature_name, limit=limit)
+                ]
         asset = asset.upper()
         items = list(self._recent.get(asset) or [])
         if feature_name:
@@ -193,12 +204,12 @@ class FeatureStore:
                     update={"feature_id": fid, "scalar_value": value, "computed_ts_ms": ts, "value": {name: value}}
                 )
         selected = sorted(latest_by_name.values(), key=lambda item: item.computed_ts_ms)[-max_items:]
-        features = {item.feature_name: item.value if item.scalar_value is None else item.scalar_value for item in selected}
+        features = {
+            item.feature_name: item.value if item.scalar_value is None else item.scalar_value for item in selected
+        }
         quality_flags = [f"low_quality:{item.feature_name}" for item in selected if item.quality_score < 0.5]
         feature_timestamps_ms = {item.feature_name: int(item.computed_ts_ms) for item in selected}
-        feature_ages_ms = {
-            item.feature_name: max(0, int(cutoff) - int(item.computed_ts_ms)) for item in selected
-        }
+        feature_ages_ms = {item.feature_name: max(0, int(cutoff) - int(item.computed_ts_ms)) for item in selected}
         snapshot_id = "fs_" + hashlib.sha1(f"{asset}:{cutoff}:{sorted(features.items())}".encode()).hexdigest()[:24]
         identity = self._identity_by_asset.get(asset) or {}
         return FeatureSnapshot(
@@ -215,9 +226,7 @@ class FeatureStore:
             metadata={
                 "feature_timestamps_ms": feature_timestamps_ms,
                 "feature_ages_ms": feature_ages_ms,
-                "feature_quality_scores": {
-                    item.feature_name: float(item.quality_score) for item in selected
-                },
+                "feature_quality_scores": {item.feature_name: float(item.quality_score) for item in selected},
                 "asset_class": str(identity.get("asset_class") or "crypto"),
             },
         )
@@ -259,23 +268,105 @@ def derive_world_model_features(*, asset: str, snapshot: Any) -> list[FeatureVal
         quality_score=1.0,
         metadata={"paper_only": True, "execution_authority": "none"},
     )
-    clusters = [item for item in data.get("narrative_clusters") or [] if asset in [str(symbol).upper() for symbol in item.get("symbols", [])]]
-    predictions = [item for item in data.get("prediction_market_signals") or [] if asset in [str(symbol).upper() for symbol in item.get("symbols", [])]]
-    beliefs = [item for item in data.get("top_beliefs") or [] if asset in [str(symbol).upper() for symbol in item.get("symbols", [])]]
+    clusters = [
+        item
+        for item in data.get("narrative_clusters") or []
+        if asset in [str(symbol).upper() for symbol in item.get("symbols", [])]
+    ]
+    predictions = [
+        item
+        for item in data.get("prediction_market_signals") or []
+        if asset in [str(symbol).upper() for symbol in item.get("symbols", [])]
+    ]
+    beliefs = [
+        item
+        for item in data.get("top_beliefs") or []
+        if asset in [str(symbol).upper() for symbol in item.get("symbols", [])]
+    ]
     out: list[FeatureValue] = []
     if clusters:
         strongest = max(clusters, key=lambda item: abs(float(item.get("pressure_score") or 0.0)))
-        out.append(_feature(pseudo_event, asset=asset, group="world_model", name="narrative_pressure", value={"cluster_id": strongest.get("cluster_id"), "pressure": strongest.get("pressure_score")}, scalar=_float(strongest.get("pressure_score"))))
-        out.append(_feature(pseudo_event, asset=asset, group="world_model", name="belief_conflict_score", value={"cluster_id": strongest.get("cluster_id"), "conflict": strongest.get("conflict_score")}, scalar=_float(strongest.get("conflict_score"))))
-        out.append(_feature(pseudo_event, asset=asset, group="world_model", name="source_consensus_score", value={"cluster_id": strongest.get("cluster_id"), "consensus": strongest.get("consensus_score")}, scalar=_float(strongest.get("consensus_score"))))
+        out.append(
+            _feature(
+                pseudo_event,
+                asset=asset,
+                group="world_model",
+                name="narrative_pressure",
+                value={"cluster_id": strongest.get("cluster_id"), "pressure": strongest.get("pressure_score")},
+                scalar=_float(strongest.get("pressure_score")),
+            )
+        )
+        out.append(
+            _feature(
+                pseudo_event,
+                asset=asset,
+                group="world_model",
+                name="belief_conflict_score",
+                value={"cluster_id": strongest.get("cluster_id"), "conflict": strongest.get("conflict_score")},
+                scalar=_float(strongest.get("conflict_score")),
+            )
+        )
+        out.append(
+            _feature(
+                pseudo_event,
+                asset=asset,
+                group="world_model",
+                name="source_consensus_score",
+                value={"cluster_id": strongest.get("cluster_id"), "consensus": strongest.get("consensus_score")},
+                scalar=_float(strongest.get("consensus_score")),
+            )
+        )
     if predictions:
-        top = max(predictions, key=lambda item: (float(item.get("confidence") or 0.0), float(item.get("liquidity_usd") or 0.0)))
-        out.append(_feature(pseudo_event, asset=asset, group="world_model", name="prediction_implied_probability", value={"signal_id": top.get("signal_id"), "question": top.get("question"), "probability": top.get("implied_probability")}, scalar=_float(top.get("implied_probability"))))
-        out.append(_feature(pseudo_event, asset=asset, group="world_model", name="prediction_probability_delta", value={"signal_id": top.get("signal_id"), "delta": top.get("probability_delta")}, scalar=_float(top.get("probability_delta"))))
-        out.append(_feature(pseudo_event, asset=asset, group="world_model", name="prediction_liquidity_usd", value={"signal_id": top.get("signal_id"), "liquidity_usd": top.get("liquidity_usd")}, scalar=_float(top.get("liquidity_usd"))))
+        top = max(
+            predictions,
+            key=lambda item: (float(item.get("confidence") or 0.0), float(item.get("liquidity_usd") or 0.0)),
+        )
+        out.append(
+            _feature(
+                pseudo_event,
+                asset=asset,
+                group="world_model",
+                name="prediction_implied_probability",
+                value={
+                    "signal_id": top.get("signal_id"),
+                    "question": top.get("question"),
+                    "probability": top.get("implied_probability"),
+                },
+                scalar=_float(top.get("implied_probability")),
+            )
+        )
+        out.append(
+            _feature(
+                pseudo_event,
+                asset=asset,
+                group="world_model",
+                name="prediction_probability_delta",
+                value={"signal_id": top.get("signal_id"), "delta": top.get("probability_delta")},
+                scalar=_float(top.get("probability_delta")),
+            )
+        )
+        out.append(
+            _feature(
+                pseudo_event,
+                asset=asset,
+                group="world_model",
+                name="prediction_liquidity_usd",
+                value={"signal_id": top.get("signal_id"), "liquidity_usd": top.get("liquidity_usd")},
+                scalar=_float(top.get("liquidity_usd")),
+            )
+        )
     if beliefs:
         avg_salience = sum(float(item.get("salience") or 0.0) for item in beliefs) / len(beliefs)
-        out.append(_feature(pseudo_event, asset=asset, group="world_model", name="belief_salience", value={"belief_count": len(beliefs), "avg_salience": avg_salience}, scalar=avg_salience))
+        out.append(
+            _feature(
+                pseudo_event,
+                asset=asset,
+                group="world_model",
+                name="belief_salience",
+                value={"belief_count": len(beliefs), "avg_salience": avg_salience},
+                scalar=avg_salience,
+            )
+        )
     return out
 
 
@@ -285,9 +376,16 @@ def derive_world_model_v2_shadow_features(*, asset: str, snapshot: Any) -> list[
     asset = asset.upper()
     ts = int(data.get("as_of_ms") or now_ms())
     event = NormalizedEvent(
-        event_id=str(data.get("snapshot_id") or f"world_model_v2:{asset}:{ts}"), event_type="world_model_v2_snapshot",
-        asset_class="crypto", symbols=[asset], source="world_model_v2", provider="internal",
-        received_ts_ms=ts, computed_ts_ms=max(ts, now_ms()), payload=data, quality_score=1.0,
+        event_id=str(data.get("snapshot_id") or f"world_model_v2:{asset}:{ts}"),
+        event_type="world_model_v2_snapshot",
+        asset_class="crypto",
+        symbols=[asset],
+        source="world_model_v2",
+        provider="internal",
+        received_ts_ms=ts,
+        computed_ts_ms=max(ts, now_ms()),
+        payload=data,
+        quality_score=1.0,
         metadata={"paper_only": True, "shadow_only": True, "execution_authority": "none"},
     )
     out: list[FeatureValue] = []
@@ -295,13 +393,38 @@ def derive_world_model_v2_shadow_features(*, asset: str, snapshot: Any) -> list[
         if str(impact.get("instrument_id") or "").upper() != asset or impact.get("mode") != "current":
             continue
         direction = str(impact.get("direction") or "unknown")
-        scalar = float(impact.get("strength") or 0.0) * (1.0 if direction == "supportive" else -1.0 if direction == "adverse" else 0.0)
+        scalar = float(impact.get("strength") or 0.0) * (
+            1.0 if direction == "supportive" else -1.0 if direction == "adverse" else 0.0
+        )
         name = f"wm2_impact_{impact.get('factor_id')}_{impact.get('horizon')}"
-        out.append(_feature(event, asset=asset, group="world_model_v2_shadow", name=name, value=impact, scalar=scalar, metadata={"shadow_only": True, "mapping_version": impact.get("mapping_version")}))
+        out.append(
+            _feature(
+                event,
+                asset=asset,
+                group="world_model_v2_shadow",
+                name=name,
+                value=impact,
+                scalar=scalar,
+                metadata={"shadow_only": True, "mapping_version": impact.get("mapping_version")},
+            )
+        )
     for forecast in data.get("forecasts") or []:
-        if asset not in [str(item).upper() for item in forecast.get("instrument_ids") or []] or forecast.get("yes_probability") is None:
+        if (
+            asset not in [str(item).upper() for item in forecast.get("instrument_ids") or []]
+            or forecast.get("yes_probability") is None
+        ):
             continue
-        out.append(_feature(event, asset=asset, group="world_model_v2_shadow", name=f"wm2_forecast_{forecast.get('hypothesis_id')}", value=forecast, scalar=float(forecast["yes_probability"]), metadata={"shadow_only": True, "semantic": "forecast_probability_not_direction"}))
+        out.append(
+            _feature(
+                event,
+                asset=asset,
+                group="world_model_v2_shadow",
+                name=f"wm2_forecast_{forecast.get('hypothesis_id')}",
+                value=forecast,
+                scalar=float(forecast["yes_probability"]),
+                metadata={"shadow_only": True, "semantic": "forecast_probability_not_direction"},
+            )
+        )
     return out
 
 
@@ -374,12 +497,16 @@ def _price_features(event: NormalizedEvent) -> list[FeatureValue]:
         px = _float(raw_px)
         if px is None or px <= 0:
             continue
-        out.append(_feature(event, asset=str(raw_symbol).upper(), group="price", name="mid", value={"mid": px}, scalar=px))
+        out.append(
+            _feature(event, asset=str(raw_symbol).upper(), group="price", name="mid", value={"mid": px}, scalar=px)
+        )
     return out
 
 
 def _orderbook_features(event: NormalizedEvent) -> list[FeatureValue]:
-    symbol = (event.symbols[0] if event.symbols else str(event.payload.get("coin") or event.payload.get("symbol") or "")).upper()
+    symbol = (
+        event.symbols[0] if event.symbols else str(event.payload.get("coin") or event.payload.get("symbol") or "")
+    ).upper()
     if not symbol:
         return []
     levels = event.payload.get("levels") or []
@@ -393,11 +520,50 @@ def _orderbook_features(event: NormalizedEvent) -> list[FeatureValue]:
         spread_bps = (ask_px - bid_px) / mid * 10_000
         top_depth = (bid_px * (bid_sz or 0)) + (ask_px * (ask_sz or 0))
         imbalance = ((bid_sz or 0) - (ask_sz or 0)) / max((bid_sz or 0) + (ask_sz or 0), 1e-9)
+        bid_depth_usd = sum((px or 0.0) * (size or 0.0) for px, size in (_level_px_sz(item) for item in bids[:10]))
+        ask_depth_usd = sum((px or 0.0) * (size or 0.0) for px, size in (_level_px_sz(item) for item in asks[:10]))
         out.extend(
             [
-                _feature(event, asset=symbol, group="microstructure", name="spread_bps", value={"spread_bps": spread_bps}, scalar=spread_bps),
-                _feature(event, asset=symbol, group="microstructure", name="top_depth_usd", value={"top_depth_usd": top_depth}, scalar=top_depth),
-                _feature(event, asset=symbol, group="microstructure", name="top_imbalance", value={"top_imbalance": imbalance}, scalar=imbalance),
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="microstructure",
+                    name="spread_bps",
+                    value={"spread_bps": spread_bps},
+                    scalar=spread_bps,
+                ),
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="microstructure",
+                    name="top_depth_usd",
+                    value={"top_depth_usd": top_depth},
+                    scalar=top_depth,
+                ),
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="microstructure",
+                    name="top_imbalance",
+                    value={"top_imbalance": imbalance},
+                    scalar=imbalance,
+                ),
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="microstructure",
+                    name="bid_depth_usd",
+                    value={"bid_depth_usd": bid_depth_usd, "level_count": min(10, len(bids))},
+                    scalar=bid_depth_usd,
+                ),
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="microstructure",
+                    name="ask_depth_usd",
+                    value={"ask_depth_usd": ask_depth_usd, "level_count": min(10, len(asks))},
+                    scalar=ask_depth_usd,
+                ),
             ]
         )
     return out
@@ -416,10 +582,14 @@ def _news_features(event: NormalizedEvent) -> list[FeatureValue]:
     source_score = _float(payload.get("source_score"))
     if source_score is None:
         source_score = float(event.quality_score or 0.0)
-    weighted = max(0.0, min(1.0, importance / 100.0 * max(0.0, min(1.0, confidence)) * max(0.0, min(1.0, source_score))))
+    weighted = max(
+        0.0, min(1.0, importance / 100.0 * max(0.0, min(1.0, confidence)) * max(0.0, min(1.0, source_score)))
+    )
     direction = 1.0 if sentiment == "bullish" else -1.0 if sentiment == "bearish" else 0.0
     catalyst_pressure = direction * weighted
-    newswire_event_id = str(payload.get("newswire_event_id") or event.metadata.get("source_newswire_event_id") or event.event_id)
+    newswire_event_id = str(
+        payload.get("newswire_event_id") or event.metadata.get("source_newswire_event_id") or event.event_id
+    )
     news_metadata = {
         "newswire_event_id": newswire_event_id,
         "headline": payload.get("headline"),
@@ -502,7 +672,9 @@ def _news_policy_features(event: NormalizedEvent, decision: dict[str, Any]) -> l
     event_risk_pressure = weighted * risk_score
     source_consensus = min(1.0, 0.50 * confidence + 0.30 * source_score + 0.20 * quality01)
     payload = event.payload or {}
-    newswire_event_id = str(payload.get("newswire_event_id") or event.metadata.get("source_newswire_event_id") or event.event_id)
+    newswire_event_id = str(
+        payload.get("newswire_event_id") or event.metadata.get("source_newswire_event_id") or event.event_id
+    )
     news_metadata = {
         "newswire_event_id": newswire_event_id,
         "headline": payload.get("headline"),
@@ -522,10 +694,18 @@ def _news_policy_features(event: NormalizedEvent, decision: dict[str, Any]) -> l
         "direction_score": direction_score,
         "direction_confidence": direction_confidence,
         "risk_score": risk_score,
-        "story_id": payload.get("story_id") or event.metadata.get("story_id") or event.metadata.get("source_newswire_metadata", {}).get("story_id"),
-        "story_revision": payload.get("story_revision") or event.metadata.get("story_revision") or event.metadata.get("source_newswire_metadata", {}).get("story_revision"),
-        "story_sources": payload.get("story_sources") or event.metadata.get("source_newswire_metadata", {}).get("story_sources") or [],
-        "story_member_event_ids": payload.get("story_member_event_ids") or event.metadata.get("source_newswire_metadata", {}).get("story_member_event_ids") or [],
+        "story_id": payload.get("story_id")
+        or event.metadata.get("story_id")
+        or event.metadata.get("source_newswire_metadata", {}).get("story_id"),
+        "story_revision": payload.get("story_revision")
+        or event.metadata.get("story_revision")
+        or event.metadata.get("source_newswire_metadata", {}).get("story_revision"),
+        "story_sources": payload.get("story_sources")
+        or event.metadata.get("source_newswire_metadata", {}).get("story_sources")
+        or [],
+        "story_member_event_ids": payload.get("story_member_event_ids")
+        or event.metadata.get("source_newswire_metadata", {}).get("story_member_event_ids")
+        or [],
         "published_at_ms": payload.get("published_at_ms") or event.event_ts_ms,
         "received_at_ms": event.received_ts_ms,
     }
@@ -645,13 +825,49 @@ def _funding_oi_features(event: NormalizedEvent) -> list[FeatureValue]:
         day_volume = _first_float(ctx, "dayNtlVlm", "day_volume_usd", "day_volume")
         basis_bps = _perp_basis_bps(ctx)
         if funding is not None:
-            out.append(_feature(event, asset=symbol, group="funding_oi", name="funding_hourly", value={"funding_hourly": funding}, scalar=funding))
+            out.append(
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="funding_oi",
+                    name="funding_hourly",
+                    value={"funding_hourly": funding},
+                    scalar=funding,
+                )
+            )
         if oi is not None:
-            out.append(_feature(event, asset=symbol, group="funding_oi", name="open_interest", value={"open_interest": oi}, scalar=oi))
+            out.append(
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="funding_oi",
+                    name="open_interest",
+                    value={"open_interest": oi},
+                    scalar=oi,
+                )
+            )
         if day_volume is not None:
-            out.append(_feature(event, asset=symbol, group="funding_oi", name="day_volume_usd", value={"day_volume_usd": day_volume}, scalar=day_volume))
+            out.append(
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="funding_oi",
+                    name="day_volume_usd",
+                    value={"day_volume_usd": day_volume},
+                    scalar=day_volume,
+                )
+            )
         if basis_bps is not None:
-            out.append(_feature(event, asset=symbol, group="funding_oi", name="perp_basis_bps", value={"perp_basis_bps": basis_bps}, scalar=basis_bps))
+            out.append(
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="funding_oi",
+                    name="perp_basis_bps",
+                    value={"perp_basis_bps": basis_bps},
+                    scalar=basis_bps,
+                )
+            )
     return out
 
 
@@ -676,9 +892,7 @@ def _venue_market_snapshot_features(event: NormalizedEvent) -> list[FeatureValue
     bid = _first_float(payload, "bid_px")
     ask = _first_float(payload, "ask_px")
     if mid is not None and mid > 0:
-        out.append(
-            _feature(event, asset=symbol, group="price", name="mid", value={"mid": mid}, scalar=mid)
-        )
+        out.append(_feature(event, asset=symbol, group="price", name="mid", value={"mid": mid}, scalar=mid))
     if funding is not None:
         out.append(
             _feature(
@@ -770,9 +984,7 @@ def _venue_market_snapshot_features(event: NormalizedEvent) -> list[FeatureValue
 
 def _canonical_level_px_size(level: Any) -> tuple[float | None, float | None]:
     if isinstance(level, dict):
-        return _first_float(level, "px", "price"), _first_float(
-            level, "size", "sz", "remaining_base_amount"
-        )
+        return _first_float(level, "px", "price"), _first_float(level, "size", "sz", "remaining_base_amount")
     if isinstance(level, (list, tuple)) and len(level) >= 2:
         return _float(level[0]), _float(level[1])
     return None, None
@@ -819,7 +1031,9 @@ def _iter_asset_contexts(event: NormalizedEvent) -> list[tuple[str, dict[str, An
             continue
         symbol = str(raw_ctx.get("coin") or raw_ctx.get("symbol") or raw_ctx.get("name") or "").upper()
         if not symbol and idx < len(universe) and isinstance(universe[idx], dict):
-            symbol = str(universe[idx].get("name") or universe[idx].get("coin") or universe[idx].get("symbol") or "").upper()
+            symbol = str(
+                universe[idx].get("name") or universe[idx].get("coin") or universe[idx].get("symbol") or ""
+            ).upper()
         if not symbol and idx < len(event.symbols):
             symbol = event.symbols[idx]
         if symbol:
@@ -828,7 +1042,9 @@ def _iter_asset_contexts(event: NormalizedEvent) -> list[tuple[str, dict[str, An
 
 
 def _liquidation_features(event: NormalizedEvent) -> list[FeatureValue]:
-    symbol = (event.symbols[0] if event.symbols else str(event.payload.get("symbol") or event.payload.get("coin") or "")).upper()
+    symbol = (
+        event.symbols[0] if event.symbols else str(event.payload.get("symbol") or event.payload.get("coin") or "")
+    ).upper()
     if not symbol:
         return []
     out: list[FeatureValue] = []
@@ -844,10 +1060,28 @@ def _liquidation_features(event: NormalizedEvent) -> list[FeatureValue]:
     for source_key, feature_name in feature_map.items():
         value = _float(event.payload.get(source_key))
         if value is not None:
-            out.append(_feature(event, asset=symbol, group="liquidations", name=feature_name, value={feature_name: value}, scalar=value))
+            out.append(
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="liquidations",
+                    name=feature_name,
+                    value={feature_name: value},
+                    scalar=value,
+                )
+            )
     source_mix = event.payload.get("source_mix_5m")
     if isinstance(source_mix, dict):
-        out.append(_feature(event, asset=symbol, group="liquidations", name="source_mix_5m", value={"source_mix_5m": source_mix}, scalar=None))
+        out.append(
+            _feature(
+                event,
+                asset=symbol,
+                group="liquidations",
+                name="source_mix_5m",
+                value={"source_mix_5m": source_mix},
+                scalar=None,
+            )
+        )
     return out
 
 
@@ -855,7 +1089,9 @@ def _cross_venue_features(event: NormalizedEvent, *, enabled_dexes: list[str]) -
     pairwise = bool(event.payload.get("pairwise_not_averaged") or event.payload.get("reference_venue_id"))
     if not enabled_dexes and not pairwise:
         return []
-    symbol = (event.symbols[0] if event.symbols else str(event.payload.get("symbol") or event.payload.get("coin") or "")).upper()
+    symbol = (
+        event.symbols[0] if event.symbols else str(event.payload.get("symbol") or event.payload.get("coin") or "")
+    ).upper()
     if not symbol:
         return []
     payload = event.payload or {}
@@ -881,13 +1117,45 @@ def _cross_venue_features(event: NormalizedEvent, *, enabled_dexes: list[str]) -
             return []
         out: list[FeatureValue] = []
         if direct_delta is not None:
-            out.append(_feature(event, asset=symbol, group="cross_venue", name="cross_venue_mid_delta_bps", value={"delta_bps": direct_delta}, scalar=direct_delta, metadata=metadata))
+            out.append(
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="cross_venue",
+                    name="cross_venue_mid_delta_bps",
+                    value={"delta_bps": direct_delta},
+                    scalar=direct_delta,
+                    metadata=metadata,
+                )
+            )
         if direct_volume is not None:
-            out.append(_feature(event, asset=symbol, group="cross_venue", name="cross_venue_volume_imbalance", value={"imbalance": direct_volume}, scalar=direct_volume, metadata=metadata))
+            out.append(
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="cross_venue",
+                    name="cross_venue_volume_imbalance",
+                    value={"imbalance": direct_volume},
+                    scalar=direct_volume,
+                    metadata=metadata,
+                )
+            )
         if direct_liq is not None:
-            out.append(_feature(event, asset=symbol, group="cross_venue", name="cross_venue_liq_imbalance", value={"cross_venue_liq_imbalance": direct_liq}, scalar=direct_liq, metadata=metadata))
+            out.append(
+                _feature(
+                    event,
+                    asset=symbol,
+                    group="cross_venue",
+                    name="cross_venue_liq_imbalance",
+                    value={"cross_venue_liq_imbalance": direct_liq},
+                    scalar=direct_liq,
+                    metadata=metadata,
+                )
+            )
         return out
-    home_mid = _first_float(payload, "hyperliquid_mid", "hl_mid", "mid") or _venue_float(venues, "hyperliquid", "mid", "mark", "mark_px")
+    home_mid = _first_float(payload, "hyperliquid_mid", "hl_mid", "mid") or _venue_float(
+        venues, "hyperliquid", "mid", "mark", "mark_px"
+    )
     external_mids = [_venue_float(venues, venue, "mid", "mark", "mark_px") for venue in enabled]
     external_mids.extend(_first_float(payload, f"{venue}_mid", f"{venue}_mark") for venue in enabled)
     external_mids = [value for value in external_mids if value is not None and value > 0]
@@ -896,8 +1164,20 @@ def _cross_venue_features(event: NormalizedEvent, *, enabled_dexes: list[str]) -
     if home_mid is not None and home_mid > 0 and external_mids:
         external_mid = sum(external_mids) / len(external_mids)
         delta_bps = (external_mid / home_mid - 1.0) * 10_000.0
-        out.append(_feature(event, asset=symbol, group="cross_venue", name="cross_venue_mid_delta_bps", value={"hyperliquid_mid": home_mid, "external_mid": external_mid, "delta_bps": delta_bps}, scalar=delta_bps, metadata=metadata))
-    home_volume = _first_float(payload, "hyperliquid_volume_usd", "hl_volume_usd", "day_volume_usd") or _venue_float(venues, "hyperliquid", "volume_usd", "day_volume_usd")
+        out.append(
+            _feature(
+                event,
+                asset=symbol,
+                group="cross_venue",
+                name="cross_venue_mid_delta_bps",
+                value={"hyperliquid_mid": home_mid, "external_mid": external_mid, "delta_bps": delta_bps},
+                scalar=delta_bps,
+                metadata=metadata,
+            )
+        )
+    home_volume = _first_float(payload, "hyperliquid_volume_usd", "hl_volume_usd", "day_volume_usd") or _venue_float(
+        venues, "hyperliquid", "volume_usd", "day_volume_usd"
+    )
     external_volumes = [_venue_float(venues, venue, "volume_usd", "day_volume_usd") for venue in enabled]
     external_volumes.extend(_first_float(payload, f"{venue}_volume_usd") for venue in enabled)
     external_volumes = [value for value in external_volumes if value is not None and value >= 0]
@@ -905,24 +1185,58 @@ def _cross_venue_features(event: NormalizedEvent, *, enabled_dexes: list[str]) -
         external_volume = sum(external_volumes)
         denom = max(home_volume + external_volume, 1e-9)
         imbalance = (external_volume - home_volume) / denom
-        out.append(_feature(event, asset=symbol, group="cross_venue", name="cross_venue_volume_imbalance", value={"hyperliquid_volume_usd": home_volume, "external_volume_usd": external_volume, "imbalance": imbalance}, scalar=imbalance, metadata=metadata))
+        out.append(
+            _feature(
+                event,
+                asset=symbol,
+                group="cross_venue",
+                name="cross_venue_volume_imbalance",
+                value={
+                    "hyperliquid_volume_usd": home_volume,
+                    "external_volume_usd": external_volume,
+                    "imbalance": imbalance,
+                },
+                scalar=imbalance,
+                metadata=metadata,
+            )
+        )
     direct_liq = _first_float(payload, "cross_venue_liq_imbalance")
     if direct_liq is None:
-        home_liq = _first_float(payload, "hyperliquid_liq_imbalance", "hl_liq_imbalance") or _venue_float(venues, "hyperliquid", "liq_imbalance", "long_vs_short_liq_imbalance") or 0.0
-        external_liqs = [_venue_float(venues, venue, "liq_imbalance", "long_vs_short_liq_imbalance") for venue in enabled]
+        home_liq = (
+            _first_float(payload, "hyperliquid_liq_imbalance", "hl_liq_imbalance")
+            or _venue_float(venues, "hyperliquid", "liq_imbalance", "long_vs_short_liq_imbalance")
+            or 0.0
+        )
+        external_liqs = [
+            _venue_float(venues, venue, "liq_imbalance", "long_vs_short_liq_imbalance") for venue in enabled
+        ]
         external_liqs.extend(_first_float(payload, f"{venue}_liq_imbalance") for venue in enabled)
         external_liqs = [value for value in external_liqs if value is not None]
         if external_liqs:
             direct_liq = sum(external_liqs) - home_liq
     if direct_liq is not None:
-        out.append(_feature(event, asset=symbol, group="cross_venue", name="cross_venue_liq_imbalance", value={"cross_venue_liq_imbalance": direct_liq}, scalar=direct_liq, metadata=metadata))
+        out.append(
+            _feature(
+                event,
+                asset=symbol,
+                group="cross_venue",
+                name="cross_venue_liq_imbalance",
+                value={"cross_venue_liq_imbalance": direct_liq},
+                scalar=direct_liq,
+                metadata=metadata,
+            )
+        )
     return out
 
 
-def derive_rolling_features(*, asset: str, features: list[FeatureValue], as_of_ms: int | None = None) -> list[FeatureValue]:
+def derive_rolling_features(
+    *, asset: str, features: list[FeatureValue], as_of_ms: int | None = None
+) -> list[FeatureValue]:
     asset = asset.upper()
     cutoff = as_of_ms or max((item.computed_ts_ms for item in features if item.asset == asset), default=now_ms())
-    series = {name: _series(features, asset=asset, feature_name=name, as_of_ms=cutoff) for name in ROLLUP_SOURCE_FEATURES}
+    series = {
+        name: _series(features, asset=asset, feature_name=name, as_of_ms=cutoff) for name in ROLLUP_SOURCE_FEATURES
+    }
     return _compute_rollups(asset=asset, series=series, cutoff_ms=cutoff)
 
 
@@ -932,6 +1246,8 @@ def _compute_rollups(*, asset: str, series: dict[str, list[tuple[int, float]]], 
     mids = series.get("mid") or []
     oi = series.get("open_interest") or []
     depth = series.get("top_depth_usd") or []
+    bid_depth = series.get("bid_depth_usd") or []
+    ask_depth = series.get("ask_depth_usd") or []
     spread = series.get("spread_bps") or []
     basis = series.get("perp_basis_bps") or []
     funding = series.get("funding_hourly") or []
@@ -939,7 +1255,11 @@ def _compute_rollups(*, asset: str, series: dict[str, list[tuple[int, float]]], 
     out: list[FeatureValue] = []
     if len(mids) >= 2:
         latest_ts, latest_mid = mids[-1]
-        for window_ms, name in ((60_000, "mid_return_1m_bps"), (300_000, "mid_return_5m_bps"), (900_000, "mid_return_15m_bps")):
+        for window_ms, name in (
+            (60_000, "mid_return_1m_bps"),
+            (300_000, "mid_return_5m_bps"),
+            (900_000, "mid_return_15m_bps"),
+        ):
             baseline = _baseline(mids, latest_ts - window_ms)
             if baseline is not None and baseline > 0:
                 value = (latest_mid - baseline) / baseline * 10_000
@@ -948,21 +1268,41 @@ def _compute_rollups(*, asset: str, series: dict[str, list[tuple[int, float]]], 
             values = [mid for ts, mid in mids if ts >= latest_ts - window_ms]
             returns = [(cur - prev) / prev * 10_000 for prev, cur in pairwise(values) if prev > 0]
             if len(returns) >= 2:
-                out.append(_rollup_feature(asset=asset, name=name, value=statistics.pstdev(returns), computed_ts_ms=cutoff))
+                out.append(
+                    _rollup_feature(asset=asset, name=name, value=statistics.pstdev(returns), computed_ts_ms=cutoff)
+                )
         range_values = [mid for ts, mid in mids if ts >= latest_ts - 3_600_000]
         if len(range_values) >= 3:
             low = min(range_values)
             high = max(range_values)
             if high > low:
                 range_position = (latest_mid - low) / (high - low)
-                out.append(_rollup_feature(asset=asset, name="range_position", value=max(0.0, min(1.0, range_position)), computed_ts_ms=cutoff))
+                out.append(
+                    _rollup_feature(
+                        asset=asset,
+                        name="range_position",
+                        value=max(0.0, min(1.0, range_position)),
+                        computed_ts_ms=cutoff,
+                    )
+                )
                 distance = min(abs(latest_mid - low), abs(high - latest_mid)) / latest_mid * 10_000
-                out.append(_rollup_feature(asset=asset, name="stop_cluster_distance_bps", value=distance, computed_ts_ms=cutoff))
+                out.append(
+                    _rollup_feature(
+                        asset=asset, name="stop_cluster_distance_bps", value=distance, computed_ts_ms=cutoff
+                    )
+                )
     if len(oi) >= 2:
         latest_ts, latest_oi = oi[-1]
         baseline = _baseline(oi, latest_ts - 300_000)
         if baseline is not None and baseline > 0:
-            out.append(_rollup_feature(asset=asset, name="oi_delta_5m_pct", value=(latest_oi - baseline) / baseline * 100.0, computed_ts_ms=cutoff))
+            out.append(
+                _rollup_feature(
+                    asset=asset,
+                    name="oi_delta_5m_pct",
+                    value=(latest_oi - baseline) / baseline * 100.0,
+                    computed_ts_ms=cutoff,
+                )
+            )
         changes = [cur - prev for prev, cur in pairwise([value for _, value in oi[-12:]])]
         velocity = zscore(changes)
         if velocity is not None:
@@ -972,17 +1312,44 @@ def _compute_rollups(*, asset: str, series: dict[str, list[tuple[int, float]]], 
         baseline = _baseline(depth, latest_ts - 300_000)
         if baseline is not None and baseline > 0:
             thinning = max(0.0, (baseline - latest_depth) / baseline * 100.0)
-            out.append(_rollup_feature(asset=asset, name="depth_thinning_5m_pct", value=thinning, computed_ts_ms=cutoff))
+            out.append(
+                _rollup_feature(asset=asset, name="depth_thinning_5m_pct", value=thinning, computed_ts_ms=cutoff)
+            )
+        short_baseline = _baseline(depth, latest_ts - 60_000)
+        if short_baseline is not None and short_baseline > 0:
+            replenishment = (latest_depth - short_baseline) / short_baseline
+            out.append(
+                _rollup_feature(
+                    asset=asset, name="depth_replenishment_rate", value=replenishment, computed_ts_ms=cutoff
+                )
+            )
+    if bid_depth and ask_depth:
+        total_depth = bid_depth[-1][1] + ask_depth[-1][1]
+        if total_depth > 0:
+            depth_imbalance = (bid_depth[-1][1] - ask_depth[-1][1]) / total_depth
+            out.append(
+                _rollup_feature(
+                    asset=asset, name="depth_imbalance_10_levels", value=depth_imbalance, computed_ts_ms=cutoff
+                )
+            )
     if len(spread) >= 2:
         latest_ts, latest_spread = spread[-1]
         baseline = _baseline(spread, latest_ts - 300_000)
         if baseline is not None:
-            out.append(_rollup_feature(asset=asset, name="spread_velocity_5m_bps", value=latest_spread - baseline, computed_ts_ms=cutoff))
+            out.append(
+                _rollup_feature(
+                    asset=asset, name="spread_velocity_5m_bps", value=latest_spread - baseline, computed_ts_ms=cutoff
+                )
+            )
     if len(basis) >= 2:
         latest_ts, latest_basis = basis[-1]
         baseline = _baseline(basis, latest_ts - 900_000)
         if baseline is not None:
-            out.append(_rollup_feature(asset=asset, name="basis_delta_15m_bps", value=latest_basis - baseline, computed_ts_ms=cutoff))
+            out.append(
+                _rollup_feature(
+                    asset=asset, name="basis_delta_15m_bps", value=latest_basis - baseline, computed_ts_ms=cutoff
+                )
+            )
         z = zscore([value for _, value in basis[-24:]])
         if z is not None:
             out.append(_rollup_feature(asset=asset, name="basis_zscore", value=z, computed_ts_ms=cutoff))
@@ -1000,7 +1367,9 @@ def _compute_rollups(*, asset: str, series: dict[str, list[tuple[int, float]]], 
             out.append(_rollup_feature(asset=asset, name="funding_abs_p90_24h", value=p90, computed_ts_ms=cutoff))
     if volume and depth and spread:
         liquidity_score = _volume_liquidity_score(volume[-1][1], depth[-1][1], spread[-1][1])
-        out.append(_rollup_feature(asset=asset, name="volume_liquidity_score", value=liquidity_score, computed_ts_ms=cutoff))
+        out.append(
+            _rollup_feature(asset=asset, name="volume_liquidity_score", value=liquidity_score, computed_ts_ms=cutoff)
+        )
     return out
 
 
@@ -1008,7 +1377,10 @@ def _series(features: list[FeatureValue], *, asset: str, feature_name: str, as_o
     points = [
         (item.computed_ts_ms, float(item.scalar_value))
         for item in features
-        if item.asset == asset and item.feature_name == feature_name and item.scalar_value is not None and item.computed_ts_ms <= as_of_ms
+        if item.asset == asset
+        and item.feature_name == feature_name
+        and item.scalar_value is not None
+        and item.computed_ts_ms <= as_of_ms
     ]
     return sorted(points, key=lambda item: item[0])
 

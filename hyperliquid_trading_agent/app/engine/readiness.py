@@ -5,10 +5,10 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from hyperliquid_trading_agent.app.config import Settings
-from hyperliquid_trading_agent.app.engine.alpha.wave2 import WAVE_2_IDS
 from hyperliquid_trading_agent.app.engine.attribution import OUTCOME_WINDOWS_MS
 from hyperliquid_trading_agent.app.engine.replay_compare import latest_engine_replay_comparison
 from hyperliquid_trading_agent.app.engine.runtime import resolve_engine_runtime
+from hyperliquid_trading_agent.app.engine.time_block_stats import non_overlapping_block_statistics
 from hyperliquid_trading_agent.app.engine.validation_report import build_engine_validation_report
 
 
@@ -66,14 +66,20 @@ def _activation_scope(item: dict[str, Any]) -> str:
 def _paper_eligible(item: dict[str, Any]) -> bool:
     metadata = _metadata(item)
     source = _source_integrity(item)
-    value = metadata.get("paper_eligible", source.get("paper_eligible", True))
-    return bool(value) and _activation_scope(item) != "shadow_only"
+    promotion_state = str(metadata.get("promotion_state") or source.get("promotion_state") or "research_only")
+    value = metadata.get("paper_eligible", source.get("paper_eligible", False))
+    return promotion_state == "paper_approved" and bool(value) and _activation_scope(item) != "shadow_only"
 
 
 def _shadow_research(item: dict[str, Any]) -> bool:
     metadata = _metadata(item)
     source = _source_integrity(item)
-    return _activation_scope(item) == "shadow_only" or bool(metadata.get("operator_promotion_required") or source.get("operator_promotion_required"))
+    promotion_state = str(metadata.get("promotion_state") or source.get("promotion_state") or "research_only")
+    return (
+        promotion_state in {"frozen", "research_only"}
+        or _activation_scope(item) == "shadow_only"
+        or bool(metadata.get("operator_promotion_required") or source.get("operator_promotion_required"))
+    )
 
 
 def _candidate_metadata_complete(item: dict[str, Any]) -> bool:
@@ -96,6 +102,114 @@ def _issue(code: str, detail: str, *, severity: str = "critical") -> dict[str, s
     return {"code": code, "severity": severity, "detail": detail}
 
 
+def _strict_performance_groups(
+    rows: list[dict[str, Any]],
+    *,
+    bootstrap_iterations: int,
+    min_promotion_blocks: int,
+    allowed_strategy_versions: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    exclusions: Counter[str] = Counter()
+    grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        terminal = str(row.get("terminal_state") or "pending")
+        if terminal != "matured":
+            exclusions[f"terminal_state:{terminal}"] += 1
+            continue
+        horizon = str(row.get("candidate_horizon") or "unknown")
+        if horizon != str(row.get("outcome_window") or "unknown"):
+            exclusions["non_native_horizon"] += 1
+            continue
+        if str(row.get("side") or "flat") not in {"long", "short"}:
+            exclusions["non_directional"] += 1
+            continue
+        flags = {str(item) for item in row.get("quality_flags") or []}
+        metadata = _metadata(row)
+        if (
+            str(metadata.get("mark_source") or "unknown") != "feature_store_mid"
+            or {"latest_mark_fallback", "late_mark", "future_mark", "missing_mark_px"} & flags
+        ):
+            exclusions["non_strict_mark"] += 1
+            continue
+        strategy_id = str(row.get("strategy_id") or "unknown")
+        strategy_version = str(row.get("strategy_version") or "unknown")
+        strategy_version_key = f"{strategy_id}@{strategy_version}"
+        if allowed_strategy_versions is not None and strategy_version_key not in allowed_strategy_versions:
+            exclusions["not_paper_approved_exact_version"] += 1
+            continue
+        key = (
+            strategy_id,
+            strategy_version,
+            str(row.get("strategy_family") or "unknown"),
+            horizon,
+        )
+        grouped[key].append(row)
+
+    results: list[dict[str, Any]] = []
+    for (strategy_id, strategy_version, strategy_family, horizon), values in sorted(grouped.items()):
+        seed_key = f"readiness:{strategy_id}@{strategy_version}:{horizon}"
+
+        def block_stats(group_rows: list[dict[str, Any]], value_field: str) -> dict[str, Any]:
+            return non_overlapping_block_statistics(
+                group_rows,
+                value_field=value_field,
+                horizon=horizon,
+                bootstrap_iterations=bootstrap_iterations,
+                min_promotion_blocks=min_promotion_blocks,
+                seed_key=seed_key,
+            )
+
+        gross_stats = block_stats(values, "gross_return_bps")
+        net_stats = block_stats(values, "net_return_bps")
+        r_stats = block_stats(values, "realized_r")
+        measured_values = [
+            row
+            for row in values
+            if row.get("execution_adjusted_return_bps") is not None
+            and str(row.get("execution_cost_quality") or "unavailable") == "measured"
+        ]
+        execution_stats = block_stats(measured_values, "execution_adjusted_return_bps")
+        promotion_reasons: list[str] = []
+        if execution_stats["effective_block_count"] < min_promotion_blocks:
+            promotion_reasons.append("insufficient_measured_execution_time_blocks")
+        if execution_stats["ci_95_lower"] is None or execution_stats["ci_95_lower"] <= 0:
+            promotion_reasons.append("execution_adjusted_ci_lower_not_positive")
+        if r_stats["effective_block_count"] < min_promotion_blocks:
+            promotion_reasons.append("insufficient_realized_r_time_blocks")
+        if r_stats["ci_95_lower"] is None or r_stats["ci_95_lower"] <= 0:
+            promotion_reasons.append("realized_r_ci_lower_not_positive")
+        results.append(
+            {
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+                "strategy_version_key": f"{strategy_id}@{strategy_version}",
+                "strategy_family": strategy_family,
+                "candidate_horizon": horizon,
+                "outcome_window": horizon,
+                "unique_candidate_count": len({str(row.get("candidate_id") or "") for row in values}),
+                "non_overlapping_block_count": net_stats["effective_block_count"],
+                "mean_gross_return_bps": gross_stats["mean"],
+                "mean_gross_return_ci95_bps": [gross_stats["ci_95_lower"], gross_stats["ci_95_upper"]],
+                "mean_modeled_net_return_bps": net_stats["mean"],
+                "mean_modeled_net_return_ci95_bps": [net_stats["ci_95_lower"], net_stats["ci_95_upper"]],
+                "mean_execution_adjusted_return_bps": execution_stats["mean"],
+                "mean_execution_adjusted_return_ci95_bps": [
+                    execution_stats["ci_95_lower"],
+                    execution_stats["ci_95_upper"],
+                ],
+                "measured_execution_block_count": execution_stats["effective_block_count"],
+                "mean_realized_r": r_stats["mean"],
+                "mean_realized_r_ci95": [r_stats["ci_95_lower"], r_stats["ci_95_upper"]],
+                "promotion_eligible": not promotion_reasons,
+                "promotion_reason_codes": promotion_reasons,
+                "purged_cross_boundary_count": net_stats["purged_cross_boundary_count"],
+                "weighting": net_stats["weighting"],
+                "confidence": "inferential" if net_stats["descriptive_ci"] else "descriptive",
+            }
+        )
+    return results, dict(exclusions)
+
+
 async def _maybe_list(repository: Any, method_name: str, **kwargs) -> list[dict[str, Any]]:
     method = getattr(repository, method_name, None)
     if not callable(method):
@@ -106,12 +220,78 @@ async def _maybe_list(repository: Any, method_name: str, **kwargs) -> list[dict[
         return await method()
 
 
-async def _latest_trader_engine_loop_status(repository: Any, settings: Settings, *, generated_at_ms: int) -> dict[str, Any]:
+async def _page_strict_native_outcomes(
+    repository: Any,
+    *,
+    cohort_start_ms: int,
+    cohort_end_ms: int,
+    max_rows: int,
+    page_size: int = 5_000,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Load the native-horizon promotion cohort without a silent sample cap."""
+
+    method = getattr(repository, "list_candidate_outcome_attributions", None)
+    if not callable(method):
+        return [], False
+    rows: list[dict[str, Any]] = []
+    seen_pages: set[tuple[str, ...]] = set()
+    offset = 0
+    while len(rows) < max_rows:
+        requested = min(page_size, max_rows - len(rows))
+        try:
+            page = list(
+                await method(
+                    terminal_state="matured",
+                    cohort_start_ms=cohort_start_ms,
+                    cohort_end_ms=cohort_end_ms,
+                    native_horizon_only=True,
+                    limit=requested,
+                    offset=offset,
+                )
+            )
+        except TypeError:
+            fallback = await _maybe_list(
+                repository,
+                "list_candidate_outcome_attributions",
+                limit=max_rows,
+            )
+            filtered = [
+                row
+                for row in fallback
+                if str(row.get("terminal_state") or "") == "matured"
+                and str(row.get("candidate_horizon") or "") == str(row.get("outcome_window") or "")
+                and cohort_start_ms <= _ts(row, "created_at_ms") < cohort_end_ms
+            ]
+            return filtered[:max_rows], len(filtered) >= max_rows
+        if not page:
+            return rows, False
+        fingerprint = tuple(str(row.get("attribution_id") or "") for row in page[:5])
+        if fingerprint in seen_pages:
+            return rows, False
+        seen_pages.add(fingerprint)
+        rows.extend(
+            row
+            for row in page
+            if str(row.get("terminal_state") or "") == "matured"
+            and str(row.get("candidate_horizon") or "") == str(row.get("outcome_window") or "")
+            and cohort_start_ms <= _ts(row, "created_at_ms") < cohort_end_ms
+        )
+        offset += len(page)
+        if len(page) < requested:
+            return rows, False
+    return rows[:max_rows], True
+
+
+async def _latest_trader_engine_loop_status(
+    repository: Any, settings: Settings, *, generated_at_ms: int
+) -> dict[str, Any]:
     runtime = await resolve_engine_runtime(repository, settings, generated_at_ms=generated_at_ms)
     return runtime if runtime.get("runtime_source") == "trader_heartbeat" else {}
 
 
-async def _engine_service_status(repository: Any, settings: Settings, engine_service: Any | None, *, generated_at_ms: int) -> dict[str, Any]:
+async def _engine_service_status(
+    repository: Any, settings: Settings, engine_service: Any | None, *, generated_at_ms: int
+) -> dict[str, Any]:
     return await resolve_engine_runtime(
         repository,
         settings,
@@ -139,7 +319,9 @@ async def build_paper_readiness_scorecard(
     generated_at_ms = _now_ms()
     hours = int(window_hours or settings.engine_readiness_window_hours)
     window_ms = max(1, hours) * 60 * 60 * 1000
-    start_ms = max(generated_at_ms - window_ms, int(getattr(settings, "engine_readiness_clean_window_start_ms", 0) or 0))
+    start_ms = max(
+        generated_at_ms - window_ms, int(getattr(settings, "engine_readiness_clean_window_start_ms", 0) or 0)
+    )
     service_status = await _engine_service_status(repository, settings, engine_service, generated_at_ms=generated_at_ms)
     engine_enabled = bool(service_status.get("enabled", settings.engine_enabled))
     live_enabled = bool(service_status.get("live_enabled", settings.engine_live_enabled))
@@ -147,7 +329,9 @@ async def build_paper_readiness_scorecard(
     shadow_enabled = bool(service_status.get("shadow_enabled", settings.engine_shadow_enabled))
     execution_modes = service_status.get("execution_modes") or settings.engine_execution_mode_list
 
-    expanded_limit = max(limit, int(settings.engine_readiness_min_candidates), int(settings.engine_readiness_min_shadow_intents))
+    expanded_limit = max(
+        limit, int(settings.engine_readiness_min_candidates), int(settings.engine_readiness_min_shadow_intents)
+    )
     evidence_limit = max(expanded_limit * 2, 5000)
     risk_limit = max(expanded_limit * 5, 5000)
     outcome_limit = max(expanded_limit * (len(OUTCOME_WINDOWS_MS) + 2), 10_000)
@@ -160,20 +344,60 @@ async def build_paper_readiness_scorecard(
             settings=settings,
             window_hours=hours,
         )
-    candidates_all = await repository.list_alpha_candidates(since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit)
+    candidates_all = await repository.list_alpha_candidates(
+        since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit
+    )
     ev_all = await repository.list_ev_estimates(since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit)
-    allocations_all = await repository.list_allocation_decisions(since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit)
+    allocations_all = await repository.list_allocation_decisions(
+        since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit
+    )
     intents_all = await repository.list_order_intents(since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit)
-    reports_all = await repository.list_execution_reports(since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit)
-    risk_all = await repository.list_risk_gateway_decisions(since_ms=start_ms, until_ms=generated_at_ms, limit=risk_limit)
+    reports_all = await repository.list_execution_reports(
+        since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit
+    )
+    risk_all = await repository.list_risk_gateway_decisions(
+        since_ms=start_ms, until_ms=generated_at_ms, limit=risk_limit
+    )
     risk_rejects_all = [item for item in risk_all if item.get("decision") == "reject"]
     positions_all = await repository.list_position_theses(limit=expanded_limit)
     pnl_all = await repository.list_pnl_attribution(since_ms=start_ms, until_ms=generated_at_ms, limit=expanded_limit)
-    council_all = await _maybe_list(repository, "list_council_reviews", since_ms=start_ms, until_ms=generated_at_ms, limit=evidence_limit)
-    candidate_evidence_links_all = await _maybe_list(repository, "list_candidate_evidence_links", since_ms=start_ms, until_ms=generated_at_ms, limit=evidence_limit)
-    candidate_outcomes_all = await _maybe_list(repository, "list_candidate_outcome_attributions", since_ms=start_ms, until_ms=generated_at_ms, limit=outcome_limit)
-    portfolio_concentration_events_all = await _maybe_list(repository, "list_portfolio_concentration_events", since_ms=start_ms, until_ms=generated_at_ms, limit=evidence_limit)
-    strategy_regime_performance_all = await _maybe_list(repository, "list_strategy_regime_performance", since_ms=start_ms, until_ms=generated_at_ms, limit=evidence_limit)
+    council_all = await _maybe_list(
+        repository, "list_council_reviews", since_ms=start_ms, until_ms=generated_at_ms, limit=evidence_limit
+    )
+    candidate_evidence_links_all = await _maybe_list(
+        repository, "list_candidate_evidence_links", since_ms=start_ms, until_ms=generated_at_ms, limit=evidence_limit
+    )
+    candidate_outcomes_all = await _maybe_list(
+        repository,
+        "list_candidate_outcome_attributions",
+        since_ms=start_ms,
+        until_ms=generated_at_ms,
+        limit=outcome_limit,
+    )
+    strict_outcome_limit = max(
+        1,
+        int(getattr(settings, "engine_readiness_max_strict_outcome_rows", 100_000)),
+    )
+    strict_candidate_outcomes, strict_outcomes_truncated = await _page_strict_native_outcomes(
+        repository,
+        cohort_start_ms=start_ms,
+        cohort_end_ms=generated_at_ms,
+        max_rows=strict_outcome_limit,
+    )
+    portfolio_concentration_events_all = await _maybe_list(
+        repository,
+        "list_portfolio_concentration_events",
+        since_ms=start_ms,
+        until_ms=generated_at_ms,
+        limit=evidence_limit,
+    )
+    strategy_regime_performance_all = await _maybe_list(
+        repository,
+        "list_strategy_regime_performance",
+        since_ms=start_ms,
+        until_ms=generated_at_ms,
+        limit=evidence_limit,
+    )
     latest_replay_comparison = await latest_engine_replay_comparison(repository)
     exact_method = getattr(repository, "get_engine_readiness_aggregates", None)
     exact: dict[str, Any] = {}
@@ -188,7 +412,6 @@ async def build_paper_readiness_scorecard(
     exact_breadth = exact.get("breadth") if isinstance(exact.get("breadth"), dict) else {}
     exact_concentration = exact.get("concentration") if isinstance(exact.get("concentration"), dict) else {}
     exact_execution = exact.get("execution") if isinstance(exact.get("execution"), dict) else {}
-    strict_performance = exact.get("strict_performance") if isinstance(exact.get("strict_performance"), dict) else {}
 
     candidates = _in_window(candidates_all, start_ms, "created_at_ms")
     ev_estimates = _in_window(ev_all, start_ms, "created_at_ms")
@@ -203,7 +426,9 @@ async def build_paper_readiness_scorecard(
     candidate_evidence_links = _in_window(candidate_evidence_links_all, start_ms, "created_at_ms")
     candidate_outcomes = _in_window(candidate_outcomes_all, start_ms, "created_at_ms", "window_end_ms")
     portfolio_concentration_events = _in_window(portfolio_concentration_events_all, start_ms, "created_at_ms")
-    strategy_regime_performance = _in_window(strategy_regime_performance_all, start_ms, "created_at_ms", "window_end_ms")
+    strategy_regime_performance = _in_window(
+        strategy_regime_performance_all, start_ms, "created_at_ms", "window_end_ms"
+    )
 
     hard_blocks: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
@@ -214,17 +439,31 @@ async def build_paper_readiness_scorecard(
     paper_reports = [item for item in reports if item.get("execution_mode") == "paper"]
     live_intents = [item for item in intents if item.get("execution_mode") == "live"]
     live_reports = [item for item in reports if item.get("execution_mode") == "live"]
-    paper_intent_count = _i(exact_counts.get("paper_intent_count"), len(paper_intents)) if exact_counts else len(paper_intents)
-    paper_report_count = _i(exact_counts.get("paper_report_count"), len(paper_reports)) if exact_counts else len(paper_reports)
-    live_intent_count = _i(exact_counts.get("live_intent_count"), len(live_intents)) if exact_counts else len(live_intents)
-    live_report_count = _i(exact_counts.get("live_report_count"), len(live_reports)) if exact_counts else len(live_reports)
+    paper_intent_count = (
+        _i(exact_counts.get("paper_intent_count"), len(paper_intents)) if exact_counts else len(paper_intents)
+    )
+    paper_report_count = (
+        _i(exact_counts.get("paper_report_count"), len(paper_reports)) if exact_counts else len(paper_reports)
+    )
+    live_intent_count = (
+        _i(exact_counts.get("live_intent_count"), len(live_intents)) if exact_counts else len(live_intents)
+    )
+    live_report_count = (
+        _i(exact_counts.get("live_report_count"), len(live_reports)) if exact_counts else len(live_reports)
+    )
     shadow_only = shadow_enabled and not paper_enabled and execution_modes == ["shadow"]
     if live_enabled:
         hard_blocks.append(_issue("live_enabled", "ENGINE_LIVE_ENABLED must remain false."))
     if shadow_only and (paper_intent_count or paper_report_count):
-        hard_blocks.append(_issue("paper_intents_in_shadow_only", f"paper_intents={paper_intent_count} paper_reports={paper_report_count}"))
+        hard_blocks.append(
+            _issue(
+                "paper_intents_in_shadow_only", f"paper_intents={paper_intent_count} paper_reports={paper_report_count}"
+            )
+        )
     if live_intent_count or live_report_count:
-        hard_blocks.append(_issue("live_intents_present", f"live_intents={live_intent_count} live_reports={live_report_count}"))
+        hard_blocks.append(
+            _issue("live_intents_present", f"live_intents={live_intent_count} live_reports={live_report_count}")
+        )
     checks["shadow_integrity"] = {
         "shadow_only": shadow_only,
         "paper_intent_count": paper_intent_count,
@@ -236,21 +475,52 @@ async def build_paper_readiness_scorecard(
 
     # Reliability and observation sample.
     last_run_at = service_status.get("last_run_at_ms")
-    last_run_completed_at_ms = service_status.get("last_run_completed_at_ms") or service_status.get("last_successful_run_completed_at_ms") or last_run_at
+    last_run_completed_at_ms = (
+        service_status.get("last_run_completed_at_ms")
+        or service_status.get("last_successful_run_completed_at_ms")
+        or last_run_at
+    )
     run_in_progress = bool(service_status.get("run_in_progress"))
     current_run_started_at_ms = service_status.get("current_run_started_at_ms")
     stale_after_ms = max(1, settings.engine_validation_alert_stale_loop_seconds) * 1000
-    if engine_enabled and run_in_progress and current_run_started_at_ms and generated_at_ms - _i(current_run_started_at_ms) > stale_after_ms:
-        hard_blocks.append(_issue("engine_loop_stale", f"current_run_started_at_ms={current_run_started_at_ms}; stuck_after_ms={stale_after_ms}"))
-    elif engine_enabled and not run_in_progress and (not last_run_completed_at_ms or generated_at_ms - _i(last_run_completed_at_ms) > stale_after_ms):
-        hard_blocks.append(_issue("engine_loop_stale", f"last_run_completed_at_ms={last_run_completed_at_ms}; stale_after_ms={stale_after_ms}"))
+    if (
+        engine_enabled
+        and run_in_progress
+        and current_run_started_at_ms
+        and generated_at_ms - _i(current_run_started_at_ms) > stale_after_ms
+    ):
+        hard_blocks.append(
+            _issue(
+                "engine_loop_stale",
+                f"current_run_started_at_ms={current_run_started_at_ms}; stuck_after_ms={stale_after_ms}",
+            )
+        )
+    elif (
+        engine_enabled
+        and not run_in_progress
+        and (not last_run_completed_at_ms or generated_at_ms - _i(last_run_completed_at_ms) > stale_after_ms)
+    ):
+        hard_blocks.append(
+            _issue(
+                "engine_loop_stale",
+                f"last_run_completed_at_ms={last_run_completed_at_ms}; stale_after_ms={stale_after_ms}",
+            )
+        )
     if service_status.get("last_error"):
         hard_blocks.append(_issue("runtime_errors_present", f"last_error={service_status.get('last_error')}"))
     run_count = _i(service_status.get("run_count"), 0)
     if run_count < settings.engine_readiness_min_runs:
-        warnings.append(_issue("insufficient_engine_runs", f"Need >={settings.engine_readiness_min_runs} runs; observed {run_count}.", severity="warning"))
+        warnings.append(
+            _issue(
+                "insufficient_engine_runs",
+                f"Need >={settings.engine_readiness_min_runs} runs; observed {run_count}.",
+                severity="warning",
+            )
+        )
 
-    shadow_timestamps = [_ts(item, "created_at_ms") for item in intents_all if item.get("execution_mode") == "shadow"] + [_ts(item, "created_at_ms") for item in candidates_all]
+    shadow_timestamps = [
+        _ts(item, "created_at_ms") for item in intents_all if item.get("execution_mode") == "shadow"
+    ] + [_ts(item, "created_at_ms") for item in candidates_all]
     shadow_timestamps = [item for item in shadow_timestamps if item > 0]
     first_shadow_ms = min(shadow_timestamps) if shadow_timestamps else None
     if exact_window:
@@ -270,10 +540,27 @@ async def build_paper_readiness_scorecard(
     if first_shadow_ms is not None:
         observed_hours = round((generated_at_ms - max(start_ms, first_shadow_ms)) / 3_600_000, 4)
     if observed_hours < hours:
-        hard_blocks.append(_issue("insufficient_shadow_observation", f"Need >={hours}h shadow observation; observed {observed_hours:.2f}h."))
-    candidate_count_for_gate = _i(exact_counts.get("candidate_count"), len(candidates)) if exact_counts else len(candidates)
-    shadow_intent_count_for_gate = _i(exact_counts.get("shadow_intent_count"), len([item for item in intents if item.get("execution_mode") == "shadow"])) if exact_counts else len([item for item in intents if item.get("execution_mode") == "shadow"])
-    if candidate_count_for_gate < settings.engine_readiness_min_candidates or shadow_intent_count_for_gate < settings.engine_readiness_min_shadow_intents:
+        hard_blocks.append(
+            _issue(
+                "insufficient_shadow_observation",
+                f"Need >={hours}h shadow observation; observed {observed_hours:.2f}h.",
+            )
+        )
+    candidate_count_for_gate = (
+        _i(exact_counts.get("candidate_count"), len(candidates)) if exact_counts else len(candidates)
+    )
+    shadow_intent_count_for_gate = (
+        _i(
+            exact_counts.get("shadow_intent_count"),
+            len([item for item in intents if item.get("execution_mode") == "shadow"]),
+        )
+        if exact_counts
+        else len([item for item in intents if item.get("execution_mode") == "shadow"])
+    )
+    if (
+        candidate_count_for_gate < settings.engine_readiness_min_candidates
+        or shadow_intent_count_for_gate < settings.engine_readiness_min_shadow_intents
+    ):
         hard_blocks.append(
             _issue(
                 "insufficient_sample_size",
@@ -328,9 +615,17 @@ async def build_paper_readiness_scorecard(
             "regime_age_ms": regime_age_ms,
         }
         if not feature_present or not regime_present:
-            hard_blocks.append(_issue("missing_core_data", f"{asset}: feature_present={feature_present} regime_present={regime_present}"))
-        elif (feature_age_ms is not None and feature_age_ms > max_data_age_ms) or (regime_age_ms is not None and regime_age_ms > max_data_age_ms):
-            hard_blocks.append(_issue("missing_core_data", f"{asset}: feature_age_ms={feature_age_ms} regime_age_ms={regime_age_ms}"))
+            hard_blocks.append(
+                _issue(
+                    "missing_core_data", f"{asset}: feature_present={feature_present} regime_present={regime_present}"
+                )
+            )
+        elif (feature_age_ms is not None and feature_age_ms > max_data_age_ms) or (
+            regime_age_ms is not None and regime_age_ms > max_data_age_ms
+        ):
+            hard_blocks.append(
+                _issue("missing_core_data", f"{asset}: feature_age_ms={feature_age_ms} regime_age_ms={regime_age_ms}")
+            )
     feature_coverage_pct = _pct(feature_ok, len(core_symbols))
     regime_coverage_pct = _pct(regime_ok, len(core_symbols))
     checks["data_completeness"] = {
@@ -343,33 +638,92 @@ async def build_paper_readiness_scorecard(
     # Decision quality and risk gateway.
     candidate_ids = {str(item.get("candidate_id")) for item in candidates if item.get("candidate_id")}
     ev_candidate_ids = {str(item.get("candidate_id")) for item in ev_estimates if item.get("candidate_id")}
-    ev_coverage_pct = _pct(
-        _i(exact_coverage.get("ev_covered_candidate_count"), len(candidate_ids & ev_candidate_ids)),
-        candidate_count_for_gate,
-    ) if exact_coverage else _pct(len(candidate_ids & ev_candidate_ids), len(candidate_ids))
-    allocated_count = _i(exact_counts.get("allocated_count"), len([item for item in allocations if item.get("status") in {"allocate", "reduce", "require_debate"}])) if exact_counts else len([item for item in allocations if item.get("status") in {"allocate", "reduce", "require_debate"}])
-    allocation_count_for_gate = _i(exact_counts.get("allocation_count"), len(allocations)) if exact_counts else len(allocations)
+    ev_coverage_pct = (
+        _pct(
+            _i(exact_coverage.get("ev_covered_candidate_count"), len(candidate_ids & ev_candidate_ids)),
+            candidate_count_for_gate,
+        )
+        if exact_coverage
+        else _pct(len(candidate_ids & ev_candidate_ids), len(candidate_ids))
+    )
+    allocated_count = (
+        _i(
+            exact_counts.get("allocated_count"),
+            len([item for item in allocations if item.get("status") in {"allocate", "reduce", "require_debate"}]),
+        )
+        if exact_counts
+        else len([item for item in allocations if item.get("status") in {"allocate", "reduce", "require_debate"}])
+    )
+    allocation_count_for_gate = (
+        _i(exact_counts.get("allocation_count"), len(allocations)) if exact_counts else len(allocations)
+    )
     allocation_rate_pct = _pct(allocated_count, allocation_count_for_gate)
     if ev_coverage_pct < settings.engine_readiness_min_ev_coverage_pct:
-        warnings.append(_issue("low_ev_coverage", f"EV coverage {ev_coverage_pct}% below {settings.engine_readiness_min_ev_coverage_pct}%.", severity="warning"))
-    if allocation_rate_pct < settings.engine_readiness_min_allocation_rate_pct or allocation_rate_pct > settings.engine_readiness_max_allocation_rate_pct:
-        warnings.append(_issue("allocation_rate_out_of_bounds", f"Allocation rate {allocation_rate_pct}% outside {settings.engine_readiness_min_allocation_rate_pct}-{settings.engine_readiness_max_allocation_rate_pct}%.", severity="warning"))
+        warnings.append(
+            _issue(
+                "low_ev_coverage",
+                f"EV coverage {ev_coverage_pct}% below {settings.engine_readiness_min_ev_coverage_pct}%.",
+                severity="warning",
+            )
+        )
+    if (
+        allocation_rate_pct < settings.engine_readiness_min_allocation_rate_pct
+        or allocation_rate_pct > settings.engine_readiness_max_allocation_rate_pct
+    ):
+        warnings.append(
+            _issue(
+                "allocation_rate_out_of_bounds",
+                f"Allocation rate {allocation_rate_pct}% outside {settings.engine_readiness_min_allocation_rate_pct}-{settings.engine_readiness_max_allocation_rate_pct}%.",
+                severity="warning",
+            )
+        )
     metadata_complete = [_candidate_metadata_complete(item) for item in candidates]
     candidate_strategy_metadata_coverage_pct = (
         _pct(_i(exact_coverage.get("candidate_strategy_metadata_covered_count")), candidate_count_for_gate)
         if exact_coverage
         else _pct(sum(1 for item in metadata_complete if item), len(metadata_complete))
     )
-    if candidate_strategy_metadata_coverage_pct < settings.engine_readiness_min_candidate_strategy_metadata_coverage_pct:
-        hard_blocks.append(_issue("candidate_strategy_metadata_missing", f"Candidate strategy metadata coverage {candidate_strategy_metadata_coverage_pct}% below {settings.engine_readiness_min_candidate_strategy_metadata_coverage_pct}%."))
-    allocated_candidate_ids = {str(item.get("candidate_id")) for item in allocations if item.get("status") in {"allocate", "reduce", "require_debate"} and item.get("candidate_id")}
+    if (
+        candidate_strategy_metadata_coverage_pct
+        < settings.engine_readiness_min_candidate_strategy_metadata_coverage_pct
+    ):
+        hard_blocks.append(
+            _issue(
+                "candidate_strategy_metadata_missing",
+                f"Candidate strategy metadata coverage {candidate_strategy_metadata_coverage_pct}% below {settings.engine_readiness_min_candidate_strategy_metadata_coverage_pct}%.",
+            )
+        )
+    allocated_candidate_ids = {
+        str(item.get("candidate_id"))
+        for item in allocations
+        if item.get("status") in {"allocate", "reduce", "require_debate"} and item.get("candidate_id")
+    }
     council_candidate_ids = {str(item.get("candidate_id")) for item in council_reviews if item.get("candidate_id")}
-    allocated_candidate_count = _i(exact_counts.get("allocated_candidate_count"), len(allocated_candidate_ids)) if exact_counts else len(allocated_candidate_ids)
+    allocated_candidate_count = (
+        _i(exact_counts.get("allocated_candidate_count"), len(allocated_candidate_ids))
+        if exact_counts
+        else len(allocated_candidate_ids)
+    )
     council_review_coverage_pct = (
-        100.0 if not allocated_candidate_count else _pct(_i(exact_coverage.get("council_covered_allocated_candidate_count")), allocated_candidate_count)
-    ) if exact_coverage else (100.0 if not allocated_candidate_ids else _pct(len(allocated_candidate_ids & council_candidate_ids), len(allocated_candidate_ids)))
+        (
+            100.0
+            if not allocated_candidate_count
+            else _pct(_i(exact_coverage.get("council_covered_allocated_candidate_count")), allocated_candidate_count)
+        )
+        if exact_coverage
+        else (
+            100.0
+            if not allocated_candidate_ids
+            else _pct(len(allocated_candidate_ids & council_candidate_ids), len(allocated_candidate_ids))
+        )
+    )
     if council_review_coverage_pct < settings.engine_readiness_min_council_review_coverage_pct:
-        hard_blocks.append(_issue("council_review_coverage_low", f"Council review coverage {council_review_coverage_pct}% below {settings.engine_readiness_min_council_review_coverage_pct}%."))
+        hard_blocks.append(
+            _issue(
+                "council_review_coverage_low",
+                f"Council review coverage {council_review_coverage_pct}% below {settings.engine_readiness_min_council_review_coverage_pct}%.",
+            )
+        )
     checks["decision_quality"] = {
         "candidate_count": candidate_count_for_gate,
         "ev_estimate_count": len(ev_estimates),
@@ -382,43 +736,152 @@ async def build_paper_readiness_scorecard(
     }
 
     # Wave 1B evidence spine coverage.
-    evidence_candidate_ids = {str(item.get("candidate_id")) for item in candidate_evidence_links if item.get("candidate_id")}
+    evidence_candidate_ids = {
+        str(item.get("candidate_id")) for item in candidate_evidence_links if item.get("candidate_id")
+    }
     candidate_evidence_link_coverage_pct = (
-        100.0 if not candidate_count_for_gate else _pct(_i(exact_coverage.get("evidence_covered_candidate_count")), candidate_count_for_gate)
-    ) if exact_coverage else (100.0 if not candidate_ids else _pct(len(candidate_ids & evidence_candidate_ids), len(candidate_ids)))
+        (
+            100.0
+            if not candidate_count_for_gate
+            else _pct(_i(exact_coverage.get("evidence_covered_candidate_count")), candidate_count_for_gate)
+        )
+        if exact_coverage
+        else (100.0 if not candidate_ids else _pct(len(candidate_ids & evidence_candidate_ids), len(candidate_ids)))
+    )
     if candidate_evidence_link_coverage_pct < settings.engine_readiness_min_candidate_evidence_link_coverage_pct:
-        hard_blocks.append(_issue("candidate_evidence_link_coverage_low", f"Candidate evidence link coverage {candidate_evidence_link_coverage_pct}% below {settings.engine_readiness_min_candidate_evidence_link_coverage_pct}%."))
-    council_packet_candidate_ids = {str(item.get("candidate_id")) for item in candidate_evidence_links if item.get("candidate_id") and (item.get("council_review_id") or (_metadata(item).get("council_decision") in {"reject", "allow_shadow", "allow_paper", "needs_more_evidence"}))}
+        hard_blocks.append(
+            _issue(
+                "candidate_evidence_link_coverage_low",
+                f"Candidate evidence link coverage {candidate_evidence_link_coverage_pct}% below {settings.engine_readiness_min_candidate_evidence_link_coverage_pct}%.",
+            )
+        )
+    council_packet_candidate_ids = {
+        str(item.get("candidate_id"))
+        for item in candidate_evidence_links
+        if item.get("candidate_id")
+        and (
+            item.get("council_review_id")
+            or (
+                _metadata(item).get("council_decision")
+                in {"reject", "allow_shadow", "allow_paper", "needs_more_evidence"}
+            )
+        )
+    }
     council_packet_coverage_pct = (
-        100.0 if not candidate_count_for_gate else _pct(_i(exact_coverage.get("council_covered_candidate_count")), candidate_count_for_gate)
-    ) if exact_coverage else (100.0 if not candidate_ids else _pct(len(candidate_ids & council_packet_candidate_ids), len(candidate_ids)))
+        (
+            100.0
+            if not candidate_count_for_gate
+            else _pct(_i(exact_coverage.get("council_covered_candidate_count")), candidate_count_for_gate)
+        )
+        if exact_coverage
+        else (
+            100.0 if not candidate_ids else _pct(len(candidate_ids & council_packet_candidate_ids), len(candidate_ids))
+        )
+    )
     if council_packet_coverage_pct < settings.engine_readiness_min_council_packet_coverage_pct:
-        hard_blocks.append(_issue("council_packet_coverage_low", f"Council packet coverage {council_packet_coverage_pct}% below {settings.engine_readiness_min_council_packet_coverage_pct}%."))
-    non_flat_candidate_ids = {str(item.get("candidate_id")) for item in candidates if item.get("candidate_id") and item.get("side") != "flat"}
-    flat_candidate_ids = {str(item.get("candidate_id")) for item in candidates if item.get("candidate_id") and item.get("side") == "flat"}
-    candidate_risk_ids = {str(item.get("candidate_id")) for item in candidate_evidence_links if item.get("candidate_id") and item.get("risk_decision_id")}
-    non_flat_candidate_count = _i(exact_counts.get("non_flat_candidate_count"), len(non_flat_candidate_ids)) if exact_counts else len(non_flat_candidate_ids)
-    flat_candidate_count = _i(exact_counts.get("flat_candidate_count"), len(flat_candidate_ids)) if exact_counts else len(flat_candidate_ids)
+        hard_blocks.append(
+            _issue(
+                "council_packet_coverage_low",
+                f"Council packet coverage {council_packet_coverage_pct}% below {settings.engine_readiness_min_council_packet_coverage_pct}%.",
+            )
+        )
+    non_flat_candidate_ids = {
+        str(item.get("candidate_id")) for item in candidates if item.get("candidate_id") and item.get("side") != "flat"
+    }
+    flat_candidate_ids = {
+        str(item.get("candidate_id")) for item in candidates if item.get("candidate_id") and item.get("side") == "flat"
+    }
+    candidate_risk_ids = {
+        str(item.get("candidate_id"))
+        for item in candidate_evidence_links
+        if item.get("candidate_id") and item.get("risk_decision_id")
+    }
+    non_flat_candidate_count = (
+        _i(exact_counts.get("non_flat_candidate_count"), len(non_flat_candidate_ids))
+        if exact_counts
+        else len(non_flat_candidate_ids)
+    )
+    flat_candidate_count = (
+        _i(exact_counts.get("flat_candidate_count"), len(flat_candidate_ids))
+        if exact_counts
+        else len(flat_candidate_ids)
+    )
     candidate_risk_gateway_coverage_pct = (
-        100.0 if not non_flat_candidate_count else _pct(_i(exact_coverage.get("risk_covered_candidate_count")), non_flat_candidate_count)
-    ) if exact_coverage else (100.0 if not non_flat_candidate_ids else _pct(len(non_flat_candidate_ids & candidate_risk_ids), len(non_flat_candidate_ids)))
+        (
+            100.0
+            if not non_flat_candidate_count
+            else _pct(_i(exact_coverage.get("risk_covered_candidate_count")), non_flat_candidate_count)
+        )
+        if exact_coverage
+        else (
+            100.0
+            if not non_flat_candidate_ids
+            else _pct(len(non_flat_candidate_ids & candidate_risk_ids), len(non_flat_candidate_ids))
+        )
+    )
     if candidate_risk_gateway_coverage_pct < settings.engine_readiness_min_candidate_risk_gateway_coverage_pct:
-        hard_blocks.append(_issue("candidate_risk_gateway_coverage_low", f"Candidate-level RiskGateway coverage {candidate_risk_gateway_coverage_pct}% below {settings.engine_readiness_min_candidate_risk_gateway_coverage_pct}%."))
+        hard_blocks.append(
+            _issue(
+                "candidate_risk_gateway_coverage_low",
+                f"Candidate-level RiskGateway coverage {candidate_risk_gateway_coverage_pct}% below {settings.engine_readiness_min_candidate_risk_gateway_coverage_pct}%.",
+            )
+        )
     flat_no_trade_risk_coverage_pct = (
-        _pct(_i(exact_coverage.get("flat_risk_covered_candidate_count")), flat_candidate_count)
-    ) if exact_coverage else _pct(len(flat_candidate_ids & candidate_risk_ids), len(flat_candidate_ids))
+        (_pct(_i(exact_coverage.get("flat_risk_covered_candidate_count")), flat_candidate_count))
+        if exact_coverage
+        else _pct(len(flat_candidate_ids & candidate_risk_ids), len(flat_candidate_ids))
+    )
     if flat_candidate_count and flat_no_trade_risk_coverage_pct < 100.0:
-        hard_blocks.append(_issue("flat_no_trade_risk_evidence_coverage_low", f"Flat/no-trade RiskGateway evidence coverage {flat_no_trade_risk_coverage_pct}% below 100%."))
-    outcome_candidate_ids = {str(item.get("candidate_id")) for item in candidate_outcomes if item.get("candidate_id") and str(item.get("terminal_state") or "") in {"matured", "missing_mark"}}
-    matured_candidate_ids = {str(item.get("candidate_id")) for item in candidates if item.get("candidate_id") and generated_at_ms - _ts(item, "created_at_ms") >= 5 * 60 * 1000}
-    matured_candidate_count = _i(exact_counts.get("matured_candidate_count"), len(matured_candidate_ids)) if exact_counts else len(matured_candidate_ids)
+        hard_blocks.append(
+            _issue(
+                "flat_no_trade_risk_evidence_coverage_low",
+                f"Flat/no-trade RiskGateway evidence coverage {flat_no_trade_risk_coverage_pct}% below 100%.",
+            )
+        )
+    outcome_candidate_ids = {
+        str(item.get("candidate_id"))
+        for item in candidate_outcomes
+        if item.get("candidate_id") and str(item.get("terminal_state") or "") in {"matured", "missing_mark"}
+    }
+    matured_candidate_ids = {
+        str(item.get("candidate_id"))
+        for item in candidates
+        if item.get("candidate_id") and generated_at_ms - _ts(item, "created_at_ms") >= 5 * 60 * 1000
+    }
+    matured_candidate_count = (
+        _i(exact_counts.get("matured_candidate_count"), len(matured_candidate_ids))
+        if exact_counts
+        else len(matured_candidate_ids)
+    )
     matured_outcome_attribution_coverage_pct = (
-        100.0 if not matured_candidate_count else _pct(_i(exact_coverage.get("matured_outcome_covered_candidate_count")), matured_candidate_count)
-    ) if exact_coverage else (100.0 if not matured_candidate_ids else _pct(len(matured_candidate_ids & outcome_candidate_ids), len(matured_candidate_ids)))
-    if matured_outcome_attribution_coverage_pct < settings.engine_readiness_min_matured_outcome_attribution_coverage_pct:
-        hard_blocks.append(_issue("matured_outcome_attribution_coverage_low", f"Matured outcome attribution coverage {matured_outcome_attribution_coverage_pct}% below {settings.engine_readiness_min_matured_outcome_attribution_coverage_pct}%."))
+        (
+            100.0
+            if not matured_candidate_count
+            else _pct(_i(exact_coverage.get("matured_outcome_covered_candidate_count")), matured_candidate_count)
+        )
+        if exact_coverage
+        else (
+            100.0
+            if not matured_candidate_ids
+            else _pct(len(matured_candidate_ids & outcome_candidate_ids), len(matured_candidate_ids))
+        )
+    )
+    if (
+        matured_outcome_attribution_coverage_pct
+        < settings.engine_readiness_min_matured_outcome_attribution_coverage_pct
+    ):
+        hard_blocks.append(
+            _issue(
+                "matured_outcome_attribution_coverage_low",
+                f"Matured outcome attribution coverage {matured_outcome_attribution_coverage_pct}% below {settings.engine_readiness_min_matured_outcome_attribution_coverage_pct}%.",
+            )
+        )
     checks["wave1b_evidence_spine"] = {
-        "candidate_evidence_link_count": _i(exact_coverage.get("evidence_covered_candidate_count"), len(candidate_evidence_links)) if exact_coverage else len(candidate_evidence_links),
+        "candidate_evidence_link_count": _i(
+            exact_coverage.get("evidence_covered_candidate_count"), len(candidate_evidence_links)
+        )
+        if exact_coverage
+        else len(candidate_evidence_links),
         "candidate_evidence_link_coverage_pct": candidate_evidence_link_coverage_pct,
         "council_packet_coverage_pct": council_packet_coverage_pct,
         "candidate_risk_gateway_coverage_pct": candidate_risk_gateway_coverage_pct,
@@ -433,21 +896,48 @@ async def build_paper_readiness_scorecard(
         violations = " ".join(str(item) for item in reject.get("violations") or []).lower()
         if any(token in violations for token in ["stale", "invalid", "schema", "missing", "freshness"]):
             stale_or_invalid_rejects += 1
-    risk_reject_count_for_gate = _i(exact_counts.get("risk_reject_count"), len(risk_rejects)) if exact_counts else len(risk_rejects)
+    risk_reject_count_for_gate = (
+        _i(exact_counts.get("risk_reject_count"), len(risk_rejects)) if exact_counts else len(risk_rejects)
+    )
     risk_denominator = risk_reject_count_for_gate + shadow_intent_count_for_gate
     risk_reject_rate_pct = _pct(risk_reject_count_for_gate, risk_denominator)
     if risk_reject_rate_pct > settings.engine_readiness_max_risk_reject_rate_pct:
-        warnings.append(_issue("risk_reject_rate_high", f"Risk reject rate {risk_reject_rate_pct}% exceeds {settings.engine_readiness_max_risk_reject_rate_pct}%.", severity="warning"))
-    if risk_reject_count_for_gate >= settings.engine_validation_risk_reject_spike_count and stale_or_invalid_rejects >= max(1, risk_reject_count_for_gate // 2):
-        hard_blocks.append(_issue("risk_reject_spike_critical", f"{risk_reject_count_for_gate} rejects in window; stale_or_invalid={stale_or_invalid_rejects}."))
+        warnings.append(
+            _issue(
+                "risk_reject_rate_high",
+                f"Risk reject rate {risk_reject_rate_pct}% exceeds {settings.engine_readiness_max_risk_reject_rate_pct}%.",
+                severity="warning",
+            )
+        )
+    if (
+        risk_reject_count_for_gate >= settings.engine_validation_risk_reject_spike_count
+        and stale_or_invalid_rejects >= max(1, risk_reject_count_for_gate // 2)
+    ):
+        hard_blocks.append(
+            _issue(
+                "risk_reject_spike_critical",
+                f"{risk_reject_count_for_gate} rejects in window; stale_or_invalid={stale_or_invalid_rejects}.",
+            )
+        )
     intent_ids = {str(item.get("intent_id")) for item in intents if item.get("intent_id")}
     risk_intent_ids = {str(item.get("intent_id")) for item in risk_decisions if item.get("intent_id")}
     intent_count_for_gate = _i(exact_counts.get("intent_count"), len(intent_ids)) if exact_counts else len(intent_ids)
     risk_gateway_coverage_pct = (
-        100.0 if not intent_count_for_gate else _pct(_i(exact_coverage.get("risk_covered_intent_count")), intent_count_for_gate)
-    ) if exact_coverage else (100.0 if not intent_ids else _pct(len(intent_ids & risk_intent_ids), len(intent_ids)))
+        (
+            100.0
+            if not intent_count_for_gate
+            else _pct(_i(exact_coverage.get("risk_covered_intent_count")), intent_count_for_gate)
+        )
+        if exact_coverage
+        else (100.0 if not intent_ids else _pct(len(intent_ids & risk_intent_ids), len(intent_ids)))
+    )
     if risk_gateway_coverage_pct < settings.engine_readiness_min_risk_gateway_coverage_pct:
-        hard_blocks.append(_issue("risk_gateway_coverage_low", f"RiskGateway coverage {risk_gateway_coverage_pct}% below {settings.engine_readiness_min_risk_gateway_coverage_pct}%."))
+        hard_blocks.append(
+            _issue(
+                "risk_gateway_coverage_low",
+                f"RiskGateway coverage {risk_gateway_coverage_pct}% below {settings.engine_readiness_min_risk_gateway_coverage_pct}%.",
+            )
+        )
     checks["risk_gateway"] = {
         "risk_reject_count": risk_reject_count_for_gate,
         "risk_reject_rate_pct": risk_reject_rate_pct,
@@ -464,16 +954,29 @@ async def build_paper_readiness_scorecard(
     failure_count = (
         _i(exact_counts.get("execution_failure_count"))
         if exact_counts
-        else sum(count for status, count in report_status_counts.items() if status in {"failed", "rejected", "expired", "cancelled"})
+        else sum(
+            count
+            for status, count in report_status_counts.items()
+            if status in {"failed", "rejected", "expired", "cancelled"}
+        )
     )
-    execution_report_count = _i(exact_counts.get("execution_report_count"), len(reports)) if exact_counts else len(reports)
+    execution_report_count = (
+        _i(exact_counts.get("execution_report_count"), len(reports)) if exact_counts else len(reports)
+    )
     fill_failure_rate_pct = _pct(failure_count, execution_report_count)
     measured_reports = [
         item
         for item in reports
-        if item.get("status") == "filled" and item.get("avg_fill_px") is not None and _f(item.get("filled_size")) > 0
+        if item.get("status") in {"filled", "partial"}
+        and item.get("avg_fill_px") is not None
+        and _f(item.get("filled_size")) > 0
+        and str(item.get("cost_quality") or "unavailable") == "measured"
     ]
-    measured_report_count = _i(exact_counts.get("measured_execution_report_count"), len(measured_reports)) if exact_counts else len(measured_reports)
+    measured_report_count = (
+        _i(exact_counts.get("measured_execution_report_count"), len(measured_reports))
+        if exact_counts
+        else len(measured_reports)
+    )
     avg_slippage_bps = (
         round(_f(exact_counts.get("measured_slippage_total_bps")) / measured_report_count, 4)
         if exact_counts and measured_report_count
@@ -482,9 +985,21 @@ async def build_paper_readiness_scorecard(
         else 0.0
     )
     if avg_slippage_bps > settings.engine_readiness_max_avg_slippage_bps:
-        warnings.append(_issue("slippage_high", f"Average simulated slippage {avg_slippage_bps} bps exceeds {settings.engine_readiness_max_avg_slippage_bps} bps.", severity="warning"))
+        warnings.append(
+            _issue(
+                "slippage_high",
+                f"Average simulated slippage {avg_slippage_bps} bps exceeds {settings.engine_readiness_max_avg_slippage_bps} bps.",
+                severity="warning",
+            )
+        )
     if fill_failure_rate_pct > settings.engine_readiness_max_fill_failure_rate_pct:
-        warnings.append(_issue("fill_failure_rate_high", f"Fill failure rate {fill_failure_rate_pct}% exceeds {settings.engine_readiness_max_fill_failure_rate_pct}%.", severity="warning"))
+        warnings.append(
+            _issue(
+                "fill_failure_rate_high",
+                f"Fill failure rate {fill_failure_rate_pct}% exceeds {settings.engine_readiness_max_fill_failure_rate_pct}%.",
+                severity="warning",
+            )
+        )
     checks["execution_simulation"] = {
         "report_count": execution_report_count,
         "status_counts": dict(report_status_counts),
@@ -504,6 +1019,7 @@ async def build_paper_readiness_scorecard(
     shadow_research_families: set[str] = set()
     candidate_strategy_families: dict[str, str] = {}
     matured_outcome_candidate_ids_by_strategy: dict[str, set[str]] = defaultdict(set)
+    matured_outcome_candidate_ids_by_strategy_version: dict[str, set[str]] = defaultdict(set)
     for outcome in candidate_outcomes:
         if str(outcome.get("terminal_state") or "") != "matured":
             continue
@@ -511,8 +1027,15 @@ async def build_paper_readiness_scorecard(
         candidate_id = str(outcome.get("candidate_id") or "")
         if candidate_id:
             matured_outcome_candidate_ids_by_strategy[strategy_id].add(candidate_id)
+            strategy_version = str(outcome.get("strategy_version") or "unknown")
+            matured_outcome_candidate_ids_by_strategy_version[f"{strategy_id}@{strategy_version}"].add(
+                candidate_id
+            )
     matured_outcome_counts_by_strategy = {
         key: len(value) for key, value in matured_outcome_candidate_ids_by_strategy.items()
+    }
+    matured_outcome_counts_by_strategy_version = {
+        key: len(value) for key, value in matured_outcome_candidate_ids_by_strategy_version.items()
     }
     min_matured_per_strategy = max(
         1,
@@ -520,6 +1043,8 @@ async def build_paper_readiness_scorecard(
     )
     raw_paper_eligible_strategies: set[str] = set()
     raw_paper_eligible_families: set[str] = set()
+    raw_paper_eligible_strategy_versions: set[str] = set()
+    paper_eligible_active_strategy_versions: set[str] = set()
     for candidate in candidates:
         metadata = _metadata(candidate)
         family = str(metadata.get("strategy_family") or candidate.get("strategy_family") or "unknown")
@@ -532,7 +1057,11 @@ async def build_paper_readiness_scorecard(
             if _paper_eligible(candidate):
                 raw_paper_eligible_strategies.add(strategy_id)
                 raw_paper_eligible_families.add(family)
-                if len(matured_outcome_candidate_ids_by_strategy[strategy_id]) >= min_matured_per_strategy:
+                strategy_version = str(metadata.get("strategy_version") or candidate.get("strategy_version") or "unknown")
+                strategy_version_key = f"{strategy_id}@{strategy_version}"
+                raw_paper_eligible_strategy_versions.add(strategy_version_key)
+                if matured_outcome_counts_by_strategy_version.get(strategy_version_key, 0) >= min_matured_per_strategy:
+                    paper_eligible_active_strategy_versions.add(strategy_version_key)
                     paper_eligible_active_strategies.add(strategy_id)
                     paper_eligible_active_families.add(family)
             if _shadow_research(candidate):
@@ -543,18 +1072,31 @@ async def build_paper_readiness_scorecard(
         active_alpha_families = {str(item) for item in exact_breadth.get("active_shadow_families") or []}
         raw_paper_eligible_strategies = {str(item) for item in exact_breadth.get("raw_paper_eligible_strategies") or []}
         raw_paper_eligible_families = {str(item) for item in exact_breadth.get("raw_paper_eligible_families") or []}
+        raw_paper_eligible_strategy_versions = {
+            str(item) for item in exact_breadth.get("raw_paper_eligible_strategy_versions") or []
+        }
         matured_outcome_counts_by_strategy = {
             str(strategy_id): _i(count)
             for strategy_id, count in (exact_breadth.get("matured_outcome_candidate_count_by_strategy") or {}).items()
+        }
+        matured_outcome_counts_by_strategy_version = {
+            str(strategy_version_key): _i(count)
+            for strategy_version_key, count in (
+                exact_breadth.get("matured_outcome_candidate_count_by_strategy_version") or {}
+            ).items()
         }
         strategy_families = {
             str(strategy_id): str(family)
             for strategy_id, family in (exact_breadth.get("paper_eligible_strategy_families") or {}).items()
         }
+        paper_eligible_active_strategy_versions = {
+            strategy_version_key
+            for strategy_version_key in raw_paper_eligible_strategy_versions
+            if matured_outcome_counts_by_strategy_version.get(strategy_version_key, 0) >= min_matured_per_strategy
+        }
         paper_eligible_active_strategies = {
-            strategy_id
-            for strategy_id in raw_paper_eligible_strategies
-            if matured_outcome_counts_by_strategy.get(strategy_id, 0) >= min_matured_per_strategy
+            strategy_version_key.rsplit("@", 1)[0]
+            for strategy_version_key in paper_eligible_active_strategy_versions
         }
         paper_eligible_active_families = {
             strategy_families.get(strategy_id, "unknown")
@@ -565,17 +1107,33 @@ async def build_paper_readiness_scorecard(
     # first-class candidates in the same rolling window after integration. Report
     # strategy-level categories as mutually exclusive so it is not simultaneously
     # presented as paper eligible and research only.
-    current_first_class_strategies = WAVE_2_IDS if settings.engine_alpha_catalog_mode == "integrated" else set()
-    shadow_research_strategies.difference_update(raw_paper_eligible_strategies | current_first_class_strategies)
+    shadow_research_strategies.difference_update(raw_paper_eligible_strategies)
     shadow_research_families = {
         candidate_strategy_families.get(strategy_id, "unknown")
         for strategy_id in shadow_research_strategies
         if candidate_strategy_families.get(strategy_id, "unknown") != "unknown"
     }
     if len(paper_eligible_active_strategies) < settings.engine_readiness_min_active_strategy_count_24h:
-        hard_blocks.append(_issue("insufficient_active_strategy_count", f"Need >={settings.engine_readiness_min_active_strategy_count_24h} paper-eligible active alpha strategies; observed {len(paper_eligible_active_strategies)}. Shadow-active strategies observed={len(active_alpha_strategies)}."))
+        hard_blocks.append(
+            _issue(
+                "insufficient_active_strategy_count",
+                f"Need >={settings.engine_readiness_min_active_strategy_count_24h} paper-eligible active alpha strategies; observed {len(paper_eligible_active_strategies)}. Shadow-active strategies observed={len(active_alpha_strategies)}.",
+            )
+        )
     if len(paper_eligible_active_families) < settings.engine_readiness_min_active_strategy_family_count_24h:
-        hard_blocks.append(_issue("insufficient_active_strategy_family_count", f"Need >={settings.engine_readiness_min_active_strategy_family_count_24h} paper-eligible active alpha families; observed {len(paper_eligible_active_families)}. Shadow-active families observed={len(active_alpha_families)}."))
+        hard_blocks.append(
+            _issue(
+                "insufficient_active_strategy_family_count",
+                f"Need >={settings.engine_readiness_min_active_strategy_family_count_24h} paper-eligible active alpha families; observed {len(paper_eligible_active_families)}. Shadow-active families observed={len(active_alpha_families)}.",
+            )
+        )
+    if strict_outcomes_truncated and raw_paper_eligible_strategy_versions:
+        hard_blocks.append(
+            _issue(
+                "strict_outcome_evidence_truncated",
+                f"Native-horizon promotion evidence reached the fail-closed limit of {strict_outcome_limit} rows.",
+            )
+        )
 
     allocation_strategy_counts: Counter[str] = Counter()
     allocation_notional_by_strategy: dict[str, float] = defaultdict(float)
@@ -596,21 +1154,63 @@ async def build_paper_readiness_scorecard(
         allocation_notional_by_symbol_strategy[f"{asset}:{strategy}"] += notional
         total_allocated_notional += notional
     if exact_concentration:
-        allocation_notional_by_strategy = defaultdict(float, {str(key): _f(value) for key, value in (exact_concentration.get("allocation_notional_by_strategy") or {}).items()})
-        allocation_notional_by_family = defaultdict(float, {str(key): _f(value) for key, value in (exact_concentration.get("allocation_notional_by_family") or {}).items()})
-        allocation_notional_by_symbol_strategy = defaultdict(float, {str(key): _f(value) for key, value in (exact_concentration.get("allocation_notional_by_symbol_strategy") or {}).items()})
+        allocation_notional_by_strategy = defaultdict(
+            float,
+            {
+                str(key): _f(value)
+                for key, value in (exact_concentration.get("allocation_notional_by_strategy") or {}).items()
+            },
+        )
+        allocation_notional_by_family = defaultdict(
+            float,
+            {
+                str(key): _f(value)
+                for key, value in (exact_concentration.get("allocation_notional_by_family") or {}).items()
+            },
+        )
+        allocation_notional_by_symbol_strategy = defaultdict(
+            float,
+            {
+                str(key): _f(value)
+                for key, value in (exact_concentration.get("allocation_notional_by_symbol_strategy") or {}).items()
+            },
+        )
         total_allocated_notional = _f(exact_concentration.get("total_allocated_notional_usd"))
-    dominant_strategy = max(allocation_notional_by_strategy, key=lambda key: allocation_notional_by_strategy[key]) if allocation_notional_by_strategy else None
-    dominant_share_pct = _pct(allocation_notional_by_strategy.get(dominant_strategy or "", 0.0), total_allocated_notional)
-    dominant_family = max(allocation_notional_by_family, key=lambda key: allocation_notional_by_family[key]) if allocation_notional_by_family else None
-    dominant_family_share_pct = _pct(allocation_notional_by_family.get(dominant_family or "", 0.0), total_allocated_notional)
-    dominant_symbol_strategy = max(allocation_notional_by_symbol_strategy, key=lambda key: allocation_notional_by_symbol_strategy[key]) if allocation_notional_by_symbol_strategy else None
-    dominant_symbol_strategy_share_pct = _pct(allocation_notional_by_symbol_strategy.get(dominant_symbol_strategy or "", 0.0), total_allocated_notional)
+    dominant_strategy = (
+        max(allocation_notional_by_strategy, key=lambda key: allocation_notional_by_strategy[key])
+        if allocation_notional_by_strategy
+        else None
+    )
+    dominant_share_pct = _pct(
+        allocation_notional_by_strategy.get(dominant_strategy or "", 0.0), total_allocated_notional
+    )
+    dominant_family = (
+        max(allocation_notional_by_family, key=lambda key: allocation_notional_by_family[key])
+        if allocation_notional_by_family
+        else None
+    )
+    dominant_family_share_pct = _pct(
+        allocation_notional_by_family.get(dominant_family or "", 0.0), total_allocated_notional
+    )
+    dominant_symbol_strategy = (
+        max(allocation_notional_by_symbol_strategy, key=lambda key: allocation_notional_by_symbol_strategy[key])
+        if allocation_notional_by_symbol_strategy
+        else None
+    )
+    dominant_symbol_strategy_share_pct = _pct(
+        allocation_notional_by_symbol_strategy.get(dominant_symbol_strategy or "", 0.0), total_allocated_notional
+    )
     directional_shadow_intent_count = shadow_intent_count_for_gate
     concentration_min_samples = max(1, int(getattr(settings, "engine_readiness_concentration_min_samples", 50)))
     concentration_gate_active = directional_shadow_intent_count >= concentration_min_samples
     if dominant_share_pct > 45 and concentration_gate_active:
-        warnings.append(_issue("strategy_dominance", f"{dominant_strategy} produced {dominant_share_pct}% of allocation notional.", severity="warning"))
+        warnings.append(
+            _issue(
+                "strategy_dominance",
+                f"{dominant_strategy} produced {dominant_share_pct}% of allocation notional.",
+                severity="warning",
+            )
+        )
     elif dominant_share_pct > 45:
         warnings.append(
             _issue(
@@ -620,11 +1220,32 @@ async def build_paper_readiness_scorecard(
             )
         )
     if concentration_gate_active and dominant_share_pct > settings.engine_readiness_max_strategy_allocation_share_pct:
-        hard_blocks.append(_issue("strategy_allocation_dominance", f"{dominant_strategy} allocation share {dominant_share_pct}% exceeds {settings.engine_readiness_max_strategy_allocation_share_pct}%."))
-    if concentration_gate_active and dominant_family_share_pct > settings.engine_readiness_max_strategy_family_allocation_share_pct:
-        hard_blocks.append(_issue("strategy_family_allocation_dominance", f"{dominant_family} family allocation share {dominant_family_share_pct}% exceeds {settings.engine_readiness_max_strategy_family_allocation_share_pct}%."))
-    if concentration_gate_active and dominant_symbol_strategy_share_pct > settings.engine_readiness_max_symbol_strategy_allocation_share_pct:
-        hard_blocks.append(_issue("symbol_strategy_allocation_dominance", f"{dominant_symbol_strategy} share {dominant_symbol_strategy_share_pct}% exceeds {settings.engine_readiness_max_symbol_strategy_allocation_share_pct}%."))
+        hard_blocks.append(
+            _issue(
+                "strategy_allocation_dominance",
+                f"{dominant_strategy} allocation share {dominant_share_pct}% exceeds {settings.engine_readiness_max_strategy_allocation_share_pct}%.",
+            )
+        )
+    if (
+        concentration_gate_active
+        and dominant_family_share_pct > settings.engine_readiness_max_strategy_family_allocation_share_pct
+    ):
+        hard_blocks.append(
+            _issue(
+                "strategy_family_allocation_dominance",
+                f"{dominant_family} family allocation share {dominant_family_share_pct}% exceeds {settings.engine_readiness_max_strategy_family_allocation_share_pct}%.",
+            )
+        )
+    if (
+        concentration_gate_active
+        and dominant_symbol_strategy_share_pct > settings.engine_readiness_max_symbol_strategy_allocation_share_pct
+    ):
+        hard_blocks.append(
+            _issue(
+                "symbol_strategy_allocation_dominance",
+                f"{dominant_symbol_strategy} share {dominant_symbol_strategy_share_pct}% exceeds {settings.engine_readiness_max_symbol_strategy_allocation_share_pct}%.",
+            )
+        )
     checks["strategy_diversity"] = {
         "candidate_counts": dict(candidate_strategy_counts),
         "active_alpha_strategy_count": len(active_alpha_strategies),
@@ -637,10 +1258,15 @@ async def build_paper_readiness_scorecard(
         "paper_eligible_active_family_count": len(paper_eligible_active_families),
         "paper_eligible_active_strategies": sorted(paper_eligible_active_strategies),
         "paper_eligible_active_families": sorted(paper_eligible_active_families),
+        "paper_eligible_active_strategy_versions": sorted(paper_eligible_active_strategy_versions),
         "raw_paper_eligible_strategies": sorted(raw_paper_eligible_strategies),
         "raw_paper_eligible_families": sorted(raw_paper_eligible_families),
+        "raw_paper_eligible_strategy_versions": sorted(raw_paper_eligible_strategy_versions),
         "matured_outcome_candidate_count_by_strategy": {
             key: value for key, value in sorted(matured_outcome_counts_by_strategy.items())
+        },
+        "matured_outcome_candidate_count_by_strategy_version": {
+            key: value for key, value in sorted(matured_outcome_counts_by_strategy_version.items())
         },
         "required_matured_outcomes_per_active_strategy": min_matured_per_strategy,
         "shadow_research_strategy_count": len(shadow_research_strategies),
@@ -650,7 +1276,9 @@ async def build_paper_readiness_scorecard(
         "allocation_counts": dict(allocation_strategy_counts),
         "allocation_notional_usd": {key: round(value, 4) for key, value in allocation_notional_by_strategy.items()},
         "allocation_notional_by_family": {key: round(value, 4) for key, value in allocation_notional_by_family.items()},
-        "allocation_notional_by_symbol_strategy": {key: round(value, 4) for key, value in allocation_notional_by_symbol_strategy.items()},
+        "allocation_notional_by_symbol_strategy": {
+            key: round(value, 4) for key, value in allocation_notional_by_symbol_strategy.items()
+        },
         "dominant_strategy": dominant_strategy,
         "dominant_allocation_share_pct": dominant_share_pct,
         "dominant_family": dominant_family,
@@ -662,51 +1290,68 @@ async def build_paper_readiness_scorecard(
         "concentration_min_samples": concentration_min_samples,
     }
 
-    performance_groups = [item for item in strict_performance.get("groups") or [] if isinstance(item, dict)]
-    performance_by_strategy: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    min_promotion_blocks = max(1, int(getattr(settings, "engine_promotion_min_effective_blocks", 30)))
+    bootstrap_iterations = max(1, int(getattr(settings, "engine_promotion_bootstrap_iterations", 10_000)))
+    performance_groups, strict_exclusions = _strict_performance_groups(
+        strict_candidate_outcomes,
+        bootstrap_iterations=bootstrap_iterations,
+        min_promotion_blocks=min_promotion_blocks,
+        allowed_strategy_versions=raw_paper_eligible_strategy_versions,
+    )
+    performance_by_version: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for item in performance_groups:
-        performance_by_strategy[str(item.get("strategy_id") or "unknown")].append(item)
+        performance_by_version[str(item.get("strategy_version_key") or "unknown@unknown")].append(item)
     performance_sample_failures: list[str] = []
     performance_nonpositive: list[dict[str, Any]] = []
-    if strict_performance:
-        for strategy_id in sorted(paper_eligible_active_strategies):
-            groups = performance_by_strategy.get(strategy_id, [])
-            qualifying = [item for item in groups if _i(item.get("unique_candidate_count")) >= min_matured_per_strategy]
+    if raw_paper_eligible_strategy_versions:
+        for strategy_version_key in sorted(raw_paper_eligible_strategy_versions):
+            groups = performance_by_version.get(strategy_version_key, [])
+            qualifying = [
+                item for item in groups if _i(item.get("non_overlapping_block_count")) >= min_promotion_blocks
+            ]
             if not qualifying:
-                performance_sample_failures.append(strategy_id)
+                performance_sample_failures.append(strategy_version_key)
                 continue
             for item in qualifying:
-                if _f(item.get("mean_modeled_net_return_bps")) <= 0 or _f(item.get("mean_realized_r")) <= 0:
+                if not bool(item.get("promotion_eligible")):
                     performance_nonpositive.append(item)
         if performance_sample_failures:
             hard_blocks.append(
                 _issue(
                     "strategy_performance_sample_insufficient",
-                    f"Paper-eligible strategies lack >={min_matured_per_strategy} strict native-horizon shadow outcomes: {performance_sample_failures}.",
+                    f"Paper-eligible exact versions lack >={min_promotion_blocks} effective non-overlapping time blocks: {performance_sample_failures}.",
                 )
             )
         if performance_nonpositive:
             compact = [
                 {
                     "strategy_id": item.get("strategy_id"),
+                    "strategy_version_key": item.get("strategy_version_key"),
                     "horizon": item.get("candidate_horizon"),
                     "samples": item.get("unique_candidate_count"),
+                    "effective_blocks": item.get("non_overlapping_block_count"),
                     "mean_net_bps": item.get("mean_modeled_net_return_bps"),
+                    "net_ci95_bps": item.get("mean_modeled_net_return_ci95_bps"),
                     "mean_r": item.get("mean_realized_r"),
+                    "r_ci95": item.get("mean_realized_r_ci95"),
+                    "reason_codes": item.get("promotion_reason_codes"),
                 }
                 for item in performance_nonpositive
             ]
             hard_blocks.append(
                 _issue(
-                    "strategy_performance_nonpositive",
-                    f"Strict native-horizon after-cost shadow performance is non-positive: {compact}.",
+                    "strategy_performance_ci_lower_not_positive",
+                    f"Strict native-horizon non-overlapping block confidence gate failed: {compact}.",
                 )
             )
     checks["strict_signal_performance"] = {
-        "semantics": strict_performance.get("semantics"),
-        "rows_seen": _i(strict_performance.get("rows_seen")),
-        "exclusions": strict_performance.get("exclusions") or {},
-        "required_samples_per_strategy_horizon": min_matured_per_strategy,
+        "semantics": "strict native-horizon marks; candidate means collapse by instrument then equal-weighted in purged non-overlapping time blocks",
+        "rows_seen": len(strict_candidate_outcomes),
+        "row_limit": strict_outcome_limit,
+        "row_limit_reached": strict_outcomes_truncated,
+        "exclusions": strict_exclusions,
+        "required_effective_blocks_per_strategy_horizon": min_promotion_blocks,
+        "bootstrap_iterations": bootstrap_iterations,
         "groups": performance_groups,
         "sample_failures": performance_sample_failures,
         "nonpositive_groups": performance_nonpositive,
@@ -717,13 +1362,23 @@ async def build_paper_readiness_scorecard(
     strategy_regime_rows_ok = [
         row
         for row in strategy_regime_performance
-        if _i(row.get("candidate_count"), 0) >= settings.engine_readiness_min_strategy_regime_sample_count and _f(row.get("score")) >= settings.engine_readiness_min_strategy_regime_score
+        if _i(row.get("candidate_count"), 0) >= settings.engine_readiness_min_strategy_regime_sample_count
+        and _f(row.get("score")) >= settings.engine_readiness_min_strategy_regime_score
     ]
     evidence_strategy_ids = {str(row.get("strategy_id") or "unknown") for row in strategy_regime_rows_ok}
-    shadow_strategy_regime_evidence_coverage_pct = _pct(len(active_alpha_strategies & evidence_strategy_ids), len(active_alpha_strategies))
-    strategy_regime_evidence_coverage_pct = _pct(len(paper_eligible_active_strategies & evidence_strategy_ids), len(paper_eligible_active_strategies))
+    shadow_strategy_regime_evidence_coverage_pct = _pct(
+        len(active_alpha_strategies & evidence_strategy_ids), len(active_alpha_strategies)
+    )
+    strategy_regime_evidence_coverage_pct = _pct(
+        len(paper_eligible_active_strategies & evidence_strategy_ids), len(paper_eligible_active_strategies)
+    )
     if strategy_regime_evidence_coverage_pct < settings.engine_readiness_min_strategy_regime_evidence_coverage_pct:
-        hard_blocks.append(_issue("strategy_regime_evidence_coverage_low", f"Paper-eligible strategy-regime evidence coverage {strategy_regime_evidence_coverage_pct}% below {settings.engine_readiness_min_strategy_regime_evidence_coverage_pct}%. Shadow strategy-regime evidence coverage={shadow_strategy_regime_evidence_coverage_pct}%."))
+        hard_blocks.append(
+            _issue(
+                "strategy_regime_evidence_coverage_low",
+                f"Paper-eligible strategy-regime evidence coverage {strategy_regime_evidence_coverage_pct}% below {settings.engine_readiness_min_strategy_regime_evidence_coverage_pct}%. Shadow strategy-regime evidence coverage={shadow_strategy_regime_evidence_coverage_pct}%.",
+            )
+        )
     low_score_rows = [
         row
         for row in strategy_regime_performance
@@ -732,7 +1387,12 @@ async def build_paper_readiness_scorecard(
         and _f(row.get("score")) < settings.engine_readiness_min_strategy_regime_score
     ]
     if low_score_rows:
-        hard_blocks.append(_issue("strategy_regime_score_low", f"{len(low_score_rows)} strategy-regime rows below minimum score {settings.engine_readiness_min_strategy_regime_score}."))
+        hard_blocks.append(
+            _issue(
+                "strategy_regime_score_low",
+                f"{len(low_score_rows)} strategy-regime rows below minimum score {settings.engine_readiness_min_strategy_regime_score}.",
+            )
+        )
     checks["strategy_regime_evidence"] = {
         "row_count": len(strategy_regime_performance),
         "qualifying_row_count": len(strategy_regime_rows_ok),
@@ -745,21 +1405,50 @@ async def build_paper_readiness_scorecard(
 
     # PnL attribution and EV calibration.
     open_positions = [item for item in positions if item.get("position_state") == "open"]
-    stale_open_positions = [item for item in open_positions if _ts(item, "opened_at_ms", "updated_at_ms") and generated_at_ms - _ts(item, "opened_at_ms", "updated_at_ms") > 15 * 60 * 1000]
+    stale_open_positions = [
+        item
+        for item in open_positions
+        if _ts(item, "opened_at_ms", "updated_at_ms")
+        and generated_at_ms - _ts(item, "opened_at_ms", "updated_at_ms") > 15 * 60 * 1000
+    ]
     latest_pnl_ms = max([_ts(item, "window_end_ms") for item in pnl_records] or [0])
     if stale_open_positions and not pnl_records:
-        hard_blocks.append(_issue("position_marking_unhealthy", f"{len(stale_open_positions)} open positions older than 15m and zero PnL attribution records."))
-    elif open_positions and (not latest_pnl_ms or generated_at_ms - latest_pnl_ms > max(1, settings.engine_pnl_attribution_interval_seconds) * 2 * 1000):
-        warnings.append(_issue("pnl_attribution_stale", "Open positions exist but PnL attribution is stale or missing.", severity="warning"))
+        hard_blocks.append(
+            _issue(
+                "position_marking_unhealthy",
+                f"{len(stale_open_positions)} open positions older than 15m and zero PnL attribution records.",
+            )
+        )
+    elif open_positions and (
+        not latest_pnl_ms
+        or generated_at_ms - latest_pnl_ms > max(1, settings.engine_pnl_attribution_interval_seconds) * 2 * 1000
+    ):
+        warnings.append(
+            _issue(
+                "pnl_attribution_stale",
+                "Open positions exist but PnL attribution is stale or missing.",
+                severity="warning",
+            )
+        )
     drift_buckets = []
     for bucket, values in (report.get("ev_calibration", {}).get("bucket_summary") or {}).items():
         sample_count = _i(values.get("realized_sample_count"), 0)
         avg_ev = _f(values.get("avg_net_ev_bps"))
         avg_realized = _f(values.get("avg_realized_pnl_usd"))
-        if sample_count >= settings.engine_validation_ev_drift_min_samples and avg_ev > 0 and avg_realized <= settings.engine_validation_ev_drift_loss_usd:
-            drift_buckets.append({"bucket": bucket, "samples": sample_count, "avg_ev_bps": avg_ev, "avg_realized_pnl_usd": avg_realized})
+        if (
+            sample_count >= settings.engine_validation_ev_drift_min_samples
+            and avg_ev > 0
+            and avg_realized <= settings.engine_validation_ev_drift_loss_usd
+        ):
+            drift_buckets.append(
+                {"bucket": bucket, "samples": sample_count, "avg_ev_bps": avg_ev, "avg_realized_pnl_usd": avg_realized}
+            )
     if drift_buckets:
-        warnings.append(_issue("ev_calibration_drift", f"Positive-EV buckets underperforming: {drift_buckets[:3]}", severity="warning"))
+        warnings.append(
+            _issue(
+                "ev_calibration_drift", f"Positive-EV buckets underperforming: {drift_buckets[:3]}", severity="warning"
+            )
+        )
     checks["pnl_calibration"] = {
         "open_position_count": len(open_positions),
         "pnl_attribution_count": len(pnl_records),
@@ -798,16 +1487,44 @@ async def build_paper_readiness_scorecard(
                 )
             )
         elif replay_status not in {"passed", "advisory_pass"}:
-            hard_blocks.append(_issue("replay_comparison_failed", f"latest engine replay {latest_replay.get('replay_id')} status={replay_status}."))
+            hard_blocks.append(
+                _issue(
+                    "replay_comparison_failed",
+                    f"latest engine replay {latest_replay.get('replay_id')} status={replay_status}.",
+                )
+            )
         if replay_window_hours and replay_window_hours < settings.engine_readiness_min_replay_window_hours:
-            hard_blocks.append(_issue("replay_comparison_stale", f"Replay window {replay_window_hours}h below required {settings.engine_readiness_min_replay_window_hours}h."))
+            hard_blocks.append(
+                _issue(
+                    "replay_comparison_stale",
+                    f"Replay window {replay_window_hours}h below required {settings.engine_readiness_min_replay_window_hours}h.",
+                )
+            )
         if replay_sample_size < settings.engine_readiness_min_replay_sample_size:
-            hard_blocks.append(_issue("replay_comparison_stale", f"Replay sample size {replay_sample_size} below required {settings.engine_readiness_min_replay_sample_size}."))
+            hard_blocks.append(
+                _issue(
+                    "replay_comparison_stale",
+                    f"Replay sample size {replay_sample_size} below required {settings.engine_readiness_min_replay_sample_size}.",
+                )
+            )
     elif replay_required:
         hard_blocks.append(_issue("replay_comparison_missing", "No engine shadow replay comparison artifact exists."))
     else:
-        warnings.append(_issue("replay_comparison_missing", "No engine shadow replay comparison artifact exists yet.", severity="warning"))
-    checks["shadow_replay"] = {"latest_replay": latest_replay, "required": replay_required, "ok": replay_ok, "status": replay_status, "window_hours": replay_window_hours, "sample_size": replay_sample_size}
+        warnings.append(
+            _issue(
+                "replay_comparison_missing",
+                "No engine shadow replay comparison artifact exists yet.",
+                severity="warning",
+            )
+        )
+    checks["shadow_replay"] = {
+        "latest_replay": latest_replay,
+        "required": replay_required,
+        "ok": replay_ok,
+        "status": replay_status,
+        "window_hours": replay_window_hours,
+        "sample_size": replay_sample_size,
+    }
 
     # Numeric score.
     score = 100
@@ -815,17 +1532,29 @@ async def build_paper_readiness_scorecard(
     score -= warning_penalty
     if ev_coverage_pct < settings.engine_readiness_min_ev_coverage_pct:
         score -= 10
-    if feature_coverage_pct < settings.engine_readiness_min_feature_coverage_pct or regime_coverage_pct < settings.engine_readiness_min_regime_coverage_pct:
+    if (
+        feature_coverage_pct < settings.engine_readiness_min_feature_coverage_pct
+        or regime_coverage_pct < settings.engine_readiness_min_regime_coverage_pct
+    ):
         score -= 10
     if risk_reject_rate_pct > settings.engine_readiness_max_risk_reject_rate_pct:
         score -= 10
-    if allocation_rate_pct < settings.engine_readiness_min_allocation_rate_pct or allocation_rate_pct > settings.engine_readiness_max_allocation_rate_pct:
+    if (
+        allocation_rate_pct < settings.engine_readiness_min_allocation_rate_pct
+        or allocation_rate_pct > settings.engine_readiness_max_allocation_rate_pct
+    ):
         score -= 8
     if concentration_gate_active and dominant_share_pct > settings.engine_readiness_max_strategy_allocation_share_pct:
         score -= 10
-    if concentration_gate_active and dominant_family_share_pct > settings.engine_readiness_max_strategy_family_allocation_share_pct:
+    if (
+        concentration_gate_active
+        and dominant_family_share_pct > settings.engine_readiness_max_strategy_family_allocation_share_pct
+    ):
         score -= 10
-    if concentration_gate_active and dominant_symbol_strategy_share_pct > settings.engine_readiness_max_symbol_strategy_allocation_share_pct:
+    if (
+        concentration_gate_active
+        and dominant_symbol_strategy_share_pct > settings.engine_readiness_max_symbol_strategy_allocation_share_pct
+    ):
         score -= 10
     if council_review_coverage_pct < settings.engine_readiness_min_council_review_coverage_pct:
         score -= 10
@@ -837,7 +1566,10 @@ async def build_paper_readiness_scorecard(
         score -= 10
     if flat_candidate_count and flat_no_trade_risk_coverage_pct < 100.0:
         score -= 10
-    if matured_outcome_attribution_coverage_pct < settings.engine_readiness_min_matured_outcome_attribution_coverage_pct:
+    if (
+        matured_outcome_attribution_coverage_pct
+        < settings.engine_readiness_min_matured_outcome_attribution_coverage_pct
+    ):
         score -= 10
     if strategy_regime_evidence_coverage_pct < settings.engine_readiness_min_strategy_regime_evidence_coverage_pct:
         score -= 10
@@ -845,7 +1577,9 @@ async def build_paper_readiness_scorecard(
         score -= 8
     if fill_failure_rate_pct > settings.engine_readiness_max_fill_failure_rate_pct:
         score -= 8
-    if any(item.get("code") == "pnl_attribution_stale" for item in warnings) or any(item.get("code") == "position_marking_unhealthy" for item in hard_blocks):
+    if any(item.get("code") == "pnl_attribution_stale" for item in warnings) or any(
+        item.get("code") == "position_marking_unhealthy" for item in hard_blocks
+    ):
         score -= 10
     if drift_buckets:
         score -= 15
@@ -877,7 +1611,9 @@ async def build_paper_readiness_scorecard(
     )
     metrics = {
         "candidate_count": candidate_count_for_gate,
-        "ev_estimate_count": _i(exact_counts.get("ev_estimate_count"), len(ev_estimates)) if exact_counts else _i((report.get("summary") or {}).get("ev_estimate_count"), len(ev_estimates)),
+        "ev_estimate_count": _i(exact_counts.get("ev_estimate_count"), len(ev_estimates))
+        if exact_counts
+        else _i((report.get("summary") or {}).get("ev_estimate_count"), len(ev_estimates)),
         "allocation_count": allocation_count_for_gate,
         "allocated_count": allocated_count,
         "shadow_intent_count": shadow_intent_count_for_gate,
@@ -909,7 +1645,11 @@ async def build_paper_readiness_scorecard(
         "avg_slippage_bps": avg_slippage_bps if measured_report_count else None,
         "fill_failure_rate_pct": fill_failure_rate_pct,
         "open_position_count": len(open_positions),
-        "candidate_outcome_attribution_count": _i(exact_counts.get("candidate_outcome_attribution_count"), len(candidate_outcomes)) if exact_counts else len(candidate_outcomes),
+        "candidate_outcome_attribution_count": _i(
+            exact_counts.get("candidate_outcome_attribution_count"), len(candidate_outcomes)
+        )
+        if exact_counts
+        else len(candidate_outcomes),
         "pnl_attribution_count": _i((report.get("summary") or {}).get("pnl_attribution_count"), len(pnl_records)),
         "observed_shadow_hours": observed_hours,
         "run_count": run_count,
@@ -947,8 +1687,12 @@ def _wave1d_reports(
     portfolio_concentration_events: list[dict[str, Any]],
     latest_replay: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    by_family: dict[str, dict[str, Any]] = defaultdict(lambda: {"candidate_count": 0, "outcome_count": 0, "avg_score": 0.0, "scores": []})
-    by_regime: dict[str, dict[str, Any]] = defaultdict(lambda: {"candidate_count": 0, "outcome_count": 0, "avg_net_return_bps": 0.0, "returns": []})
+    by_family: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"candidate_count": 0, "outcome_count": 0, "avg_score": 0.0, "scores": []}
+    )
+    by_regime: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"candidate_count": 0, "outcome_count": 0, "avg_net_return_bps": 0.0, "returns": []}
+    )
     for candidate in candidates:
         metadata = _metadata(candidate)
         family = str(metadata.get("strategy_family") or candidate.get("strategy_family") or "unknown")
@@ -1008,11 +1752,20 @@ def _recommendation(hard_blocks: list[dict[str, str]], warnings: list[dict[str, 
         return "expand_strategy_opportunity_coverage"
     if "insufficient_sample_size" in codes or "strategy_concentration_observation" in codes:
         return "collect_balanced_evidence"
-    if "strategy_dominance" in codes or "strategy_allocation_dominance" in codes or "strategy_family_allocation_dominance" in codes or "symbol_strategy_allocation_dominance" in codes:
+    if (
+        "strategy_dominance" in codes
+        or "strategy_allocation_dominance" in codes
+        or "strategy_family_allocation_dominance" in codes
+        or "symbol_strategy_allocation_dominance" in codes
+    ):
         return "balance_shadow_evidence"
     if "risk_reject_spike_critical" in codes or "risk_reject_rate_high" in codes:
         return "review_risk_rejects"
-    if "replay_comparison_missing" in codes or "replay_comparison_failed" in codes or "replay_comparison_stale" in codes:
+    if (
+        "replay_comparison_missing" in codes
+        or "replay_comparison_failed" in codes
+        or "replay_comparison_stale" in codes
+    ):
         return "run_replay_comparison"
     return "continue_shadow"
 
@@ -1025,22 +1778,45 @@ def _next_actions(hard_blocks: list[dict[str, str]], warnings: list[dict[str, st
     if "missing_core_data" in codes or "engine_loop_stale" in codes:
         actions.append("Fix feature/regime freshness and verify the engine loop is running without errors.")
     if "paper_intents_in_shadow_only" in codes or "live_enabled" in codes or "live_intents_present" in codes:
-        actions.append("Keep ENGINE_PAPER_ENABLED=false, ENGINE_EXECUTION_MODES=shadow, and ENGINE_LIVE_ENABLED=false before further review.")
+        actions.append(
+            "Keep ENGINE_PAPER_ENABLED=false, ENGINE_EXECUTION_MODES=shadow, and ENGINE_LIVE_ENABLED=false before further review."
+        )
     if "risk_reject_spike_critical" in codes or "risk_reject_rate_high" in codes:
         actions.append("Review latest risk rejects and stale/invalid data violations before promotion.")
     if "candidate_risk_gateway_coverage_low" in codes or "flat_no_trade_risk_evidence_coverage_low" in codes:
-        actions.append("Verify every trade and no-trade candidate has candidate-level RiskGateway evidence before promotion.")
-    if "strategy_dominance" in codes or "strategy_allocation_dominance" in codes or "strategy_family_allocation_dominance" in codes or "symbol_strategy_allocation_dominance" in codes:
-        actions.append("Use the shadow evidence-admission quotas to balance strategy/family/symbol samples; retain the current paper hard caps.")
+        actions.append(
+            "Verify every trade and no-trade candidate has candidate-level RiskGateway evidence before promotion."
+        )
+    if (
+        "strategy_dominance" in codes
+        or "strategy_allocation_dominance" in codes
+        or "strategy_family_allocation_dominance" in codes
+        or "symbol_strategy_allocation_dominance" in codes
+    ):
+        actions.append(
+            "Use the shadow evidence-admission quotas to balance strategy/family/symbol samples; retain the current paper hard caps."
+        )
     if "strategy_concentration_observation" in codes:
-        actions.append("Continue collecting directional shadow intents; concentration remains report-only until the minimum sample is met.")
+        actions.append(
+            "Continue collecting directional shadow intents; concentration remains report-only until the minimum sample is met."
+        )
     if "replay_comparison_insufficient_data" in codes:
-        actions.append("Continue shadow collection until the replay candidate, approved-allocation, and shadow-intent samples mature.")
-    if "replay_comparison_missing" in codes or "replay_comparison_stale" in codes or "replay_comparison_failed" in codes:
+        actions.append(
+            "Continue shadow collection until the replay candidate, approved-allocation, and shadow-intent samples mature."
+        )
+    if (
+        "replay_comparison_missing" in codes
+        or "replay_comparison_stale" in codes
+        or "replay_comparison_failed" in codes
+    ):
         actions.append("Run an engine shadow replay comparison artifact for the readiness window.")
     if "position_marking_unhealthy" in codes or "pnl_attribution_stale" in codes:
         actions.append("Complete the simulated PnL attribution loop before enabling paper fills.")
-    if "insufficient_active_strategy_count" in codes or "insufficient_active_strategy_family_count" in codes or "strategy_regime_evidence_coverage_low" in codes:
+    if (
+        "insufficient_active_strategy_count" in codes
+        or "insufficient_active_strategy_family_count" in codes
+        or "strategy_regime_evidence_coverage_low" in codes
+    ):
         actions.append("Continue shadow collection until diversified strategy-regime evidence is populated.")
     if not actions and recommendation == "ready_for_paper":
         actions.append("Proceed to human review of the paper-mode promotion runbook; do not enable live execution.")

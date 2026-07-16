@@ -61,6 +61,9 @@ def test_canonical_market_universe_migration_declares_identity_and_backfill():
     for identity_column in ["instrument_id", "underlying_id", "venue_id", "provider_symbol"]:
         assert identity_column in text
     assert "_backfill_legacy_instrument_identity" in text
+    assert "CREATE TEMPORARY TABLE legacy_instrument_identity_map ON COMMIT DROP AS" in text
+    assert "SHA256(CONVERT_TO" in text
+    assert "bind.execute" not in text
     assert "pre_0030" in text
 
 
@@ -74,6 +77,26 @@ def test_operational_incident_and_newswire_repair_migrations_are_chained():
     assert 'revision = "0032_repair_newswire_reasons"' in repair
     assert 'down_revision = "0031_operational_incidents"' in repair
     assert "symbol_match_reasons" in repair
+    assert "jsonb_object_agg" in repair
+    assert "bind.execute" not in repair
+
+
+def test_engine_evidence_hardening_migration_declares_fail_closed_evidence_tables():
+    text = Path("alembic/versions/0034_engine_evidence_hardening.py").read_text()
+
+    assert 'revision = "0034_engine_evidence_hardening"' in text
+    assert 'down_revision = "0033_world_model_v2"' in text
+    for table in ["strategy_version_policies", "execution_cost_quotes"]:
+        assert f'"{table}"' in text
+    for column in [
+        "allocation_scope",
+        "gross_ev_bps",
+        "execution_adjusted_return_bps",
+        "execution_cost_quality",
+    ]:
+        assert column in text
+    assert 'sa.literal("frozen")' in text
+    assert "from_select" in text
 
 
 def test_exact_readiness_aggregates_execute_against_repository_schema(tmp_path: Path):
@@ -109,7 +132,7 @@ def test_exact_readiness_aggregates_execute_against_repository_schema(tmp_path: 
 
         assert aggregates["counts"]["candidate_count"] == 1
         assert aggregates["coverage"]["candidate_strategy_metadata_covered_count"] == 1
-        assert aggregates["breadth"]["raw_paper_eligible_strategies"] == ["strategy_1"]
+        assert aggregates["breadth"]["raw_paper_eligible_strategies"] == []
         assert aggregates["window"]["semantics"] == "[start_ms,end_ms)"
 
     anyio.run(run)

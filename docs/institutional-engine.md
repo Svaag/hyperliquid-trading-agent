@@ -20,8 +20,10 @@ NormalizedEvent
   -> FeatureValue / FeatureSnapshot
   -> RegimeVector
   -> AlphaCandidate
+  -> exact StrategyVersionPolicy
+  -> size-specific ExecutionCostQuote
   -> EVEstimate
-  -> AllocationDecision
+  -> research / paper-eligible AllocationDecision
   -> RiskGateway.check_order_intent
   -> EvidencePack / DebateDecision when review value is high
   -> OrderIntent
@@ -43,10 +45,13 @@ Key modules:
 - `feature_store.py` — point-in-time feature values/snapshots
 - `regime.py` — `RegimeVector` computation
 - `alpha/` — initial alpha families
-- `scorer.py` — deterministic EV fallback and offline training scaffold
+- `scorer.py` — strict native-horizon hierarchical empirical scorer and zero-edge fallback
+- `promotion.py` — immutable exact-version promotion policy and fail-closed defaults
+- `time_block_stats.py` — purged non-overlapping time-block confidence intervals
+- `strategy_research.py` — predeclared OFI/liquidity-vacuum research and absorption redesign gates
 - `portfolio_allocator.py` — portfolio-aware risk allocation
 - `debate_adjudicator.py` — EvidencePack + DebateDecision authority boundary
-- `execution.py` — PaperAdapter / ShadowAdapter
+- `execution.py` — venue/fee-tier/order-book depth simulation plus PaperAdapter / ShadowAdapter
 - `position_manager.py` — PositionThesis state lifecycle
 - `routes.py` — read-only `/engine/*` endpoints
 
@@ -59,6 +64,14 @@ ENGINE_EXECUTION_MODES=shadow
 ENGINE_SHADOW_ENABLED=true
 ENGINE_PAPER_ENABLED=false
 ENGINE_LIVE_ENABLED=false
+ENGINE_APPROVED_SCORER_MODEL_ID=
+ENGINE_SCORER_FALLBACK_MODE=no_edge
+ENGINE_EXECUTION_FEE_ACCOUNT_ADDRESS=
+ENGINE_EXECUTION_BOOK_MAX_AGE_MS=15000
+ENGINE_EXECUTION_FEE_CACHE_TTL_MS=300000
+ENGINE_PROMOTION_MIN_EFFECTIVE_BLOCKS=30
+ENGINE_PROMOTION_BOOTSTRAP_ITERATIONS=10000
+ENGINE_READINESS_MAX_STRICT_OUTCOME_ROWS=100000
 ENGINE_ALPHA_CATALOG_MODE=integrated
 ENGINE_CROSS_VENUE_DEXES=lighter,xyz,alpaca:paper
 ENGINE_WAVE1C_ENABLED=true
@@ -104,7 +117,7 @@ ENGINE_REPLAY_MIN_SAMPLE_CANDIDATES=50
 
 ## Discord validation digest
 
-When `ENGINE_ENABLED=true`, `ENGINE_VALIDATION_DIGEST_ENABLED=true`, `DISCORD_BOT_TOKEN` is set, and `AUTONOMY_ALERT_CHANNEL_ID` is configured, the app posts scheduled engine validation digests to Discord. The digest summarizes shadow candidates, EV buckets, allocation rate, risk rejects, simulated execution, and PnL attribution by strategy.
+When `ENGINE_ENABLED=true`, `ENGINE_VALIDATION_DIGEST_ENABLED=true`, `DISCORD_BOT_TOKEN` is set, and `AUTONOMY_ALERT_CHANNEL_ID` is configured, the app posts scheduled engine validation digests to Discord. The digest reports research and paper-eligible allocation scopes separately, execution-cost quality, effective non-overlapping blocks, confidence intervals, and the actual readiness blocker codes. Research candidates are deduplicated by strategy version, asset, side, horizon, and blocker set rather than candidate ID.
 
 Alert conditions include stale engine loop, engine runtime errors, paper intents/reports in shadow-only mode, live mode enabled, risk reject spikes, missing/stale feature or regime data, and EV calibration drift once realized attribution samples exist.
 
@@ -116,15 +129,17 @@ Eligible candidates are ranked by net EV, risk-adjusted utility, confidence, and
 
 ## Paper-readiness scorecard
 
-`GET /engine/readiness` returns a deterministic conservative promotion scorecard. Paper readiness is blocked by live flags, paper leakage during shadow-only mode, stale engine loops, runtime errors, insufficient shadow observation/sample size, missing core feature/regime data, critical risk-reject spikes, failed replay comparisons, and unhealthy PnL marking.
+`GET /engine/readiness` returns a deterministic conservative promotion scorecard. Paper readiness is blocked by live flags, paper leakage during shadow-only mode, stale engine loops, runtime errors, insufficient shadow observation/sample size, missing core feature/regime data, critical risk-reject spikes, failed replay comparisons, unhealthy PnL marking, missing exact-version approval, or weak measured execution evidence.
 
-The default gate requires 24h shadow observation, at least 100 engine runs, 250 candidates, 50 shadow intents, 95% EV/feature/regime coverage, 100% candidate strategy metadata coverage, 95%+ Council review coverage, 100% RiskGateway coverage, at least 5 paper-eligible directional alpha strategies across 3 paper-eligible families, at least 20 matured candidate outcomes for each active paper-eligible strategy, strategy/family/symbol-strategy concentration below 55%/60%/35%, a latest replay with `passed` or `advisory_pass`, strategy-regime evidence, no hard blocks, and score >=85. Concentration is report-only before 50 directional shadow intents. In the default integrated catalog, qualifying Wave 1 and Wave 2 activity contributes to the same gates. Intentionally shadow-only sources such as Newswire shadow alpha remain visible separately.
+The default gate requires 24h shadow observation, at least 100 engine runs, 250 candidates, 50 shadow intents, 95% EV/feature/regime coverage, 100% candidate strategy metadata coverage, 95%+ Council review coverage, 100% RiskGateway coverage, at least 5 explicitly paper-approved directional strategy versions across 3 families, at least 20 matured outcomes per active strategy, and at least 30 effective time blocks per strategy/horizon. Both measured execution-adjusted return and realized-R 95% lower bounds must be positive. Concentration must remain below 55%/60%/35%, the latest replay must be `passed` or `advisory_pass`, and there must be no hard blocks with score >=85. Concentration is report-only before 50 directional shadow intents.
+
+Five- and fifteen-minute outcomes use one-hour blocks, one-hour outcomes use four-hour blocks, four-hour outcomes use daily blocks, and 24-hour outcomes use seven-day blocks. Boundary-crossing windows are purged. Candidates first collapse to an instrument/block mean; instruments are then equal-weighted inside each block. Fewer than eight blocks is descriptive only, and thousands of overlapping candidates never count as thousands of independent trials.
 
 `regime_defensive_flat_v1` is an explicit no-trade control. Its candidates receive RiskGateway/Council evidence, but never enter allocation-share denominators and never create an order intent. Directional shadow sampling uses separate evidence-admission quotas (45% strategy target, 60% family cap, 35% symbol-strategy cap) after raw candidates and governance evidence are persisted. This balances learnable evidence without deleting candidates or weakening the paper gate.
 
 ## Strategy portfolio, Council, replay, and bandit reports
 
-Wave 1 and Wave 2 are one **evidence-producing strategy portfolio**. All Wave 2A/2B/2C strategies are first-class and paper-eligible under the same candidate, EV, allocation, RiskGateway, Council, replay, and readiness controls as Wave 1. Paper and live execution remain controlled globally and are disabled by default.
+Wave 1 and Wave 2 are one **evidence-producing research portfolio**. Migration `0034` freezes every exact strategy version already in the catalog. A previously unseen exact version defaults to `research_only`; no runtime endpoint can mutate it to `paper_approved`. Environment flags alone therefore cannot promote the current versions. A separately reviewed governance change must approve a new exact version after its strict, measured evidence passes the gates.
 
 Wave 1A locks the strategy-regime candidate nucleus:
 
@@ -152,7 +167,7 @@ Canonical Newswire story revisions can be bridged into the engine with `ENGINE_N
 
 Every candidate builds a `CandidateTradePacket`, receives a deterministic role-based Council review, and must pass RiskGateway plus Council before a paper/shadow execution report can exist. The offline contextual-bandit endpoint is report-only: it writes recommendations with `auto_apply_allowed=false` and never mutates config, risk limits, or orders.
 
-All twelve Wave 2A/2B/2C strategies are defined and run as first-class strategies with `activation_scope=paper_shadow`, `paper_eligible=true`, and `operator_promotion_required=false`. They are evaluated and reported in the same engine digest and readiness population as Wave 1: 2A lead/lag, liquidity vacuum, stop-cluster, and liquidation divergence; 2B crowded long/short unwind and liquidation-cluster followthrough/exhaustion; 2C perp-basis momentum/reversion, funding-curve dislocation, and carry-risk-off. Wave 2D is a constrained report-only policy recommender rather than an alpha strategy and may not place orders, raise leverage, bypass RiskGateway/Council, or auto-apply production config.
+All twelve Wave 2A/2B/2C strategies remain defined and run through the common research evidence path: 2A lead/lag, liquidity vacuum, stop-cluster, and liquidation divergence; 2B crowded long/short unwind and liquidation-cluster followthrough/exhaustion; 2C perp-basis momentum/reversion, funding-curve dislocation, and carry-risk-off. Their exact current versions are frozen, their allocations are labeled `research`, and they cannot produce paper intents. Wave 2D remains a report-only policy recommender and may not place orders, raise leverage, bypass RiskGateway/Council, or auto-apply production config.
 
 ## Canonical watchlist and provider identities
 
@@ -185,7 +200,9 @@ The engine PnL attribution loop marks simulated paper/shadow positions from Hype
 
 `GET /engine/candidate-funnel` reconstructs the first terminal stage for each candidate from its pre-Council packet through shadow intent and matured attribution. It reports downstream reason codes separately, so a Council veto cannot also masquerade as an allocator root cause. `GET /engine/strategy-funnel` records every strategy/asset evaluation after migration `0029`, including selector gates, feature presence/age, trigger outcome, candidate count, and structured no-candidate reasons. Historical periods without that telemetry are reported as unavailable, not as zero activity.
 
-`GET /engine/signal-quality` uses the fixed grain `(candidate_id, outcome_window)`, canonical regime/allocation joins, and strict `feature_store_mid` marks. It never pools horizons for promotion and labels net returns as modeled rather than execution PnL. `POST /engine/news-risk-counterfactuals/run` evaluates the persisted Newswire overlay on the same candidate cohort; its replay artifact is research-only and cannot replace the readiness replay.
+`GET /engine/signal-quality` uses the fixed grain `(candidate_id, outcome_window)`, canonical regime/allocation joins, and strict `feature_store_mid` marks. It never pools horizons for promotion. Gross return, modeled net return, and measured execution-adjusted return are distinct; configured, stale, top-of-book-only, or unavailable costs never qualify as measured. Confidence intervals use the purged block method above.
+
+`GET /engine/strategy-research` runs predeclared grids for positive-gross OFI and liquidity-vacuum slices. Absorption uses a separate, immediately measurable redesign gate requiring large imbalance, two-sided visible depth, depth replenishment, and constrained five-minute price response before a new research-only version can be proposed; aggressive-trade-to-depth is retained as a future feature backlog item. Multiple tests use Benjamini-Hochberg control and expanding walk-forward stability; passing results create no runtime strategy or promotion automatically. `POST /engine/news-risk-counterfactuals/run` remains research-only and cannot replace the readiness replay.
 
 See `docs/engine-paper-readiness-runbook.md` for promotion and rollback steps.
 
@@ -259,6 +276,9 @@ GET /engine/execution-reports
 GET /engine/positions
 GET /engine/reconciliation
 GET /engine/model-versions
+GET /engine/strategy-version-policies
+GET /engine/execution-cost-quotes
+GET /engine/strategy-research
 GET /engine/risk-rejects
 GET /engine/pnl-attribution
 GET /engine/validation-report

@@ -15,7 +15,9 @@ class RiskGateway:
     It never relaxes limits and never creates broker/exchange actions.
     """
 
-    def __init__(self, *, settings: Settings, repository: Any | None = None, decision_context_recorder: Any | None = None):
+    def __init__(
+        self, *, settings: Settings, repository: Any | None = None, decision_context_recorder: Any | None = None
+    ):
         self.settings = settings
         self.repository = repository
         self.decision_context_recorder = decision_context_recorder
@@ -38,7 +40,9 @@ class RiskGateway:
         violations: list[dict[str, Any]] = []
         mode = str(getattr(intent, "execution_mode", "paper") or "paper")
         if mode not in {"paper", "shadow"}:
-            violations.append(_violation("unsupported_execution_mode", "Only paper/shadow engine execution modes are permitted."))
+            violations.append(
+                _violation("unsupported_execution_mode", "Only paper/shadow engine execution modes are permitted.")
+            )
         if self.settings.engine_live_enabled:
             violations.append(_violation("engine_live_enabled", "ENGINE_LIVE_ENABLED must remain false."))
         target_size = _float(getattr(intent, "target_size", None))
@@ -62,7 +66,9 @@ class RiskGateway:
             violations.append(_violation("stale_intent", "OrderIntent is older than 10 minutes."))
 
         market_snapshot = market_snapshot or {}
-        last_price_at_ms = _int(market_snapshot.get("last_price_at_ms") or market_snapshot.get("last_market_data_at_ms"))
+        last_price_at_ms = _int(
+            market_snapshot.get("last_price_at_ms") or market_snapshot.get("last_market_data_at_ms")
+        )
         last_orderbook_at_ms = _int(market_snapshot.get("last_orderbook_at_ms"))
         last_funding_oi_at_ms = _int(market_snapshot.get("last_funding_oi_at_ms"))
         if last_price_at_ms is not None and now_ms - last_price_at_ms > 120_000:
@@ -83,7 +89,9 @@ class RiskGateway:
         if target_notional is not None and equity is not None and equity > 0:
             max_single = equity * self.settings.autonomy_paper_max_single_name_exposure_pct / 100
             if target_notional > max_single:
-                violations.append(_violation("single_name_exposure_limit", "Intent exceeds single-name exposure limit."))
+                violations.append(
+                    _violation("single_name_exposure_limit", "Intent exceeds single-name exposure limit.")
+                )
         open_risk_usd = _float(portfolio_snapshot.get("open_risk_usd"))
         max_open_risk_usd = _float(portfolio_snapshot.get("max_open_risk_usd"))
         if open_risk_usd is not None and max_open_risk_usd is not None and open_risk_usd > max_open_risk_usd:
@@ -107,8 +115,18 @@ class RiskGateway:
             violations.append(_violation("kill_switch_active", "A kill switch is active."))
         if operator_context.get("config_approved") is False:
             violations.append(_violation("config_not_approved", "Config version is not approved."))
-        if operator_context.get("model_approved") is False:
-            violations.append(_violation("model_not_approved", "Model version is not approved."))
+        # Unapproved models/strategy versions may continue collecting shadow
+        # research evidence, but they are hard blocks for paper eligibility.
+        if mode == "paper" and operator_context.get("model_approved") is False:
+            violations.append(_violation("model_not_approved", "Model version is not approved for paper."))
+        if mode == "paper" and operator_context.get("strategy_version_approved") is False:
+            violations.append(
+                _violation("strategy_version_not_approved", "Exact strategy version is not approved for paper.")
+            )
+        if mode == "paper" and operator_context.get("execution_cost_measured") is False:
+            violations.append(
+                _violation("execution_cost_not_measured", "Measured venue execution costs are required for paper.")
+            )
 
         decision = RiskGatewayDecision(
             decision_id=f"rgd_{uuid4().hex}",
@@ -121,7 +139,23 @@ class RiskGateway:
             portfolio_snapshot=portfolio_snapshot,
             config_version_id=self._config_version_id(),
             created_at_ms=now_ms,
-            metadata={"asset": getattr(intent, "asset", None), "venue": getattr(intent, "venue", None), "strategy_id": getattr(intent, "strategy_id", None), "exchange_actions": []},
+            metadata={
+                "asset": getattr(intent, "asset", None),
+                "venue": getattr(intent, "venue", None),
+                "strategy_id": getattr(intent, "strategy_id", None),
+                "research_advisories": (
+                    [
+                        code
+                        for code, value in (
+                            ("model_not_approved", operator_context.get("model_approved")),
+                            ("strategy_version_not_approved", operator_context.get("strategy_version_approved")),
+                            ("execution_cost_not_measured", operator_context.get("execution_cost_measured")),
+                        )
+                        if mode == "shadow" and value is False
+                    ]
+                ),
+                "exchange_actions": [],
+            },
         )
         await self.record(decision)
         return decision

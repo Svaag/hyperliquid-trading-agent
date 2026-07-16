@@ -76,7 +76,7 @@ async def build_engine_validation_report(
     latest_pnl_records = [*latest_pnl_by_position.values(), *unpositioned_pnl]
 
     count_method = getattr(repository, "get_engine_validation_counts", None)
-    headline_counts: dict[str, int] = {}
+    headline_counts: dict[str, Any] = {}
     if callable(count_method):
         headline_counts = await count_method(start_ms=start_ms, end_ms=generated_at_ms)
 
@@ -108,7 +108,9 @@ async def build_engine_validation_report(
     ev_by_candidate: dict[str, list[dict[str, Any]]] = defaultdict(list)
     ev_values_by_strategy: dict[str, list[float]] = defaultdict(list)
     utility_values_by_strategy: dict[str, list[float]] = defaultdict(list)
-    calibration_buckets: dict[str, dict[str, Any]] = defaultdict(lambda: {"count": 0, "avg_net_ev_bps": 0.0, "avg_uncertainty": 0.0, "avg_realized_pnl_usd": 0.0})
+    calibration_buckets: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"count": 0, "avg_net_ev_bps": 0.0, "avg_uncertainty": 0.0, "avg_realized_pnl_usd": 0.0}
+    )
     bucket_ev: dict[str, list[float]] = defaultdict(list)
     bucket_uncertainty: dict[str, list[float]] = defaultdict(list)
     bucket_realized: dict[str, list[float]] = defaultdict(list)
@@ -180,28 +182,98 @@ async def build_engine_validation_report(
 
     for pnl in latest_pnl_records:
         strategy = _strategy_of(pnl)
-        by_strategy[strategy]["total_pnl_usd"] = round(by_strategy[strategy]["total_pnl_usd"] + _f(pnl.get("total_pnl_usd")), 4)
-        by_strategy[strategy]["alpha_pnl_usd"] = round(by_strategy[strategy]["alpha_pnl_usd"] + _f(pnl.get("alpha_pnl_usd")), 4)
-        by_strategy[strategy]["execution_pnl_usd"] = round(by_strategy[strategy]["execution_pnl_usd"] + _f(pnl.get("execution_pnl_usd")), 4)
+        by_strategy[strategy]["total_pnl_usd"] = round(
+            by_strategy[strategy]["total_pnl_usd"] + _f(pnl.get("total_pnl_usd")), 4
+        )
+        by_strategy[strategy]["alpha_pnl_usd"] = round(
+            by_strategy[strategy]["alpha_pnl_usd"] + _f(pnl.get("alpha_pnl_usd")), 4
+        )
+        by_strategy[strategy]["execution_pnl_usd"] = round(
+            by_strategy[strategy]["execution_pnl_usd"] + _f(pnl.get("execution_pnl_usd")), 4
+        )
 
     candidate_status = Counter(str(item.get("status") or "unknown") for item in candidates)
     allocation_status = Counter(str(item.get("status") or "unknown") for item in allocations)
+    allocation_scope_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    for item in allocations:
+        scope = str(item.get("allocation_scope") or _dict(item.get("metadata")).get("allocation_scope") or "unknown")
+        allocation_scope_counts[scope]["decisions"] += 1
+        if item.get("status") in {"allocate", "reduce", "require_debate"}:
+            allocation_scope_counts[scope]["allocated"] += 1
+    for scope in {"research", "paper_eligible", "defensive", "unknown"}:
+        count_key = f"allocation_scope_{scope}_count"
+        allocated_key = f"allocation_scope_{scope}_allocated_count"
+        if count_key in headline_counts:
+            allocation_scope_counts[scope]["decisions"] = int(headline_counts[count_key])
+            allocation_scope_counts[scope]["allocated"] = int(headline_counts.get(allocated_key, 0))
     risk_violation_counts: Counter[str] = Counter()
     for reject in risk_rejects:
         for violation in reject.get("violations") or []:
-            risk_violation_counts[str(violation)] += 1
+            code = str(violation.get("code") or "unknown") if isinstance(violation, dict) else str(violation)
+            risk_violation_counts[code] += 1
+    if isinstance(headline_counts.get("risk_violation_counts"), dict):
+        risk_violation_counts = Counter(
+            {
+                str(code): int(value or 0)
+                for code, value in headline_counts["risk_violation_counts"].items()
+            }
+        )
 
     total_candidates = int(headline_counts.get("candidate_count", len(candidates)))
     total_allocations = int(headline_counts.get("allocation_count", len(allocations)))
-    total_allocated = int(headline_counts.get("allocated_count", sum(1 for item in allocations if item.get("status") in {"allocate", "reduce", "require_debate"})))
-    total_shadow_intents = int(headline_counts.get("shadow_intent_count", sum(1 for item in intents if item.get("execution_mode") == "shadow")))
-    total_paper_intents = int(headline_counts.get("paper_intent_count", sum(1 for item in intents if item.get("execution_mode") == "paper")))
-    total_live_intents = int(headline_counts.get("live_intent_count", sum(1 for item in intents if item.get("execution_mode") == "live")))
+    total_allocated = int(
+        headline_counts.get(
+            "allocated_count",
+            sum(1 for item in allocations if item.get("status") in {"allocate", "reduce", "require_debate"}),
+        )
+    )
+    total_shadow_intents = int(
+        headline_counts.get("shadow_intent_count", sum(1 for item in intents if item.get("execution_mode") == "shadow"))
+    )
+    total_paper_intents = int(
+        headline_counts.get("paper_intent_count", sum(1 for item in intents if item.get("execution_mode") == "paper"))
+    )
+    total_live_intents = int(
+        headline_counts.get("live_intent_count", sum(1 for item in intents if item.get("execution_mode") == "live"))
+    )
     measured_execution_reports = [
         item
         for item in reports
-        if item.get("status") == "filled" and item.get("avg_fill_px") is not None and _f(item.get("filled_size")) > 0
+        if item.get("status") in {"filled", "partial"}
+        and item.get("avg_fill_px") is not None
+        and _f(item.get("filled_size")) > 0
+        and item.get("cost_quality") == "measured"
     ]
+    measured_report_count = int(
+        headline_counts.get("measured_execution_report_count", len(measured_execution_reports))
+    )
+    measured_slippage_total_bps = _f(
+        headline_counts.get(
+            "measured_slippage_total_bps",
+            sum(_f(item.get("slippage_bps")) for item in measured_execution_reports),
+        )
+    )
+    measured_fees_total_usd = _f(
+        headline_counts.get(
+            "measured_fees_total_usd",
+            sum(_f(item.get("fees_usd")) for item in measured_execution_reports),
+        )
+    )
+    execution_report_count = int(headline_counts.get("execution_report_count", len(reports)))
+    scope_counts_are_exact = bool(headline_counts) and all(
+        f"allocation_scope_{scope}_count" in headline_counts
+        for scope in ("research", "paper_eligible", "defensive", "unknown")
+    )
+    execution_status_counts = (
+        dict(headline_counts["execution_status_counts"])
+        if isinstance(headline_counts.get("execution_status_counts"), dict)
+        else dict(Counter(str(item.get("status") or "unknown") for item in reports))
+    )
+    execution_cost_quality_counts = (
+        dict(headline_counts["execution_cost_quality_counts"])
+        if isinstance(headline_counts.get("execution_cost_quality_counts"), dict)
+        else dict(Counter(str(item.get("cost_quality") or "unavailable") for item in reports))
+    )
     return {
         "generated_at_ms": generated_at_ms,
         "sample_limit": limit,
@@ -213,11 +285,23 @@ async def build_engine_validation_report(
             "allocation_count": total_allocations,
             "allocated_count": total_allocated,
             "allocation_rate_pct": _pct(total_allocated, total_allocations),
+            "allocation_by_scope": {
+                scope: {
+                    "decision_count": counts["decisions"],
+                    "allocated_count": counts["allocated"],
+                    "allocation_rate_pct": _pct(counts["allocated"], counts["decisions"]),
+                }
+                for scope, counts in sorted(allocation_scope_counts.items())
+            },
             "shadow_intent_count": total_shadow_intents,
             "paper_intent_count": total_paper_intents,
             "live_intent_count": total_live_intents,
-            "execution_report_count": int(headline_counts.get("execution_report_count", len(reports))),
-            "open_position_count": int(headline_counts.get("open_position_count", sum(1 for item in positions if item.get("position_state") == "open"))),
+            "execution_report_count": execution_report_count,
+            "open_position_count": int(
+                headline_counts.get(
+                    "open_position_count", sum(1 for item in positions if item.get("position_state") == "open")
+                )
+            ),
             "risk_decision_count": int(headline_counts.get("risk_decision_count", len(risk_decisions))),
             "risk_reject_count": int(headline_counts.get("risk_reject_count", len(risk_rejects))),
             "pnl_attribution_count": int(headline_counts.get("pnl_attribution_count", len(pnl_records))),
@@ -236,19 +320,29 @@ async def build_engine_validation_report(
         "risk_rejects": {
             "count": int(headline_counts.get("risk_reject_count", len(risk_rejects))),
             "violation_counts": dict(risk_violation_counts),
+            "hard_block_codes": sorted(risk_violation_counts),
+            "coverage_scope": "exact_cohort" if "risk_violation_counts" in headline_counts else "detail_sample",
             "latest": risk_rejects[:10],
         },
         "execution_simulations": {
             "intent_count": total_shadow_intents + total_paper_intents + total_live_intents,
-            "report_count": int(headline_counts.get("execution_report_count", len(reports))),
+            "report_count": execution_report_count,
             "shadow_intent_count": total_shadow_intents,
             "paper_intent_count": total_paper_intents,
             "live_intent_count": total_live_intents,
-            "status_counts": dict(Counter(str(item.get("status") or "unknown") for item in reports)),
-            "measurement_state": "measured" if measured_execution_reports else "not_measured",
-            "measured_report_count": len(measured_execution_reports),
-            "avg_slippage_bps": round(_avg([_f(item.get("slippage_bps")) for item in measured_execution_reports]), 4) if measured_execution_reports else None,
-            "fees_usd": round(sum(_f(item.get("fees_usd")) for item in measured_execution_reports), 4) if measured_execution_reports else None,
+            "status_counts": execution_status_counts,
+            "cost_quality_counts": execution_cost_quality_counts,
+            "measurement_state": "measured" if measured_report_count else "not_measured",
+            "measured_report_count": measured_report_count,
+            "execution_adjusted_promotion_eligible_report_count": measured_report_count,
+            "excluded_from_execution_adjusted_performance_count": max(
+                0, execution_report_count - measured_report_count
+            ),
+            "avg_slippage_bps": round(measured_slippage_total_bps / measured_report_count, 4)
+            if measured_report_count
+            else None,
+            "fees_usd": round(measured_fees_total_usd, 4) if measured_report_count else None,
+            "measurement_aggregate_semantics": "exact_cohort" if headline_counts else "detail_sample",
         },
         "pnl_snapshot_semantics": {
             "record_count": int(headline_counts.get("pnl_attribution_count", len(pnl_records))),
@@ -273,7 +367,17 @@ async def build_engine_validation_report(
             "allocation_expected": False,
         },
         "allocation_status_counts": dict(allocation_status),
+        "allocation_scope_semantics": {
+            "research": "frozen or research-only exact strategy versions; shadow evidence only",
+            "paper_eligible": "exact strategy version is paper_approved; still requires approved scorer and measured costs",
+            "defensive": "flat no-trade control",
+            "scope_counts_are_detail_sample": not scope_counts_are_exact,
+        },
     }
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
 def render_engine_validation_dashboard(report: dict[str, Any]) -> str:
@@ -299,10 +403,18 @@ def render_engine_validation_dashboard(report: dict[str, Any]) -> str:
         for strategy, values in by_strategy.items()
     )
     bucket_rows = "".join(
-        "<tr>" + cell(bucket) + cell(values.get("count", 0)) + cell(values.get("avg_net_ev_bps", 0)) + cell(values.get("avg_uncertainty", 0)) + cell(values.get("avg_realized_pnl_usd", 0)) + "</tr>"
+        "<tr>"
+        + cell(bucket)
+        + cell(values.get("count", 0))
+        + cell(values.get("avg_net_ev_bps", 0))
+        + cell(values.get("avg_uncertainty", 0))
+        + cell(values.get("avg_realized_pnl_usd", 0))
+        + "</tr>"
         for bucket, values in (ev.get("bucket_summary") or {}).items()
     )
-    risk_rows = "".join("<tr>" + cell(name) + cell(count) + "</tr>" for name, count in (risk.get("violation_counts") or {}).items())
+    risk_rows = "".join(
+        "<tr>" + cell(name) + cell(count) + "</tr>" for name, count in (risk.get("violation_counts") or {}).items()
+    )
 
     return f"""
 <!doctype html>
@@ -318,14 +430,14 @@ th {{ background: #f6f8fa; }}
 small {{ color: #57606a; }}
 </style></head><body>
 <h1>Engine Validation Dashboard</h1>
-<small>Generated at ms: {html.escape(str(report.get('generated_at_ms')))}</small>
+<small>Generated at ms: {html.escape(str(report.get("generated_at_ms")))}</small>
 <div class=\"cards\">
-  <div class=\"card\">Candidates<b>{summary.get('candidate_count', 0)}</b></div>
-  <div class=\"card\">EV estimates<b>{summary.get('ev_estimate_count', 0)}</b></div>
-  <div class=\"card\">Allocated<b>{summary.get('allocated_count', 0)}</b></div>
-  <div class=\"card\">Shadow intents<b>{summary.get('shadow_intent_count', 0)}</b></div>
-  <div class=\"card\">Risk rejects<b>{summary.get('risk_reject_count', 0)}</b></div>
-  <div class=\"card\">Open positions<b>{summary.get('open_position_count', 0)}</b></div>
+  <div class=\"card\">Candidates<b>{summary.get("candidate_count", 0)}</b></div>
+  <div class=\"card\">EV estimates<b>{summary.get("ev_estimate_count", 0)}</b></div>
+  <div class=\"card\">Allocated<b>{summary.get("allocated_count", 0)}</b></div>
+  <div class=\"card\">Shadow intents<b>{summary.get("shadow_intent_count", 0)}</b></div>
+  <div class=\"card\">Risk rejects<b>{summary.get("risk_reject_count", 0)}</b></div>
+  <div class=\"card\">Open positions<b>{summary.get("open_position_count", 0)}</b></div>
 </div>
 <h2>By strategy</h2>
 <table><thead><tr><th>Strategy</th><th>Candidates</th><th>Allocated</th><th>Shadow intents</th><th>Avg EV bps</th><th>Avg slippage bps</th><th>Total PnL USD</th></tr></thead><tbody>{strategy_rows}</tbody></table>
